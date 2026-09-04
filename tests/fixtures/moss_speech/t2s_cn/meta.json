@@ -1,0 +1,28 @@
+{
+ "case_id": "t2s_cn",
+ "task": "text_instruct_speech_response",
+ "seed": 0,
+ "conversation": [
+  {
+   "role": "user",
+   "content": "用中文介绍一下上海的三到四个著名景点。"
+  }
+ ],
+ "n_new_steps": 200,
+ "n_logits_steps": 200,
+ "logits_kept_steps": 64,
+ "text_vocab": 151680,
+ "audio_vocab": 16512,
+ "audio_codes_extracted": [
+  "..."
+ ],
+ "audio_meta": {
+  "sampling_rate": 24000,
+  "channels": 1,
+  "duration_s": 15.92,
+  "dtype": "float32",
+  "waveform_blake2b": "50f71d8203dd378b59c97eddde10c311"
+ },
+ "audio_codes_full_len": 0,
+ "input_audio_codes": {}
+}

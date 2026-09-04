@@ -1,0 +1,21 @@
+{
+ "case_id": "t2t_short",
+ "task": "text_instruct_text_response",
+ "seed": 0,
+ "conversation": [
+  {
+   "role": "user",
+   "content": "Introduce yourself in one sentence."
+  }
+ ],
+ "n_new_steps": 31,
+ "n_logits_steps": 31,
+ "logits_kept_steps": 31,
+ "text_vocab": 151680,
+ "audio_vocab": 16512,
+ "audio_codes_extracted": [
+  "..."
+ ],
+ "text": "Hello! I am an AI digital assistant designed to provide information, answer questions, and assist with a variety of tasks to the best of my knowledge.",
+ "input_audio_codes": {}
+}

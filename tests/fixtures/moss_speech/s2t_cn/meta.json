@@ -1,0 +1,41 @@
+{
+ "case_id": "s2t_cn",
+ "task": "speech_instruct_text_response",
+ "seed": 0,
+ "conversation": [
+  {
+   "role": "user",
+   "content": {
+    "path": "repos/MOSS-Speech/assets/prompt-cn.wav",
+    "type": "audio/wav"
+   }
+  }
+ ],
+ "n_new_steps": 141,
+ "n_logits_steps": 141,
+ "logits_kept_steps": 64,
+ "text_vocab": 151680,
+ "audio_vocab": 16512,
+ "audio_codes_extracted": [
+  "..."
+ ],
+ "text": "您的概括基本正确。按照治安管理处罚法，参与赌博且赌资较大，一般处五日以下拘留或者五百元以下罚款；情节较重的，处十日以上十五日以下拘留，并处五百元以上三千元以下罚款。至于以营利为目的的聚众赌博或开设赌场，已经构成犯罪，依照刑法追究刑事责任。通常会根据数额、参与人数、持续时间、组织分工、是否使用工具等情节，综合决定刑罚。可能判处有期徒刑、拘役并处罚金；情节特别严重的，刑期更高。需要说明的是，具体定罪量刑仍要由司法机关结合案件事实和最新法律规定作出认定。",
+ "input_audio_codes": {
+  "turn0": {
+   "path": "repos/MOSS-Speech/assets/prompt-cn.wav",
+   "n_codes": 343,
+   "first10": [
+    2861,
+    10370,
+    11506,
+    2252,
+    10663,
+    10663,
+    11135,
+    11135,
+    7812,
+    14633
+   ]
+  }
+ }
+}

@@ -1,0 +1,49 @@
+{
+ "case_id": "mixed_multiturn",
+ "task": "speech_instruct_text_response",
+ "seed": 0,
+ "conversation": [
+  {
+   "role": "user",
+   "content": "My name is Alice and I like hiking."
+  },
+  {
+   "role": "assistant",
+   "content": "Nice to meet you, Alice! Hiking is a great way to enjoy nature."
+  },
+  {
+   "role": "user",
+   "content": {
+    "path": "repos/MOSS-Speech/assets/prompt-cn.wav",
+    "type": "audio/wav"
+   }
+  }
+ ],
+ "n_new_steps": 107,
+ "n_logits_steps": 107,
+ "logits_kept_steps": 64,
+ "text_vocab": 151680,
+ "audio_vocab": 16512,
+ "audio_codes_extracted": [
+  "..."
+ ],
+ "text": "这段话概括了中国关于赌博的治安与刑事规定。简单说，第一，参与赌博且赌资较大，属于治安违法，可以处五日以下拘留，或者五百元以下罚款；情节较重的，十日以上十五日以下拘留，并处五百元以上三千元以下罚款。第二，以营利为目的的聚众赌博，或者开设赌场，构成犯罪，将依法追究刑事责任。总之，不要参与赌博；涉及违法要配合调查处理，遇到涉嫌犯罪的情况应立即报警。",
+ "input_audio_codes": {
+  "turn2": {
+   "path": "repos/MOSS-Speech/assets/prompt-cn.wav",
+   "n_codes": 343,
+   "first10": [
+    2861,
+    10370,
+    11506,
+    2252,
+    10663,
+    10663,
+    11135,
+    11135,
+    7812,
+    14633
+   ]
+  }
+ }
+}

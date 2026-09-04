@@ -57,3 +57,6 @@ asr_seedtts_results.json
 # XPU installer lock/backup
 .pyproject.xpu.lock
 .pyproject.cuda.bak
+
+# MOSS-Speech P0 golden fixtures (tracked despite global media ignores)
+!tests/fixtures/moss_speech/**
