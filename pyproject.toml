@@ -105,6 +105,15 @@ fun-cosyvoice3 = [
     "lightning==2.6.5",
     "matplotlib==3.11.1",
 ]
+moss-speech = [
+    # inference-only closure for the vendored MOSS-Speech codec components
+    # (see sglang_omni/models/moss_speech/components/VENDORED_SOURCES.md);
+    # torch/torchaudio/transformers/numpy/scipy come with the base install.
+    "librosa>=0.10",
+    "einops>=0.7",
+    "onnxruntime>=1.17",
+    "soundfile>=0.12",
+]
 
 [project.scripts]
 sgl-omni = "sglang_omni.cli:app"

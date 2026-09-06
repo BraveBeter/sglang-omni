@@ -1,0 +1,4 @@
+Source: fnlp/MOSS-Speech-Codec HF snapshot eeec733e4e1dea7da444d332d8e1621ef257414c.
+The upstream HF repo ships no LICENSE file (recorded as a P0 open item);
+code in this directory is a trimmed inference port. Treat as Apache-2.0
+pending confirmation with the MOSS team (same as the model repo code).
