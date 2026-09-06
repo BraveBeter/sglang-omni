@@ -187,10 +187,14 @@ class MossSpeechCodecAdapter:
         *,
         sampling_rate: Optional[int] = None,
     ) -> VoiceConditioning:
-        """24 kHz waveform (or rescalable input) -> full voice conditioning.
+        """Reference audio -> full voice conditioning.
 
-        Uses only the encoder + standalone mel/campplus feature paths; the
-        decoder stack is never required.
+        Resample-chain parity with the reference decode path (matters for
+        bit-exactness): prompt **codes** are encoded from the ORIGINAL sample
+        rate directly to 16 kHz (reference `codec.encode([path])`), while
+        mel/xvector go through the 24 kHz chain (reference `_extract_speech_feat`
+        + 24k->16k resample). Uses only the encoder + standalone feature
+        paths; the decoder stack is never required.
         """
         from .voice import MossSpeechVoiceHook
 
@@ -198,12 +202,13 @@ class MossSpeechCodecAdapter:
         if self._encoder is None:
             raise CodecAdapterError("voice enrollment requires the codec encoder")
         audio, sr = self._normalize_audio(wav, sampling_rate)
-        if sr != SAMPLE_RATE_OUT:
-            import torchaudio
+        orig_audio, orig_sr = audio, sr  # codes path: original rate -> 16 kHz
+        import torchaudio
 
+        if sr != SAMPLE_RATE_OUT:
             audio = torchaudio.transforms.Resample(orig_freq=sr, new_freq=SAMPLE_RATE_OUT)(audio)
         hook = MossSpeechVoiceHook(
-            encode_codes_fn=lambda w: self.encode([w])[0],
+            encode_codes_fn=lambda w: self.encode([(orig_audio, orig_sr)])[0],
             speaker_encoder=self._speaker_encoder,
         )
         return hook.encode_one(hook.normalize_input(audio))
