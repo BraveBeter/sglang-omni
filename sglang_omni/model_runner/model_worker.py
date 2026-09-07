@@ -126,6 +126,17 @@ class ModelWorker:
     def _apply_arch_override(model_config: ModelConfig, arch: str) -> None:
         """Override model config for a sub-model architecture."""
         model_config.hf_config.architectures = [arch]
+        if arch == "MossSpeechForCausalLM":
+            cfg = model_config.hf_config
+            model_config.hf_text_config = cfg
+            # HF num_hidden_layers stays 36 (checkpoint semantics: 32 shared
+            # + 4 modality). Both 4-layer tails hold KV at every position, so
+            # the allocator must see num_shared + 2 * num_modality = 40
+            # attention layers (Whisper's doubled-layer precedent).
+            model_config.num_attention_layers = (
+                int(cfg.num_shared_layers) + 2 * int(cfg.num_modality_layers)
+            )
+            return
         if arch == "WhisperForConditionalGeneration":
             cfg = model_config.hf_config
             model_config.hf_text_config = cfg

@@ -451,6 +451,7 @@ class SGLModelRunner(ModelRunner):
             "ArkasrForConditionalGeneration": "sglang_omni.models.arkasr.sglang_model:ArkasrForConditionalGeneration",
             "DotsTTSForConditionalGeneration": "sglang_omni.models.dots_tts.sglang_model:DotsTTSSGLangModel",
             "FunCosyVoice3SGLangModel": "sglang_omni.models.fun_cosyvoice3.sglang_model:FunCosyVoice3SGLangModel",
+            "MossSpeechForCausalLM": "sglang_omni.models.moss_speech.sglang_model:MossSpeechSGLangModel",
         }
         for arch, path in sglang_omni_models.items():
             module_path, _, attr = path.partition(":")
