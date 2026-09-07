@@ -34,6 +34,7 @@ from typing import Any, Iterable, List, Optional, Tuple
 import torch
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.logits_processor import (
+    LogitsProcessor,
     LogitsProcessorOutput,
 )
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
@@ -186,6 +187,15 @@ class MossSpeechSGLangModel(torch.nn.Module):
         self.audio_lm_head = ParallelLMHead(
             self.audio_vocab_size, self.hidden_size, quant_config=quant_config
         )
+        # Per-channel LogitsProcessor (moss_tts precedent, PR #608): sizes
+        # each channel's logits to its own vocab (strips ParallelLMHead vocab
+        # padding) and honors the head's sampler-contract forward path.
+        self.text_logits_processor = self._make_logits_processor(
+            config, self.text_vocab_size
+        )
+        self.audio_logits_processor = self._make_logits_processor(
+            config, self.audio_vocab_size
+        )
 
         # Staged decode-feedback embedding rows (moss_tts pattern): the model
         # runner writes per-request feedback embeddings into rows [0..bs) and
@@ -202,6 +212,14 @@ class MossSpeechSGLangModel(torch.nn.Module):
         assert sorted(ids) == list(range(self.total_attention_layers)), (
             f"attention layer ids {sorted(ids)} != 0..{self.total_attention_layers - 1}"
         )
+
+    @staticmethod
+    def _make_logits_processor(config: Any, vocab_size: int) -> LogitsProcessor:
+        from copy import copy
+
+        channel_config = copy(config)
+        channel_config.vocab_size = int(vocab_size)
+        return LogitsProcessor(channel_config)
 
     # ------------------------------------------------------------------ utils
     def attention_layer_ids(self) -> List[int]:
@@ -278,8 +296,22 @@ class MossSpeechSGLangModel(torch.nn.Module):
         last_idx = self._last_token_indices(text_hidden, forward_batch)
         text_final, _ = self.text_norm(text_hidden[last_idx], text_residual[last_idx] if text_residual is not None else None)
         audio_final, _ = self.audio_norm(audio_hidden[last_idx], audio_residual[last_idx] if audio_residual is not None else None)
-        text_logits = self.text_lm_head(text_final)
-        audio_logits = self.audio_lm_head(audio_final)
+        from sglang.srt.layers.logits_processor import LogitsMetadata
+        from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode, ForwardMode
+
+        logits_metadata = LogitsMetadata.from_forward_batch(forward_batch)
+        if logits_metadata.capture_hidden_mode is None:
+            logits_metadata.capture_hidden_mode = CaptureHiddenMode.NULL
+        logits_metadata.next_token_logits_buffer = None
+        logits_metadata.forward_mode = ForwardMode.DECODE
+        text_logits = self.text_logits_processor(
+            None, hidden_states=text_final, lm_head=self.text_lm_head,
+            logits_metadata=logits_metadata,
+        ).next_token_logits
+        audio_logits = self.audio_logits_processor(
+            None, hidden_states=audio_final, lm_head=self.audio_lm_head,
+            logits_metadata=logits_metadata,
+        ).next_token_logits
         return MossSpeechModelOutput(
             next_token_logits=text_logits,
             text_logits=text_logits,
