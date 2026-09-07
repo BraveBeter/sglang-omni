@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from sglang_omni.config import PipelineConfig, StageConfig
+from sglang_omni.config import PipelineConfig, StageConfig, StageResourceConfig, StageRuntimeConfig
 
 _PKG = "sglang_omni.models.moss_speech"
 
@@ -28,6 +28,10 @@ class MossSpeechPipelineConfig(PipelineConfig):
     """4-stage chat-native pipeline: preprocessing -> ar_engine -> dual terminals."""
 
     architecture: ClassVar[str] = "MossSpeechForCausalLM"
+    # Per-request terminal join: V1 routes text/audio to exactly one terminal
+    # (qwen3_omni precedent; without this the coordinator joins BOTH terminals
+    # and single-modality requests hang).
+    terminal_stages_fn: str | None = f"{_PKG}.request_builders.resolve_terminal_stages"
 
     @classmethod
     def generation_sglang_role_to_stage(cls) -> dict[str, str]:
@@ -44,6 +48,7 @@ class MossSpeechPipelineConfig(PipelineConfig):
         return frozenset()
 
     model_path: str
+    entry_stage: str | None = "preprocessing"
     stages: list[StageConfig] = [
         StageConfig(
             name="preprocessing",
@@ -51,6 +56,7 @@ class MossSpeechPipelineConfig(PipelineConfig):
             factory=f"{_PKG}.stages.create_preprocessing_executor",
             factory_args={"encode_batch_size": 4},
             gpu=0,
+            runtime=StageRuntimeConfig(resources=StageResourceConfig(total_gpu_memory_fraction=0.06)),
             next="ar_engine",
         ),
         StageConfig(
@@ -59,6 +65,7 @@ class MossSpeechPipelineConfig(PipelineConfig):
             factory=f"{_PKG}.stages.create_ar_engine_executor",
             factory_args={"dtype": "bfloat16"},
             gpu=0,
+            runtime=StageRuntimeConfig(resources=StageResourceConfig(total_gpu_memory_fraction=0.72)),
             next=["text_decode", "audio_vocoder"],
             route_fn=f"{_PKG}.request_builders.resolve_output_terminal",
         ),
@@ -73,6 +80,7 @@ class MossSpeechPipelineConfig(PipelineConfig):
             process="vocoder",
             factory=f"{_PKG}.stages.create_audio_vocoder_executor",
             gpu=0,
+            runtime=StageRuntimeConfig(resources=StageResourceConfig(total_gpu_memory_fraction=0.12)),
             terminal=True,
         ),
     ]

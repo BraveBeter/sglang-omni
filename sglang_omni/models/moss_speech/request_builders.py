@@ -312,6 +312,28 @@ def pop_decoded_audio(state: MossSpeechState) -> List[tuple[torch.Tensor, int, s
 
 
 # ------------------------------------------------------------------- routing
+def resolve_terminal_stages(request: OmniRequest) -> List[str]:
+    """terminal_stages_fn: which terminals the coordinator joins for a request.
+
+    V1 output modalities are mutually exclusive (both -> rejected in
+    normalize), so exactly one terminal is active per request.
+    """
+    inputs = getattr(request, "inputs", None)
+    modalities = None
+    if isinstance(inputs, dict):
+        modalities = inputs.get("output_modalities")
+    else:
+        modalities = getattr(inputs, "output_modalities", None)
+    modalities = list(modalities or ["text"])
+    if modalities == ["audio"]:
+        return [AUDIO_TERMINAL]
+    if modalities == ["text"]:
+        return [TEXT_TERMINAL]
+    raise RequestValidationError(
+        f"cannot resolve terminal stages for modalities {modalities!r}"
+    )
+
+
 def resolve_output_terminal(request_id: str, output: Any) -> str:
     """route_fn(request_id, output) -> 'text_decode' | 'audio_vocoder'."""
     data = getattr(output, "data", output)

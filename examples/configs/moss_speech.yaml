@@ -1,0 +1,20 @@
+# SPDX-License: Apache-2.0
+# MOSS-Speech V1 baseline (single A800-80G, AR BF16 [P3], codec FP32).
+# Launch preconditions are checkable today; the formal ar_engine factory
+# raises MossSpeechARNotImplemented until the native SGLang model lands (P3).
+#
+# Assets: model_path is the materialized AR/tokenizer dir; the codec resolves
+# to the sibling "<model_path>-Codec" directory (override per factory args in
+# sglang_omni/models/moss_speech/config.py if a different layout is used).
+config_cls: MossSpeechPipelineConfig
+name: moss-speech-a800-80g
+model_path: /remote-home1/xrluan/SGLang_experiments/models/MOSS-Speech
+
+endpoints:
+  base_path: /remote-home1/xrluan/SGLang_experiments/artifacts/p2/runtime
+
+env_defaults:
+  MOSS_SPEECH_VOICE_WAV: /remote-home1/xrluan/SGLang_experiments/repos/MOSS-Speech/assets/prompt-cn.wav
+
+# V1 boundary (plan §0): TP=1, eager, radix cache / CUDA graph / torch.compile
+# disabled — enforced by the ar_engine factory's server args.

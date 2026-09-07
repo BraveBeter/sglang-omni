@@ -97,10 +97,11 @@ def create_preprocessing_executor(
     context_limit: int = DEFAULT_CONTEXT_LIMIT,
 ) -> SimpleScheduler:
     codec_dir = _resolve_codec_dir(model_path, codec_path)
+    voice_wav = voice_wav or os.environ.get("MOSS_SPEECH_VOICE_WAV")
     if not voice_wav or not os.path.isfile(voice_wav):
         raise FileNotFoundError(
-            "voice_wav (config-level default voice asset) is required for V1 audio output; "
-            "set stage_overrides.preprocessing.factory_args.voice_wav"
+            "default voice asset required for V1 audio output: pass voice_wav or set the "
+            "MOSS_SPEECH_VOICE_WAV env default (PipelineConfig env_defaults in the YAML)"
         )
     adapter = MossSpeechCodecAdapter(codec_dir, load_encoder=True, load_decoder=False)
     tokenizer = _load_tokenizer(model_path)
