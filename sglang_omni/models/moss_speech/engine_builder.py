@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import torch
+
 from sglang_omni.scheduling.engine_factory import SGLangGenerationEngineBuilder
 
 
@@ -37,6 +39,7 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
     # ------------------------------------------------------------ policy
     def generation_defaults(self, dtype: str = "bfloat16") -> dict[str, Any]:
         return {
+            "max_running_requests": 16,
             "dtype": dtype,
             "disable_cuda_graph": True,
             "enable_torch_compile": False,
@@ -88,18 +91,31 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
         gpu_id: int,
         server_args: Any,
     ) -> None:
-        raise NotImplementedError(
-            "MossSpeechEngineBuilder.setup_model lands with the P3/T3.4 model "
-            "runner (single build path shared by the T3.3 spike and the T3.7 "
-            "formal AR factory takeover)"
-        )
+        from sglang_omni.models.moss_speech.sglang_model import MossSpeechSGLangModel
+
+        model = model_worker.model_runner.model
+        if not isinstance(model, MossSpeechSGLangModel):
+            raise RuntimeError(
+                f"{self.model_name}: expected MossSpeechSGLangModel, got {type(model)}"
+            )
+        model.assert_heads_independent()
+        # the decode-feedback staging embedding is not a checkpoint tensor;
+        # the weight loader leaves it on the init device — move it here
+        target = torch.device(device)
+        if model._decode_input_embedding.weight.device != target:
+            model._decode_input_embedding = model._decode_input_embedding.to(target)
 
     def make_model_runner(self, model_worker: Any, output_proc: Any) -> Any:
-        raise NotImplementedError(
-            "MossSpeechEngineBuilder.make_model_runner lands with P3/T3.4"
+        import importlib
+
+        runner_mod = importlib.import_module(
+            "sglang_omni.models.moss_speech.model_runner"
         )
+        return runner_mod.MossSpeechModelRunner(model_worker, output_proc)
 
     def make_adapters(self, model: Any) -> tuple[Any, Any]:
-        raise NotImplementedError(
-            "MossSpeechEngineBuilder.make_adapters lands with P3/T3.4"
+        from sglang_omni.models.moss_speech.request_builders import (
+            make_moss_speech_scheduler_adapters,
         )
+
+        return make_moss_speech_scheduler_adapters(model=model)

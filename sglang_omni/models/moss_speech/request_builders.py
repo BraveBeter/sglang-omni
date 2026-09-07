@@ -31,6 +31,13 @@ import soundfile as _sf
 import torch
 
 from sglang_omni.proto import EXPLICIT_GENERATION_PARAMS_KEY
+from sglang_omni.proto import StagePayload
+from sglang_omni.scheduling.types import ARRequestData
+
+MODALITY_PAD_TOKEN = 151667
+TEXT_ENDOFTEXT_TOKEN = 151643
+IM_END_TOKEN = 151645
+TEXT_VOCAB_LIMIT = 151680
 from sglang_omni.proto.request import OmniRequest, StagePayload
 
 from .payload_types import MossSpeechState
@@ -382,3 +389,176 @@ def cleanup_vocoder_state(request_id: str) -> None:
     """Idempotent abort cleanup for the vocoder owner scope (P2 stub registry)."""
     with _VOCODER_SESSIONS_LOCK:
         _VOCODER_SESSIONS.pop(request_id, None)
+
+
+# --------------------------------------------------------------------------
+# SGLang AR request data (T3.4): per-request state for the native engine.
+# Owner = the AR model runner; allocate on adapter build, reset/free on
+# finish/abort/cleanup (idempotent).
+# --------------------------------------------------------------------------
+@dataclass
+class MossSpeechSGLangRequestData(ARRequestData):
+    """Model-runner-visible request state (moss_tts_local pattern); the
+    scheduler reads base-class bookkeeping (enforce_request_limits etc.)."""
+
+    enforce_request_limits: bool = True
+    req: Any = None
+    synced: bool = False
+    sampling_steps: int | None = None
+    # 1-D selected-token stream (mirrors zonos2: the prefill flow iterates it)
+    input_ids: Any = None
+    # canonical dual-channel prompt rows (L, 2), cpu int64
+    prompt_rows: Any = None
+    # generated grid rows so far: list[(text, audio)]
+    output_rows: list = None
+    # FSM mode (0=text, 1=audio); initialized from the prompt's last row
+    mode: int = 0
+    # per-request sampling knobs (reference semantics; see fsm.py)
+    params: Any = None
+    effective_seed: int = 0
+    generation_steps: int = 0
+    # feedback staging for decode (moss_tts pattern)
+    pending_feedback_queue: Any = None
+    # terminal bookkeeping
+    finished: bool = False
+    stop_reason: Any = None
+    # lazily-created per-request RNG (seeded from effective_seed); greedy
+    # paths never draw. Owned by this data object; freed with it.
+    rng_generator: Any = None
+
+    def __post_init__(self):
+        if self.output_rows is None:
+            self.output_rows = []
+        if self.pending_feedback_queue is None:
+            import collections
+
+            self.pending_feedback_queue = collections.deque()
+
+    def reset(self) -> None:
+        """Idempotent reset for retry: drop generated state, keep prompt."""
+        self.output_rows = []
+        self.generation_steps = 0
+        self.finished = False
+        self.stop_reason = None
+        self.pending_feedback_queue.clear()
+        from sglang_omni.models.moss_speech.fsm import initial_mode
+
+        self.mode = initial_mode(self.prompt_rows)
+
+
+def build_sglang_moss_request(state: Any, *, payload: Any = None) -> MossSpeechSGLangRequestData:
+    """MossSpeechState (P2 wire) -> engine request data.
+
+    Consumes the frozen P2 fields: input grid rows, explicit/derived sampling
+    parameters, effective seed. Explicit HTTP params win; the HTTP fill-in
+    defaults (1.0/1.0/-1/1.0) arrive as explicit markers via
+    EXPLICIT_GENERATION_PARAMS_KEY and are honored as-is (P2 chat contract).
+    """
+    from sglang_omni.models.moss_speech.fsm import MossSamplingParams, initial_mode
+
+    explicit = set(getattr(state, "explicit_params", []) or [])
+    _temp = float(getattr(state, "temperature", 1.0) or 1.0)
+    _top_p = float(getattr(state, "top_p", 1.0) or 1.0)
+    _top_k = int(getattr(state, "top_k", -1) or -1)
+    # Sampling is engaged only by warper values that actually reshape the
+    # distribution; the HTTP fill-ins (1.0/1.0/-1/1.0) and temperature<=0 /
+    # top_k==1 are greedy. Documented V1 boundary.
+    do_sample = bool(_temp > 0 and (_temp != 1.0 or _top_p != 1.0 or _top_k not in (-1, 1)))
+    params = MossSamplingParams(
+        do_sample=do_sample,
+        temperature=_temp,
+        top_p=_top_p,
+        top_k=_top_k,
+        repetition_penalty=float(getattr(state, "repetition_penalty", 1.0) or 1.0),
+        min_new_tokens=int(getattr(state, "min_new_tokens", 0) or 0),
+        max_new_tokens=int(getattr(state, "max_tokens", 200) or 200),
+    )
+    prompt_rows = torch.tensor(state.input_grid, dtype=torch.long) if not torch.is_tensor(
+        state.input_grid) else state.input_grid.to(torch.long).cpu()
+    if prompt_rows.dim() == 3:
+        prompt_rows = prompt_rows[0]
+    # 1-D scheduler representation: one selected token per grid row (the
+    # embedding-selected channel value; lossless per P3-01 §3.1)
+    selected = [
+        int(r[1]) if int(r[0]) == MODALITY_PAD_TOKEN else int(r[0])
+        for r in prompt_rows.tolist()
+    ]
+    from sglang.srt.managers.schedule_batch import Req
+    from sglang.srt.sampling.sampling_params import SamplingParams
+
+    sp = SamplingParams(
+        max_new_tokens=params.max_new_tokens,
+        temperature=0.0,  # engine-side sampling is inert: the runner samples
+    )
+    sp.normalize(None)
+    sp.verify(TEXT_VOCAB_LIMIT)
+    req = Req(
+        rid=payload.request_id,
+        origin_input_text="",
+        origin_input_ids=selected,
+        sampling_params=sp,
+        eos_token_ids={TEXT_ENDOFTEXT_TOKEN, IM_END_TOKEN},
+        vocab_size=TEXT_VOCAB_LIMIT,
+    )
+    req.tokenizer = None
+
+    data = MossSpeechSGLangRequestData(
+        req=req,
+        input_ids=torch.tensor(selected, dtype=torch.long),
+        prompt_rows=prompt_rows,
+        mode=initial_mode(prompt_rows),
+        params=params,
+        effective_seed=int(getattr(state, "effective_seed", 0) or 0),
+    )
+    data.stage_payload = payload
+    # record which fields were explicit for the adapter contract test
+    data.__dict__["_explicit_fields"] = sorted(explicit)
+    return data
+
+
+def make_moss_speech_scheduler_adapters(*, model: Any):
+    """StagePayload <-> engine request adapters (moss_tts_local pattern)."""
+    import traceback as _tb
+
+    def _logged(fn):
+        def wrapper(*a, **k):
+            try:
+                return fn(*a, **k)
+            except Exception:
+                _tb.print_exc()
+                raise
+        return wrapper
+
+    @_logged
+    def request_builder(payload):
+        state = payload.data
+        if not isinstance(state, MossSpeechState):
+            state = MossSpeechState.from_dict(state)
+        return build_sglang_moss_request(state, payload=payload)
+
+    @_logged
+    def result_adapter(data):
+        try:
+            payload = data.stage_payload
+            state = payload.data
+            if not isinstance(state, MossSpeechState):
+                state = MossSpeechState.from_dict(state)
+            state.output_grid = [list(map(int, r)) for r in data.output_rows]
+            return StagePayload(
+                request_id=payload.request_id,
+                request=payload.request,
+                data=state.to_dict(),
+            )
+        finally:
+            cleanup_ar_request_state(data)
+
+    return request_builder, result_adapter
+
+
+def cleanup_ar_request_state(data: MossSpeechSGLangRequestData) -> None:
+    """Idempotent AR-owner cleanup: release per-request state only."""
+    if data is None:
+        return
+    data.pending_feedback_queue.clear() if data.pending_feedback_queue is not None else None
+    data.output_rows = []
+    data.finished = True

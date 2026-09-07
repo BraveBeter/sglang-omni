@@ -122,6 +122,9 @@ class MossSpeechSGLangModel(torch.nn.Module):
         super().__init__()
         del kwargs
         self.config = config
+        _dt = str(getattr(config, 'dtype', 'bfloat16') or 'bfloat16')
+        self.dtype = {'bfloat16': torch.bfloat16, 'float16': torch.float16,
+                      'float32': torch.float32}.get(_dt, torch.bfloat16)
         self.hidden_size = int(config.hidden_size)
         self.text_vocab_size = int(config.vocab_size)
         self.audio_vocab_size = int(config.audio_vocab_size)
@@ -259,7 +262,12 @@ class MossSpeechSGLangModel(torch.nn.Module):
                 and bool(forward_mode.is_decode())
             )
             if is_decode:
-                input_embeds = self._decode_input_embedding(input_ids)
+                staging = self._decode_input_embedding
+                if staging.weight.device != input_ids.device:
+                    # not a checkpoint tensor: the loader never migrates it
+                    staging = staging.to(input_ids.device)
+                    self._decode_input_embedding = staging
+                input_embeds = staging(input_ids)
             else:
                 # 1-D text-token fallback path (tests / smoke only); the
                 # canonical dual-channel prefill always passes input_embeds.
@@ -296,20 +304,32 @@ class MossSpeechSGLangModel(torch.nn.Module):
         last_idx = self._last_token_indices(text_hidden, forward_batch)
         text_final, _ = self.text_norm(text_hidden[last_idx], text_residual[last_idx] if text_residual is not None else None)
         audio_final, _ = self.audio_norm(audio_hidden[last_idx], audio_residual[last_idx] if audio_residual is not None else None)
+        # Stash the dual-tail finals for the runner's compute_dual_logits()
+        # (moss_tts blueprint: the engine's standard forward replaces custom
+        # fields on the result object, so the runner recomputes channel
+        # outputs from hidden states immediately after the forward).
+        self._last_text_hidden = text_final.detach()
+        self._last_audio_hidden = audio_final.detach()
+        return self.compute_dual_logits()
+
+    def compute_dual_logits(self):
+        """Dual-head logits from the stashed final hiddens of the last
+        forward. Must be called synchronously after forward (single
+        engine thread)."""
         from sglang.srt.layers.logits_processor import LogitsMetadata
         from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode, ForwardMode
 
-        logits_metadata = LogitsMetadata.from_forward_batch(forward_batch)
-        if logits_metadata.capture_hidden_mode is None:
-            logits_metadata.capture_hidden_mode = CaptureHiddenMode.NULL
+        logits_metadata = LogitsMetadata(
+            capture_hidden_mode=CaptureHiddenMode.NULL,
+            forward_mode=ForwardMode.DECODE,
+        )
         logits_metadata.next_token_logits_buffer = None
-        logits_metadata.forward_mode = ForwardMode.DECODE
         text_logits = self.text_logits_processor(
-            None, hidden_states=text_final, lm_head=self.text_lm_head,
+            None, hidden_states=self._last_text_hidden, lm_head=self.text_lm_head,
             logits_metadata=logits_metadata,
         ).next_token_logits
         audio_logits = self.audio_logits_processor(
-            None, hidden_states=audio_final, lm_head=self.audio_lm_head,
+            None, hidden_states=self._last_audio_hidden, lm_head=self.audio_lm_head,
             logits_metadata=logits_metadata,
         ).next_token_logits
         return MossSpeechModelOutput(
