@@ -32,6 +32,8 @@ htmlcov/
 *.log
 *.txt
 output.wav
+# P3/T3.2: vendored 446-tensor checkpoint manifest (CPU mapping tests)
+!tests/unit_test/moss_speech/weight_manifest_446.txt
 
 # OS
 .DS_Store
