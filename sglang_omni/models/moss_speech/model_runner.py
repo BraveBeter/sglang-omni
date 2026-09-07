@@ -167,18 +167,43 @@ class MossSpeechModelRunner(ModelRunner):
             data.rng_generator = gen
         return data.rng_generator
 
+    def _dump_first_step(self, rid: str, text_logits, audio_logits, requests) -> None:
+        import os
+
+        d = os.environ.get("MOSS_DUMP_DIR")
+        if not d:
+            return
+        from pathlib import Path as _P
+
+        out = _P(d)
+        out.mkdir(parents=True, exist_ok=True)
+        for i, sched_req in enumerate(requests):
+            r = sched_req.rid if hasattr(sched_req, "rid") else f"req{i}"
+            torch.save(
+                {"text": text_logits[i].detach().float().cpu(),
+                 "audio": audio_logits[i].detach().float().cpu()},
+                out / f"first_step_{r}.pt",
+            )
+
     def _collect_step(self, result, forward_batch, requests) -> None:
-        text_logits = getattr(result, "text_logits", None)
-        audio_logits = getattr(result, "audio_logits", None)
-        if text_logits is None or audio_logits is None:
-            # standard-forward path replaced the result object: recompute the
-            # dual heads from the model's stashed final hiddens
-            text_logits = audio_logits = None
-            dual = self.model.compute_dual_logits()
-            text_logits, audio_logits = dual.text_logits, dual.audio_logits
+        # primary transport: per-forward attribute set by model.forward
+        # (interleaved forwards make model-level stash unsafe)
+        dual = getattr(forward_batch, "_moss_dual_logits", None)
+        if dual is not None:
+            text_logits, audio_logits = dual
+        else:
+            dual_out = self.model.compute_dual_logits()
+            text_logits, audio_logits = dual_out.text_logits, dual_out.audio_logits
         if text_logits is None or audio_logits is None:
             raise RuntimeError("MOSS-Speech runner failed to obtain dual-head logits")
         next_tokens: List[int] = []
+        first_step = all(
+            getattr(sched_req.data, "generation_steps", 0) == 0 for sched_req in requests
+        )
+        if first_step:
+            self._dump_first_step(
+                "", text_logits, audio_logits, requests
+            )
         for i, sched_req in enumerate(requests):
             data: MossSpeechSGLangRequestData = sched_req.data
             data.generation_steps += 1

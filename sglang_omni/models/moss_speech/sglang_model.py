@@ -261,6 +261,18 @@ class MossSpeechSGLangModel(torch.nn.Module):
                 and getattr(forward_mode, "is_decode", None) is not None
                 and bool(forward_mode.is_decode())
             )
+            import os as _osd
+
+            if not _osd.environ.get("MOSS_QUIET_EMBED_FALLBACK"):
+                import logging as _lg
+
+                _lg.getLogger(__name__).warning(
+                    "moss_speech forward fell back to text-token embedding "
+                    "for %s (input_embeds missing)",
+                    "decode" if (forward_batch is not None and getattr(
+                        getattr(forward_batch, "forward_mode", None), "is_decode", lambda: False)())
+                    else "PREFILL",
+                )
             if is_decode:
                 staging = self._decode_input_embedding
                 if staging.weight.device != input_ids.device:
@@ -283,6 +295,12 @@ class MossSpeechSGLangModel(torch.nn.Module):
                 residual=residual,
             )
 
+        # sglang's fused RMSNorm updates (hidden, residual) IN PLACE inside
+        # the decoder layers; both tails fork from the trunk output, so the
+        # second tail must start from a private copy (the reference runs the
+        # tails over the same shared output with independent streams).
+        audio_hidden = hidden_states.clone()
+        audio_residual = residual.clone() if residual is not None else None
         text_hidden, text_residual = hidden_states, residual
         for layer in self.text_block:
             text_hidden, text_residual = layer(
@@ -292,7 +310,6 @@ class MossSpeechSGLangModel(torch.nn.Module):
                 residual=text_residual,
             )
 
-        audio_hidden, audio_residual = hidden_states, residual
         for layer in self.audio_block:
             audio_hidden, audio_residual = layer(
                 positions=positions,
@@ -310,6 +327,58 @@ class MossSpeechSGLangModel(torch.nn.Module):
         # outputs from hidden states immediately after the forward).
         self._last_text_hidden = text_final.detach()
         self._last_audio_hidden = audio_final.detach()
+        # Per-forward transport: the runner reads the dual logits off the
+        # forward_batch (one forward == one batch object), never from model
+        # state — a model-level stash gets clobbered by interleaved forwards
+        # (engine warmup / other requests) before post_prefill consumes it.
+        out = self.compute_dual_logits()
+        import os as _os2
+
+        _d2 = _os2.environ.get("MOSS_DUMP_DIR")
+        if _d2:
+            import pathlib as _pl2
+
+            _pl2.Path(_d2).mkdir(parents=True, exist_ok=True)
+            _n2 = sum(1 for _ in _pl2.Path(_d2).glob("hidden_*.pt"))
+            torch.save(
+                {
+                    "text_final": self._last_text_hidden.float().cpu(),
+                    "audio_final": self._last_audio_hidden.float().cpu(),
+                    "trunk_h": hidden_states.detach().float().cpu(),
+                    "trunk_r": (residual.detach().float().cpu()
+                                if residual is not None else None),
+                    "audio_in_h": audio_hidden.detach().float().cpu(),
+                    "audio_in_r": (audio_residual.detach().float().cpu()
+                                   if audio_residual is not None else None),
+                    "last_idx": last_idx.detach().cpu(),
+                },
+                _pl2.Path(_d2) / f"hidden_{_n2:03d}.pt",
+            )
+        try:
+            forward_batch._moss_dual_logits = (out.text_logits, out.audio_logits)
+            return out
+        except AttributeError:
+            # object.__new__-style test batches may not accept attributes
+            return self.compute_dual_logits()
+        import os as _os
+
+        _d = _os.environ.get("MOSS_DUMP_DIR")
+        if _d:
+            import pathlib as _pl
+
+            _pl.Path(_d).mkdir(parents=True, exist_ok=True)
+            _n = sum(1 for _ in _pl.Path(_d).glob("hidden_*.pt"))
+            torch.save(
+                {
+                    "text_final": self._last_text_hidden.float().cpu(),
+                    "audio_final": self._last_audio_hidden.float().cpu(),
+                    "trunk_h": hidden_states.detach().float().cpu(),
+                    "trunk_r": (residual.detach().float().cpu()
+                                if residual is not None else None),
+                    "last_idx": last_idx.detach().cpu(),
+                },
+                _pl.Path(_d) / f"hidden_{_n:03d}.pt",
+            )
         return self.compute_dual_logits()
 
     def compute_dual_logits(self):

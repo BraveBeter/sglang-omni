@@ -317,6 +317,72 @@ def main() -> None:
     print("INTRA_L0", json.dumps(intra), flush=True)
     print("LAYER_BISECT", json.dumps(bisect2, indent=1), flush=True)
 
+    # ---- layer bisect via causality-safe runner -------------------------
+    def run_rows_capture(n_rows: int, layer_indices: list) -> dict:
+        rows = prefix[:n_rows]
+        e = build_input_embeds(model, rows)
+        sl = kv_alloc.alloc(n_rows)
+        sd = sl.to(runner.device, dtype=torch.int64).flatten()
+        runner.req_to_token_pool.write((0, slice(0, n_rows)), sd)
+        fb2 = object.__new__(ForwardBatch)
+        fb2.forward_mode = ForwardMode.EXTEND
+        fb2.batch_size = 1
+        fb2.input_ids = torch.zeros(n_rows, dtype=torch.int64, device=runner.device)
+        fb2.req_pool_indices = torch.zeros(1, dtype=torch.int64, device=runner.device)
+        fb2.seq_lens = torch.tensor([n_rows], dtype=torch.int64, device=runner.device)
+        fb2.seq_lens_cpu = torch.tensor([n_rows], dtype=torch.int64)
+        fb2.seq_lens_sum = n_rows
+        fb2.out_cache_loc = sd
+        fb2.positions = torch.arange(n_rows, dtype=torch.int64, device=runner.device)
+        fb2.extend_seq_lens = fb2.seq_lens.clone()
+        fb2.extend_prefix_lens = torch.zeros_like(fb2.seq_lens)
+        fb2.extend_seq_lens_cpu = fb2.extend_seq_lens.cpu()
+        fb2.extend_prefix_lens_cpu = fb2.extend_prefix_lens.cpu()
+        fb2.extend_seq_lens_sum = n_rows
+        fb2.device = runner.device
+        caps3: dict = {}
+        hooks = [
+            model.layers[li].register_forward_hook(
+                (lambda li: lambda m, i, o: caps3.__setitem__(
+                    li, (o[0] + o[1]).detach().float().cpu()))(li))
+            for li in layer_indices
+        ]
+        with forward_context(ForwardContext(attn_backend=runner.attn_backend)):
+            runner.attn_backend.init_forward_metadata(forward_batch=fb2)
+            model(input_ids=fb2.input_ids, positions=fb2.positions, forward_batch=fb2,
+                  input_embeds=e.to(runner.device))
+        for h in hooks:
+            h.remove()
+        kv_alloc.free(sl.to(torch.int64))
+        return caps3
+
+    short_caps = run_rows_capture(6, [0])
+    full_caps = run_rows_capture(34, [0, 1, 2, 31])
+    row5_short, row5_full = short_caps[0][5], full_caps[0][5]
+    rep["causality_probe"] = {
+        "row5_max_abs_short_vs_full": float((row5_short - row5_full).abs().max()),
+        "row5_bit_equal": bool(torch.equal(row5_short, row5_full)),
+    }
+    ref_layers = {0: ref_blob["shared_0"][0], 1: ref_blob["shared_1"][0],
+                  2: None, 31: ref_blob["shared_31"][0]}
+    layer_stats = {}
+    for li in (0, 1, 2, 31):
+        native = full_caps[li]
+        stats = []
+        for r in (0, 5, 33):
+            rr = ref_layers[li]
+            if rr is None:
+                stats.append({"row": r, "note": "no ref"})
+                continue
+            cos = torch.nn.functional.cosine_similarity(native[r], rr[r].float(), dim=0)
+            stats.append({"row": r, "cos": round(float(cos), 5),
+                          "n_norm": round(float(native[r].norm()), 3),
+                          "r_norm": round(float(rr[r].float().norm()), 3)})
+        layer_stats[f"layer{li}"] = stats
+    rep["layer_bisect_rows"] = layer_stats
+    print("LAYER_BISECT_ROWS", json.dumps(layer_stats), flush=True)
+    print("CAUSALITY", rep["causality_probe"], flush=True)
+
     Path(args.out).write_text(json.dumps(rep, indent=1))
     print(json.dumps(bisect, indent=1))
     print("DIAG DONE")
