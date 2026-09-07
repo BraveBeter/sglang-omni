@@ -886,10 +886,17 @@ async def _chat_stream(
 
 def _explicit_generation_params(request: Any) -> list[str]:
     fields_set = getattr(request, "model_fields_set", set())
+    # NOTE: both the canonical ``max_new_tokens`` and the chat-completion
+    # aliases ``max_tokens`` / ``max_completion_tokens`` must be inspected:
+    # a user-provided length must stay distinguishable from the endpoint
+    # default even when expressed through an alias (they collapse into
+    # ``effective_max_tokens`` during lowering, after which the origin is lost).
     return sorted(
         field
         for field in (
             "max_new_tokens",
+            "max_tokens",
+            "max_completion_tokens",
             "temperature",
             "top_p",
             "top_k",
