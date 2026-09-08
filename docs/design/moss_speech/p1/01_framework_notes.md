@@ -105,3 +105,12 @@ Enrollment reuses the encoder only; mel/xvector computed by dedicated feature pa
 ## 7. Framework-gap watch list
 
 No gap requiring a framework PR found in T1.1. Watch items: (a) `SimpleScheduler` re-entrancy note if decode ever goes concurrent (thread-safety of vendored `AudioDecoder` state); (b) chat-side `modalities` routing precedent exists (qwen3_omni) — P2 concern; (c) `ReferenceEncodeService` fits as-is.
+
+
+## P5 dependency inventory correction (2026-09-08)
+
+The inference closure in section3.3 also requires diffusers (verified0.37.0):
+the vendored Matcha decoder/transformer imports activation, attention and LoRA
+helpers from it. It is already a base project dependency. A new CPU environment
+exposed the omission in this prose inventory; the standalone CPU requirements
+now include it. Decoder implementation and P1 evidence are unchanged.

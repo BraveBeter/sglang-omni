@@ -94,3 +94,17 @@ Native sampling is request-local. Missing HTTP values use 0.6/0.95/20/1.1 (tempe
 Audio code extraction accepts code IDs from rows whose text token is modality_pad; EOSP in such a row ends the segment. Text-mode audio values remain in the full parity grid but cannot terminate vocoding. Same-step SOSP/EOSP transitions execute in reference order. The official processor's default-system behavior is unchanged: use explicit interface system messages when reproducing interface fixtures.
 
 Serving wire tensors are lists for one request `(L,2)`/`(L,)`; adapters validate vocabulary bounds and remove left padding before native prefill. V1 rejects unqualified attention backends, remote config execution, graph/compile/radix/chunked prefill, TP>1 and quantization. P3 validates the pipeline on A800 and two-request correctness; HTTP four-mode readiness, production load/VRAM validation and 24G feasibility are not P3 claims.
+
+
+## P5 numerical-profile clarification (2026-09-08)
+
+The frozen P3 BF16 reference evaluates full prefill LM heads: explicitly use
+`logits_to_keep=0` when reproducing it. P3's forward observation wrapper hid the
+parameter from HF's signature-based optimization detection. An uncaptured HF
+call may implicitly choose1 instead, changing BF16 head GEMM shape and inactive
+audio argmax ties despite identical hidden states. P5 probe3878 confirms exact
+raw-head equality when0 is explicit. This documents the existing numerical
+profile; P0–P4 expected assets, thresholds and native math are unchanged.
+See sglang-omni/docs/design/moss_speech/p5/01_protocol.md AppendixA for retained
+failed comparisons and the versioned export correction. Do not claim bitwise
+parity with arbitrary HF head-optimization settings.

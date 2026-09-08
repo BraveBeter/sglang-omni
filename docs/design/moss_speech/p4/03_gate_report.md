@@ -1,4 +1,4 @@
-# P4 gate report (in progress)
+# P4 gate report
 
 Date: 2026-09-08. **P4 G1–G4 all passed; T4.1–T4.6 complete.**
 P5 has not started. Source commits: shared HTTP `6b22b8d`, MOSS serving and

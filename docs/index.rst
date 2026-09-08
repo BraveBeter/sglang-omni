@@ -25,6 +25,9 @@ Supported Models
    * - Model
      - Type
      - Notes
+   * - `OpenMOSS-Team/MOSS-Speech <https://huggingface.co/OpenMOSS-Team/MOSS-Speech>`_
+     - Omni chat
+     - Non-streaming text/speech in and out; measured A800 profile, see cookbook limits
    * - `boson-sglang/higgs-audio-v3-tts-4b-base <https://huggingface.co/boson-sglang/higgs-audio-v3-tts-4b-base>`_
      - TTS
      - Voice cloning, streaming, 100+ languages
@@ -98,6 +101,7 @@ Supported Models
    cookbook/fishaudio_s2_pro.md
    cookbook/qwen3_tts.md
    cookbook/ming_tts.md
+   cookbook/moss_speech.md
    cookbook/moss_tts.md
    cookbook/moss_tts_local.md
    cookbook/dots_tts.md

@@ -1,0 +1,466 @@
+{
+  "phase": 5,
+  "pass": true,
+  "gates": {
+    "G1_quality_evidence": true,
+    "G2_hardware_outcome": true,
+    "G3_local_ci": true,
+    "G4_documentation_and_provenance": true
+  },
+  "upstream_redistribution_ready": false,
+  "hosted_ci_executed": false,
+  "quality_gate_thresholds": false,
+  "quality_calibrated": false,
+  "human_mos": null,
+  "sample": {
+    "manifest_sha256": "012d23070040d6db29a4146976c3e53eaeed88ba7a935b040c3c3a1fa1b53d2e",
+    "source_rows": 8,
+    "unique_source_audios": 4,
+    "mode_requests": 32,
+    "unique_request_bodies": 24
+  },
+  "numerical_profile": {
+    "ar": "bfloat16",
+    "matmul_tf32": false,
+    "cudnn_tf32": true,
+    "logits_to_keep": 0
+  },
+  "native": {
+    "gpu": "NVIDIA A800-SXM4-80GB",
+    "gpu_uuid": "GPU-5bc54404-37a4-00d7-45ab-904f0c51e6ae",
+    "equal_full_grid_rows": 4001,
+    "bit_equal_wav_pairs": 16,
+    "truncated_ids": [
+      "zh_00_s2s",
+      "zh_01_s2s"
+    ],
+    "processes": [
+      {
+        "pid": 1652808,
+        "alive": false,
+        "exitcode": 0
+      },
+      {
+        "pid": 1652809,
+        "alive": false,
+        "exitcode": 0
+      },
+      {
+        "pid": 1652810,
+        "alive": false,
+        "exitcode": 0
+      },
+      {
+        "pid": 1652811,
+        "alive": false,
+        "exitcode": 0
+      }
+    ],
+    "sampled_peak_gib": 27.644775390625,
+    "http_latency_s": {
+      "t2t": {
+        "p50": 1.0956759303808212,
+        "p95": 1.475660935230553,
+        "max": 1.5311795715242624
+      },
+      "t2s": {
+        "p50": 5.132180171087384,
+        "p95": 6.621672903187572,
+        "max": 6.953961603343487
+      },
+      "s2t": {
+        "p50": 1.1334639117121696,
+        "p95": 1.8968475557863713,
+        "max": 1.9115411080420017
+      },
+      "s2s": {
+        "p50": 28.28713569883257,
+        "p95": 34.097496283240616,
+        "max": 34.28651602193713
+      }
+    },
+    "http_rtf": {
+      "t2s": {
+        "p50": 1.2364160330131804,
+        "p95": 1.6657003800724726,
+        "max": 1.7470577709196555
+      },
+      "s2s": {
+        "p50": 0.8468304916388868,
+        "p95": 0.8833055020108618,
+        "max": 0.8889455452432727
+      }
+    },
+    "audio_duration_s": {
+      "p50": 15.84,
+      "p95": 40.96,
+      "max": 40.96
+    },
+    "max_clipping_fraction": 0.0
+  },
+  "quality": {
+    "t2t_en": {
+      "total": 4,
+      "failed": 0,
+      "metric": "WER",
+      "reference": {
+        "scored": 4,
+        "errors": 0,
+        "reference_units": 39,
+        "rate": 0.0,
+        "truncated": 0
+      },
+      "native": {
+        "scored": 4,
+        "errors": 0,
+        "reference_units": 39,
+        "rate": 0.0,
+        "truncated": 0
+      }
+    },
+    "t2t_zh": {
+      "total": 4,
+      "failed": 0,
+      "metric": "CER",
+      "reference": {
+        "scored": 4,
+        "errors": 3,
+        "reference_units": 80,
+        "rate": 0.0375,
+        "truncated": 0
+      },
+      "native": {
+        "scored": 4,
+        "errors": 3,
+        "reference_units": 80,
+        "rate": 0.0375,
+        "truncated": 0
+      }
+    },
+    "t2s_en": {
+      "total": 4,
+      "failed": 0,
+      "metric": "WER",
+      "reference": {
+        "scored": 4,
+        "errors": 2,
+        "reference_units": 39,
+        "rate": 0.05128205128205128,
+        "truncated": 0
+      },
+      "native": {
+        "scored": 4,
+        "errors": 2,
+        "reference_units": 39,
+        "rate": 0.05128205128205128,
+        "truncated": 0
+      }
+    },
+    "t2s_zh": {
+      "total": 4,
+      "failed": 0,
+      "metric": "CER",
+      "reference": {
+        "scored": 4,
+        "errors": 31,
+        "reference_units": 80,
+        "rate": 0.3875,
+        "truncated": 0
+      },
+      "native": {
+        "scored": 4,
+        "errors": 31,
+        "reference_units": 80,
+        "rate": 0.3875,
+        "truncated": 0
+      }
+    },
+    "s2t_en": {
+      "total": 4,
+      "failed": 0,
+      "metric": "WER",
+      "reference": {
+        "scored": 4,
+        "errors": 10,
+        "reference_units": 76,
+        "rate": 0.13157894736842105,
+        "truncated": 0
+      },
+      "native": {
+        "scored": 4,
+        "errors": 10,
+        "reference_units": 76,
+        "rate": 0.13157894736842105,
+        "truncated": 0
+      }
+    },
+    "s2t_zh": {
+      "total": 4,
+      "failed": 0,
+      "metric": "CER",
+      "reference": {
+        "scored": 4,
+        "errors": 0,
+        "reference_units": 50,
+        "rate": 0.0,
+        "truncated": 0
+      },
+      "native": {
+        "scored": 4,
+        "errors": 0,
+        "reference_units": 50,
+        "rate": 0.0,
+        "truncated": 0
+      }
+    },
+    "s2s_en": {
+      "total": 4,
+      "failed": 0,
+      "metric": "WER",
+      "reference": {
+        "scored": 4,
+        "errors": null,
+        "reference_units": null,
+        "rate": null,
+        "truncated": 0
+      },
+      "native": {
+        "scored": 4,
+        "errors": null,
+        "reference_units": null,
+        "rate": null,
+        "truncated": 0
+      }
+    },
+    "s2s_zh": {
+      "total": 4,
+      "failed": 0,
+      "metric": "CER",
+      "reference": {
+        "scored": 4,
+        "errors": null,
+        "reference_units": null,
+        "rate": null,
+        "truncated": 2
+      },
+      "native": {
+        "scored": 4,
+        "errors": null,
+        "reference_units": null,
+        "rate": null,
+        "truncated": 2
+      }
+    }
+  },
+  "asr_checkpoint_sha256": "9ecf779972d90ba49c06d968637d720dd632c55bbf19d441fb42bf17a411e794",
+  "asr_unique_waveform_language_pairs": 12,
+  "cpu_passed_by_log": {
+    "artifacts/p5/cpu_ci_release.log": 89,
+    "artifacts/p5/cpu_release.log": 156,
+    "artifacts/p5/cpu_public_http.log": 111
+  },
+  "hardware_24gb": {
+    "supported": false,
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "gpu_uuid": "GPU-0d448cad-0cd5-8206-3fef-ee7cb1fa7084",
+    "http_success": 25,
+    "http_failures": [
+      "zh_00_s2s",
+      "zh_01_t2s",
+      "zh_01_s2s",
+      "zh_02_t2s",
+      "zh_02_s2s",
+      "zh_03_t2s",
+      "zh_03_s2s"
+    ],
+    "sampled_peak_gib": 23.9285888671875,
+    "failure": "FP32 vocoder CUDA OOM; see raw process traceback",
+    "processes": [
+      {
+        "pid": 497626,
+        "alive": false,
+        "exitcode": 0
+      },
+      {
+        "pid": 497627,
+        "alive": false,
+        "exitcode": 0
+      },
+      {
+        "pid": 497628,
+        "alive": false,
+        "exitcode": 0
+      },
+      {
+        "pid": 497629,
+        "alive": false,
+        "exitcode": 0
+      }
+    ]
+  },
+  "source_sha256_at_native_start": {
+    "sglang-omni/scripts/moss_speech/p5/diagnose_prefill.py": "2316f301cf42970d1352d44b6f8bc0b9c58b0d38353ec90045e4449985249e34",
+    "sglang-omni/scripts/moss_speech/p5/evaluate.py": "d167a3a2908d1a04dbf997477458b24c9ea36533f265d6a1da6a56dbfb36f00a",
+    "sglang-omni/scripts/moss_speech/p5/make_config.py": "9740766f289da2e998efe7bf48ec9060ff9319f090aecde696899a3369813ed4",
+    "sglang-omni/scripts/moss_speech/p5/native.py": "3a1dfd0ff89a1b958924fbf3deefd7d4ce0d6f0d2544a714e629cff25b32cbe7",
+    "sglang-omni/scripts/moss_speech/p5/prepare_assets.py": "89102a3ae1cf6479cd9c4569243d0ad116bba47ad62589e695dba58a70cc5a88",
+    "sglang-omni/scripts/moss_speech/p5/quality.py": "e786dc33f401fcb4e9c2a9f9c6f576511ad0cd0792847b9da7e7c417d09a5e58",
+    "sglang-omni/scripts/moss_speech/p5/reference.py": "e0560d7e5685aab12a96cc772c7e42b629b219446a333311f33dffcd76eab79b",
+    "sglang-omni/scripts/moss_speech/ci/run_gpu.sh": "5ed2b71558ba284b009d0151c8a54a003ceb84a7c84e9c43b724965e6854f262",
+    "sglang-omni/tests/test_model/moss_speech_ci_config.py": "fd940c10af91597ae2633bb9f879af6fcbbd465d22f005a993ac78bb4d699b8c",
+    "sglang-omni/sglang_omni/models/moss_speech/__init__.py": "5efc78df4db848d09fb7481dbdf019f8c0a4eea79185e1a86407b1613626bd49",
+    "sglang-omni/sglang_omni/models/moss_speech/components/__init__.py": "570230638e494f4bba135d455e3755be77cbba68963db0fb97c498a1ca2db4d5",
+    "sglang-omni/sglang_omni/models/moss_speech/components/codec_adapter.py": "8ab531110a93d383cc726fea2a0f8d402e8f6d7778b68ddeb436c1916a603633",
+    "sglang-omni/sglang_omni/models/moss_speech/components/cosyvoice_flow/__init__.py": "b12536a94a963cdb47b3774f42d7f82672ece8d2a8d5cae6ceb2267147bf42c1",
+    "sglang-omni/sglang_omni/models/moss_speech/components/cosyvoice_flow/class_utils.py": "ac45f4849112717813eadcc8c1e2f7102855e1f8a657732fe999321c7f98f849",
+    "sglang-omni/sglang_omni/models/moss_speech/components/cosyvoice_flow/decoder.py": "606b4cbc42fcb20eef2895a7bb9cc039fba9c51439b85b96b1c5c1757500a8c7",
+    "sglang-omni/sglang_omni/models/moss_speech/components/cosyvoice_flow/flow.py": "2ecc8f80fd6e247388ccb90b10c53e613c38351def77b69dc1ecb97b76db0c9d",
+    "sglang-omni/sglang_omni/models/moss_speech/components/cosyvoice_flow/flow_matching.py": "129696b781f1806b657c29a42d0beac87b0b5782cd8ac27aa7930796da3852c7",
+    "sglang-omni/sglang_omni/models/moss_speech/components/cosyvoice_flow/hifigan_f0_predictor.py": "091767cb23d02522f14ac2ae128326ac09b055c5e55eafabbea544788b588567",
+    "sglang-omni/sglang_omni/models/moss_speech/components/cosyvoice_flow/hifigan_generator.py": "bcbbfb32699b649ff7f72525a3bf6239b6d7a37c1d86d28f7999d7ce5d9c6d01",
+    "sglang-omni/sglang_omni/models/moss_speech/components/cosyvoice_flow/length_regulator.py": "b96b23a681065723794dc1a4cc8296b24aab0891958996bb6a221dd73dec5589",
+    "sglang-omni/sglang_omni/models/moss_speech/components/cosyvoice_flow/transformer/__init__.py": "aad7ba6d188bc5341e1034486a705774ca3efee9df4d6a909f8f6e22612e99a3",
+    "sglang-omni/sglang_omni/models/moss_speech/components/cosyvoice_flow/transformer/activation.py": "a4a96caea9f7b05111286de5ea760bdfdf9c4e53448f53420857dc04a50440c2",
+    "sglang-omni/sglang_omni/models/moss_speech/components/cosyvoice_flow/transformer/attention.py": "41d269b2d5e3a3952c0a538f46480aff8570767eb88e80452f367436cef628b1",
+    "sglang-omni/sglang_omni/models/moss_speech/components/cosyvoice_flow/transformer/convolution.py": "eb5f41f324a97225c73b9c430af8bb231bd77386ef18450bb0fd329f469ab4e1",
+    "sglang-omni/sglang_omni/models/moss_speech/components/cosyvoice_flow/transformer/embedding.py": "b50c30be5c66c39c95e0db1015814c545fcd062a936c0ea7ad4c01508b2595dc",
+    "sglang-omni/sglang_omni/models/moss_speech/components/cosyvoice_flow/transformer/encoder_layer.py": "1920582be2c9b7cf7835e7b539118ec1eb9da8f2c711c6257f8598b3792951b9",
+    "sglang-omni/sglang_omni/models/moss_speech/components/cosyvoice_flow/transformer/positionwise_feed_forward.py": "6e8038e3bcc8ca086ddca508fb9b9d40bf3ab98bebabcf5c94935d032329d0f8",
+    "sglang-omni/sglang_omni/models/moss_speech/components/cosyvoice_flow/transformer/subsampling.py": "31fc0347a851abc1205dfd4cf68099c0c416589c3e99a07b250e8630cece19d0",
+    "sglang-omni/sglang_omni/models/moss_speech/components/cosyvoice_flow/transformer/upsample_encoder.py": "ef98a8d371de5696216f78af48c4f031a76c4ec77a10b06e6bed506021a3a79c",
+    "sglang-omni/sglang_omni/models/moss_speech/components/cosyvoice_flow/utils_common.py": "6626e9c6dc99a84b2158679c9d61290d304d03a21a7d6d79353248a917a07e24",
+    "sglang-omni/sglang_omni/models/moss_speech/components/cosyvoice_flow/utils_mask.py": "852c6e4b14201a238ab076396db599c157b2ee5a5a2aacf0f277ddce8c648976",
+    "sglang-omni/sglang_omni/models/moss_speech/components/hf_codec/__init__.py": "1403e421593a9eedbab4f937fb5555bf487a740edfe3ef8354f3c7e1034c550e",
+    "sglang-omni/sglang_omni/models/moss_speech/components/hf_codec/configuration.py": "09ccffc2ec79f06dc8db3ae0bdf4c17e3518ad3cca141790839a26534bebe487",
+    "sglang-omni/sglang_omni/models/moss_speech/components/hf_codec/modeling.py": "ba53fd79b4c094070e5c1b50904f5376bbd50aac957f0b866da1cce34524a5cb",
+    "sglang-omni/sglang_omni/models/moss_speech/components/hf_codec/utils.py": "861746933e78e33504eb485f382af8453164abaa172ae8a7314d03737d726807",
+    "sglang-omni/sglang_omni/models/moss_speech/components/hf_codec/whisper.py": "3b4ed3cef0269359c19519af613956133f32c52acecce30522e17688aba974f9",
+    "sglang-omni/sglang_omni/models/moss_speech/components/matcha_components/__init__.py": "409802d564811543713eb62730bcbd7437f8c6361f2acaf5be69566831db6e02",
+    "sglang-omni/sglang_omni/models/moss_speech/components/matcha_components/audio.py": "b96b7f623942e93e74da8ea6d37e0ea56564f2f742b84962d1d0968bdada231b",
+    "sglang-omni/sglang_omni/models/moss_speech/components/matcha_components/decoder.py": "9e10d6fad6b070bfcd7d7a10c12798b24c8341e994580e6b837865ea1f7d0cbe",
+    "sglang-omni/sglang_omni/models/moss_speech/components/matcha_components/flow_matching_base.py": "29cd925cf9da61e4bc46c2b8ba8d3c2ac135f0e34407468504290df162dc1f39",
+    "sglang-omni/sglang_omni/models/moss_speech/components/matcha_components/transformer.py": "72f16da121d0df5a6028330d22e5d7a3e38e096c91ef06e9c56a8ae504308af7",
+    "sglang-omni/sglang_omni/models/moss_speech/components/processor.py": "afff5277b34de159f226132e474bb5371ae49b07b980ce984316e6f56f7fbd19",
+    "sglang-omni/sglang_omni/models/moss_speech/components/voice.py": "96464f0cdcc46be0eaf61c0ce667edbd60cdf360b140c5ca38f62af2b100553f",
+    "sglang-omni/sglang_omni/models/moss_speech/config.py": "c46ee58c268004c4041035dd346aca378b3e76b1ff0dceb487b5de213b77fbf5",
+    "sglang-omni/sglang_omni/models/moss_speech/engine_builder.py": "07bbbf4c9c80e2feafbe55d4b49c63e71f8dc097644a6c184bc6aa95972bd19f",
+    "sglang-omni/sglang_omni/models/moss_speech/fsm.py": "b7b193add4ff8dab213041de0f72a7c1aa8f89ae22da11c9d7db9cad72073f7a",
+    "sglang-omni/sglang_omni/models/moss_speech/hf_config.py": "fa9a9270e0c98586ef15b517b79bd1de3396f7b84a03f5a81082770c047aad86",
+    "sglang-omni/sglang_omni/models/moss_speech/model_runner.py": "ee2004df4c924756d113c3afa7b9079b2692f207280793af6ac11ba9762afb54",
+    "sglang-omni/sglang_omni/models/moss_speech/payload_types.py": "eeed067ae15452c988ab5b4ca9f7a0c008e2eb232517d0e2af599359abb71a0e",
+    "sglang-omni/sglang_omni/models/moss_speech/request_builders.py": "725ce28049a0b46a0e1358397604c5e9d559d5ad1227ba28f2821ddf8dbaa141",
+    "sglang-omni/sglang_omni/models/moss_speech/request_data.py": "177816f10d3494d63f97b63841eb7be75ef3f84129711d63813c4a7e468d0452",
+    "sglang-omni/sglang_omni/models/moss_speech/request_lifecycle.py": "d037e1a0294a4deff8ada12b0dd889f86179acbe6b044d46c36a10bdde40b828",
+    "sglang-omni/sglang_omni/models/moss_speech/sglang_model.py": "2a485f9dc66a3844109e3a6036254d05810ec0b508d8703b099e996511cad4a1",
+    "sglang-omni/sglang_omni/models/moss_speech/stages.py": "ba13a156c78dd6f6bd96b9b48218d8a5f76df137aaf087ce7f2f1fed2ce5acb3"
+  },
+  "evidence_sha256": {
+    "artifacts/p5/seedtts/manifest.json": "012d23070040d6db29a4146976c3e53eaeed88ba7a935b040c3c3a1fa1b53d2e",
+    "artifacts/p5/reference_3880/report.json": "eb346e6ba736596789f43bbf35cc436ad292e4004b37996d2313bda87e3e0769",
+    "artifacts/p5/ci_3883/report.json": "0827081a212eb5a46f87bd946515bbdb9c7da96b9fecc537af3576a166363e74",
+    "artifacts/p5/evaluate_3884/report.json": "631b51c39f4dc1c0c09f777003614d456d9c990d63a439152e0b81d568dedb26",
+    "artifacts/p5/ci_3883.yaml": "d996495f880a20c989e28ddec8e056c4af83c64ec9e9d39e3e95e05d473d312f",
+    "artifacts/p5/cpu_ci_release.log": "8267a73a445df2b1c5101dd34a2e8c28f80c448342a9f6a97da6d10ea5df34ab",
+    "artifacts/p5/cpu_release.log": "adaab7cfd12eb9cfa76fdda6e94858392b0abaac5dcd5e67dd2569ddec55df1a",
+    "artifacts/p5/cpu_public_http.log": "8be60c301b8c276e91d8d8b81edcc0a62e22bb13d1e49e2199ea398ec1a02608",
+    "artifacts/p5/native_3879/report.json": "914d07f374205580a9eec465cec57c3a818ef80ecba611a2b3015fb3893183cc",
+    "artifacts/p5/native_3879.log": "8b5e4c563c876248e231d1ec6b3a507800ee8b4551185a95ec1cea68ab79379e",
+    "artifacts/p5/slurm_accounting.txt": "a3506c490a21cddcac253b4cdc86af7757da096cb10be59b9367d241ab24997d",
+    "artifacts/p5/environment.json": "9d1c49f7b9eba86eb0e258d29fc2965daf78891ed6db256e7a608869ca759648",
+    "artifacts/p5/logits_profile_comparison.json": "6fb883e5ab6809e90c95de6bdcf12a2ed9307f541703e549aac19db2b9af9633",
+    "artifacts/p5/diagnose_summary.json": "61058b946b151995433c28ac888b9b84a6b93fdd691ae2f1d3524072c7fdc6f4",
+    "artifacts/p5/reference_3871/report.json": "aee6827a640ebb9519db916e6b49fd15bb9ddd2076642efe878810ec08610a24",
+    "artifacts/p5/ci_3872/report.json": "a588d7be6cbeaad875eca9fef80aa72419d0ed3e400d21810d0c2059448febff",
+    "artifacts/p5/probe_24gb_v3.yaml": "6cad280f52cef85e5be3720a2bfb562b755370522c1f5fb5bbaa4cdb95f5ef3f",
+    "artifacts/p5/audit/ar.json": "357a9c4ef2379d3ad9ca767793675f9ea5c775bd16a10800c108d82699d9f38b",
+    "artifacts/p5/audit/codec.json": "594adc0ce4177b880081c2892c1b2187a1a5656550440995d1273b09d3b9756f",
+    "artifacts/p5/static_checks.json": "2909e1a6a849b3d01e97e72201e856bd016e0750220efbf45114bc12b1e3593e",
+    "artifacts/p5/aggregate_checks.log": "a8c06c578bd73eaf2e938a6a9ccd35f776bc8686b5d4b31284cc8389a4da05aa",
+    "artifacts/p5/check_aggregate.py": "5d9bcc2661b289c71c35b69d848e6dbcfe2e70033958d7edd601fe686d81e998",
+    "artifacts/p5/release_source_sha256.json": "28364a13ea0e9fa894f2c3eef48891ca08aba87fc798c98dd5c41a5b0966ee07",
+    "artifacts/p5/24gb_baseline/report.json": "4361875e58347d8fea65f263355a6344139917a030a0096e322f72d4ceffc558",
+    "artifacts/p5/native_3873/report.json": "5b62450fdc0147fe0415c7210af8794db61a931089c4ef4ac769917454d58509",
+    "artifacts/p5/native_3875/report.json": "efa674f7798d66a8462c9cb6aae89e2389021bb69486381289f37c1dcc80f116",
+    "artifacts/p5/ci_3881/report.json": "4e739687a45057ceb9a10dd647735f3b566984827db01413ff9cbca691681c9c",
+    "artifacts/p5/evaluate_3882/report.json": "6c6f65a7d59adf0c09439af88ec12610ec3e584c7c5c5c353debde2de3abba20",
+    "artifacts/p5/seedtts/asr.json": "0c25cb42ee6ba85510a952a0550a2e0326f91314c39a51a0966d9cc2b953de9c"
+  },
+  "waveform_sha256": {
+    "artifacts/p5/ci_3883/reference_wav/en_00_t2s.wav": "3f4ff6e53d297c323a520bfed7eb59cc5c4e76f4aa73cf67be01193df598221d",
+    "artifacts/p5/ci_3883/en_00_t2s.wav": "3f4ff6e53d297c323a520bfed7eb59cc5c4e76f4aa73cf67be01193df598221d",
+    "artifacts/p5/ci_3883/reference_wav/en_00_s2s.wav": "baf2a214c5e202765a464e5d35ebbf7035c14ebc4c488ae4357df4e7238a1351",
+    "artifacts/p5/ci_3883/en_00_s2s.wav": "baf2a214c5e202765a464e5d35ebbf7035c14ebc4c488ae4357df4e7238a1351",
+    "artifacts/p5/ci_3883/reference_wav/en_01_t2s.wav": "9d0e8962e7de0f1bd44c770d9be1953fc939dc6c4b06776b843d32fd13c14b37",
+    "artifacts/p5/ci_3883/en_01_t2s.wav": "9d0e8962e7de0f1bd44c770d9be1953fc939dc6c4b06776b843d32fd13c14b37",
+    "artifacts/p5/ci_3883/reference_wav/en_01_s2s.wav": "baf2a214c5e202765a464e5d35ebbf7035c14ebc4c488ae4357df4e7238a1351",
+    "artifacts/p5/ci_3883/en_01_s2s.wav": "baf2a214c5e202765a464e5d35ebbf7035c14ebc4c488ae4357df4e7238a1351",
+    "artifacts/p5/ci_3883/reference_wav/en_02_t2s.wav": "758575e1d09ed8099baf375df528175d7a03d28c832bde07180449b0482ddbbf",
+    "artifacts/p5/ci_3883/en_02_t2s.wav": "758575e1d09ed8099baf375df528175d7a03d28c832bde07180449b0482ddbbf",
+    "artifacts/p5/ci_3883/reference_wav/en_02_s2s.wav": "5b34a8bf4709a222737b44a5caeeacb22c9ebd8162cf5f3ec0efcc622fe3427f",
+    "artifacts/p5/ci_3883/en_02_s2s.wav": "5b34a8bf4709a222737b44a5caeeacb22c9ebd8162cf5f3ec0efcc622fe3427f",
+    "artifacts/p5/ci_3883/reference_wav/en_03_t2s.wav": "e38283e9c8365f3ee801a3b4d88bcbe469c9e4430c576a1e62b7caa0e65bcaee",
+    "artifacts/p5/ci_3883/en_03_t2s.wav": "e38283e9c8365f3ee801a3b4d88bcbe469c9e4430c576a1e62b7caa0e65bcaee",
+    "artifacts/p5/ci_3883/reference_wav/en_03_s2s.wav": "5b34a8bf4709a222737b44a5caeeacb22c9ebd8162cf5f3ec0efcc622fe3427f",
+    "artifacts/p5/ci_3883/en_03_s2s.wav": "5b34a8bf4709a222737b44a5caeeacb22c9ebd8162cf5f3ec0efcc622fe3427f",
+    "artifacts/p5/ci_3883/reference_wav/zh_00_t2s.wav": "240797f682626e8d9aacf7b7b6048caa9598b57cb5595151844c9250b130a2d3",
+    "artifacts/p5/ci_3883/zh_00_t2s.wav": "240797f682626e8d9aacf7b7b6048caa9598b57cb5595151844c9250b130a2d3",
+    "artifacts/p5/ci_3883/reference_wav/zh_00_s2s.wav": "9d4103645ac7a9186df33c770404199c8721843aff2a3ac33bc369d1aa857e9b",
+    "artifacts/p5/ci_3883/zh_00_s2s.wav": "9d4103645ac7a9186df33c770404199c8721843aff2a3ac33bc369d1aa857e9b",
+    "artifacts/p5/ci_3883/reference_wav/zh_01_t2s.wav": "379a8061305b86716f567553b282de9a0db2d08deac81c6014e5d2326d32e0a0",
+    "artifacts/p5/ci_3883/zh_01_t2s.wav": "379a8061305b86716f567553b282de9a0db2d08deac81c6014e5d2326d32e0a0",
+    "artifacts/p5/ci_3883/reference_wav/zh_01_s2s.wav": "9d4103645ac7a9186df33c770404199c8721843aff2a3ac33bc369d1aa857e9b",
+    "artifacts/p5/ci_3883/zh_01_s2s.wav": "9d4103645ac7a9186df33c770404199c8721843aff2a3ac33bc369d1aa857e9b",
+    "artifacts/p5/ci_3883/reference_wav/zh_02_t2s.wav": "e964a6459643d6b00e64e60132160a10344d17b5e02ef18d4a2bfb61ecefa5d3",
+    "artifacts/p5/ci_3883/zh_02_t2s.wav": "e964a6459643d6b00e64e60132160a10344d17b5e02ef18d4a2bfb61ecefa5d3",
+    "artifacts/p5/ci_3883/reference_wav/zh_02_s2s.wav": "d211e1f410b5e2b10e466134cb724608a93cffa65eea519eac6bcb3bb5b112ef",
+    "artifacts/p5/ci_3883/zh_02_s2s.wav": "d211e1f410b5e2b10e466134cb724608a93cffa65eea519eac6bcb3bb5b112ef",
+    "artifacts/p5/ci_3883/reference_wav/zh_03_t2s.wav": "0f0b930dccac22f402045ec2b8696fa872c1396660ef6d81065da41ed5c62cf2",
+    "artifacts/p5/ci_3883/zh_03_t2s.wav": "0f0b930dccac22f402045ec2b8696fa872c1396660ef6d81065da41ed5c62cf2",
+    "artifacts/p5/ci_3883/reference_wav/zh_03_s2s.wav": "d211e1f410b5e2b10e466134cb724608a93cffa65eea519eac6bcb3bb5b112ef",
+    "artifacts/p5/ci_3883/zh_03_s2s.wav": "d211e1f410b5e2b10e466134cb724608a93cffa65eea519eac6bcb3bb5b112ef"
+  },
+  "release_source_sha256": {
+    "sglang-omni/.github/workflows/test-moss-speech-ci.yaml": "c1b3c45764163b5c092c6d4b6643e5de8340d3e92da947dd8f72a697ff82cb54",
+    "sglang-omni/README.md": "05886d1813fd8e0be4f1794d20514bb290abc039d8be880a8399e546fb9ba7af",
+    "sglang-omni/docs/cookbook/moss_speech.md": "a11bb050f3e3209eb8197abb57ab189731d3f5cb5d6120037ee8b571adcee67d",
+    "sglang-omni/docs/design/moss_speech/MODEL_CONTRACT.md": "04be2bead62cd27df8e8ccb8d265ed38f61ab0cea5a996f587379db8d6be4631",
+    "sglang-omni/docs/design/moss_speech/p1/01_framework_notes.md": "16c0b749dffcf7a19cd9d36c5ec00f1dab2421257b74f81ab39f8fa97d56034d",
+    "sglang-omni/docs/design/moss_speech/p4/03_gate_report.md": "4069585fc052cd1dba7cef5e5ffc962724ccf3bd1f1b729faf7989e5190eb668",
+    "sglang-omni/docs/design/moss_speech/p5/01_protocol.md": "8ce5a27253e27e63575b33f627c11f8a323655c1851a3c6c91d0693c4a2cf984",
+    "sglang-omni/docs/design/moss_speech/p5/02_dependencies_and_rights.md": "024b98558c1fa2f9db501ce57201ca4aa2a998d30e7d3a76ce189ff173ccceee",
+    "sglang-omni/docs/design/moss_speech/p5/03_hardware.md": "38749bd42fff0abdf2d125e92d2b863d5ae3b54e991dba64ab2b9b6fce3b8754",
+    "sglang-omni/docs/design/moss_speech/p5/04_quality.md": "467d310636a9e6acfe5153b168b5ddbb997601c4f8e8750b122db9582485f324",
+    "sglang-omni/docs/design/moss_speech/p5/05_gate_report.md": "bd08b87d8e47e01355d5d107ce1425237d1493e95f43c097b41425c042b34f3c",
+    "sglang-omni/docs/design/moss_speech/p5/data_manifest.json": "1e772168a2cc813daa8411028e8a6f68ae6318bab3b0efd43cd6fa9104bc3b52",
+    "sglang-omni/docs/index.rst": "311b1d7a4943ad8e81a91d21c92674d02d6148969db58614938d05b979363011",
+    "sglang-omni/scripts/moss_speech/ci/requirements-cpu.txt": "b71cee61b5181feb23a3f13ae883baafb948fe41f12b5d9df18a1e02d05cd52d",
+    "sglang-omni/scripts/moss_speech/ci/run_cpu.sh": "28abbca46a0801808655723decf80201f62a25b8108eb79816f8aa11a9d2ab67",
+    "sglang-omni/scripts/moss_speech/ci/run_gpu.sh": "5ed2b71558ba284b009d0151c8a54a003ceb84a7c84e9c43b724965e6854f262",
+    "sglang-omni/scripts/moss_speech/p5/diagnose_prefill.py": "2316f301cf42970d1352d44b6f8bc0b9c58b0d38353ec90045e4449985249e34",
+    "sglang-omni/scripts/moss_speech/p5/evaluate.py": "d167a3a2908d1a04dbf997477458b24c9ea36533f265d6a1da6a56dbfb36f00a",
+    "sglang-omni/scripts/moss_speech/p5/make_config.py": "9740766f289da2e998efe7bf48ec9060ff9319f090aecde696899a3369813ed4",
+    "sglang-omni/scripts/moss_speech/p5/native.py": "3a1dfd0ff89a1b958924fbf3deefd7d4ce0d6f0d2544a714e629cff25b32cbe7",
+    "sglang-omni/scripts/moss_speech/p5/prepare_assets.py": "89102a3ae1cf6479cd9c4569243d0ad116bba47ad62589e695dba58a70cc5a88",
+    "sglang-omni/scripts/moss_speech/p5/quality.py": "e786dc33f401fcb4e9c2a9f9c6f576511ad0cd0792847b9da7e7c417d09a5e58",
+    "sglang-omni/scripts/moss_speech/p5/reference.py": "e0560d7e5685aab12a96cc772c7e42b629b219446a333311f33dffcd76eab79b",
+    "sglang-omni/scripts/moss_speech/p5/summarize.py": "45b1e6303f9bc56c6d2b624dc5f58779963f3d5ef784cf2c3e10ebded04073e9",
+    "sglang-omni/sglang_omni/models/moss_speech/request_builders.py": "725ce28049a0b46a0e1358397604c5e9d559d5ad1227ba28f2821ddf8dbaa141",
+    "sglang-omni/sglang_omni/models/moss_speech/request_data.py": "177816f10d3494d63f97b63841eb7be75ef3f84129711d63813c4a7e468d0452",
+    "sglang-omni/tests/test_model/moss_speech_ci_config.py": "fd940c10af91597ae2633bb9f879af6fcbbd465d22f005a993ac78bb4d699b8c",
+    "sglang-omni/tests/unit_test/moss_speech/test_p5_qualification.py": "fef80e1fbd1fb55c28231cfc7280d8271c6ba9148b25a87c3e9c3aecb28ef19a"
+  },
+  "code_commit": "8cb3e12e77feb124eacf9c7d2308f71a21b9189b",
+  "static_checks": {
+    "isort": true,
+    "black": true,
+    "ruff": true,
+    "diff_check": true,
+    "ast": true,
+    "shell_syntax": true,
+    "protected_math_and_goldens_unchanged": true,
+    "workflow_yaml": true,
+    "document_shell_syntax": true,
+    "document_evidence_paths": true,
+    "cpu_requirements_tracked": true
+  }
+}
