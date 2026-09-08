@@ -1,0 +1,39 @@
+name: MOSS-Speech contracts
+on:
+  pull_request:
+    paths:
+      - 'sglang_omni/models/moss_speech/**'
+      - 'sglang_omni/serve/**'
+      - 'sglang_omni/proto/**'
+      - 'sglang_omni/config/**'
+      - 'benchmarks/tasks/asr.py'
+      - 'tests/unit_test/serve/**'
+      - 'scripts/moss_speech/**'
+      - 'tests/unit_test/moss_speech/**'
+      - 'tests/test_model/moss_speech_ci_config.py'
+      - '.github/workflows/test-moss-speech-ci.yaml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: moss-speech-contracts-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  cpu-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: astral-sh/setup-uv@v6
+      - name: Install CPU contract dependencies
+        run: |
+          uv venv
+          uv pip install torch==2.9.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cpu
+          uv pip install -r scripts/moss_speech/ci/requirements-cpu.txt
+      - name: Run asset-free contracts
+        run: |
+          source .venv/bin/activate
+          bash scripts/moss_speech/ci/run_cpu.sh
