@@ -43,6 +43,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from sglang_omni import __version__
+from sglang_omni.admission import QueueFullError
 from sglang_omni.client import (
     Client,
     ClientError,
@@ -176,6 +177,7 @@ def create_app(
     client: Client,
     *,
     model_name: str | None = None,
+    chat_request_validator: Callable[[ChatCompletionRequest], None] | None = None,
     requires_uploaded_voice_for_named_voice: bool = False,
     supports_uploaded_voice_references: bool = True,
     supports_audio_translation: bool = False,
@@ -197,6 +199,8 @@ def create_app(
     Args:
         client: Client instance connected to the pipeline coordinator.
         model_name: Default model name to report in responses and /v1/models.
+        chat_request_validator: Optional CPU-only protocol preflight. Raise
+            ValueError to reject a request before submission or HTTP headers.
         requires_uploaded_voice_for_named_voice: Whether non-default TTS voice
             names must resolve to uploaded voices before reaching the model.
         supports_uploaded_voice_references: Whether uploaded voice names can be
@@ -227,6 +231,8 @@ def create_app(
         Configured FastAPI application.
     """
     app = FastAPI(title="sglang-omni", version=__version__)
+
+    app.state.chat_request_validator = chat_request_validator
 
     app.add_middleware(
         CORSMiddleware,
@@ -651,7 +657,9 @@ def _common_model_info_value(
 
 def _register_chat_completions(app: FastAPI) -> None:
     @app.post("/v1/chat/completions")
-    async def chat_completions(req: ChatCompletionRequest) -> Response:
+    async def chat_completions(
+        req: ChatCompletionRequest, request: Request
+    ) -> Response:
         client: Client = app.state.client
         default_model: str = app.state.model_name
 
@@ -661,6 +669,11 @@ def _register_chat_completions(app: FastAPI) -> None:
         model = req.model or default_model
 
         gen_req = _build_chat_generate_request(req)
+        if app.state.chat_request_validator is not None:
+            try:
+                app.state.chat_request_validator(req)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         # Determine audio format from request
         audio_format = "wav"
@@ -691,6 +704,7 @@ def _register_chat_completions(app: FastAPI) -> None:
             model,
             req,
             audio_format,
+            request=request,
         )
 
 
@@ -703,19 +717,23 @@ async def _chat_non_stream(
     model: str,
     req: ChatCompletionRequest,
     audio_format: str,
+    *,
+    request: Request | None = None,
 ) -> JSONResponse:
     """Handle non-streaming chat completions."""
     try:
-        result = await client.completion(
-            gen_req,
-            request_id=request_id,
-            audio_format=audio_format,
+        result = await _await_chat_response(
+            request, client, gen_req, request_id=request_id, audio_format=audio_format
         )
     except ClientError as exc:
+        if QueueFullError.matches(exc):
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         if _is_bad_request_error(exc):
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
+        if QueueFullError.matches(exc):
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         logger.exception("Error generating response for request %s", request_id)
         if _is_bad_request_error(exc):
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1524,6 +1542,40 @@ async def _speech_audio_response(
             "X-Bit-Depth": "16",
         },
     )
+
+
+async def _await_chat_response(
+    request: Request | None,
+    client: Client,
+    gen_req: GenerateRequest,
+    *,
+    request_id: str,
+    audio_format: str,
+) -> CompletionResult:
+    """Cancel non-streaming chat work when its HTTP connection disappears."""
+    if request is None:
+        return await client.completion(
+            gen_req, request_id=request_id, audio_format=audio_format
+        )
+    task = asyncio.create_task(
+        client.completion(gen_req, request_id=request_id, audio_format=audio_format)
+    )
+    disconnected = asyncio.create_task(_wait_for_request_disconnect(request))
+    try:
+        done, _ = await asyncio.wait(
+            {task, disconnected}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if task in done:
+            return task.result()
+        raise asyncio.CancelledError
+    except asyncio.CancelledError:
+        await client.abort(request_id)
+        raise
+    finally:
+        if not task.done():
+            await _cancel_task_bounded(task)
+        if not disconnected.done():
+            await _cancel_task_bounded(disconnected)
 
 
 async def _await_speech_response(

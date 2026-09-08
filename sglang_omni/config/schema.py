@@ -504,6 +504,13 @@ class PipelineConfig(BaseModel):
         """Return whether uploaded voices can be lowered as reference audio."""
         return False
 
+    @staticmethod
+    def validate_chat_request(request: Any) -> None:
+        """Optional CPU preflight before HTTP headers or pipeline submission.
+
+        Implementations raise ValueError for invalid or unsupported requests.
+        """
+
     def supports_audio_translation(self) -> bool:
         """Return whether this pipeline can serve /v1/audio/translations."""
         return False

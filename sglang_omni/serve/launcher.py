@@ -414,6 +414,7 @@ async def _run_server(
         client = Client(coordinator, **cl_kwargs)
         app = create_app(
             client,
+            chat_request_validator=pipeline_config.validate_chat_request,
             model_name=model_name or pipeline_config.name,
             requires_uploaded_voice_for_named_voice=(
                 pipeline_config.requires_uploaded_voice_for_named_voice()
