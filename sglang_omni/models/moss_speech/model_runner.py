@@ -19,6 +19,7 @@ Hook contract (sglang_omni.model_runner.base.ModelRunner):
 
 from __future__ import annotations
 
+import os
 import traceback
 from typing import Any, List
 
@@ -67,6 +68,25 @@ class MossSpeechModelRunner(ModelRunner):
         return te * sel + ae * (1 - sel)
 
     # ------------------------------------------------------------------ hooks
+    def _prepare_and_forward(self, forward_batch, schedule_batch, requests, is_prefill, **kw):
+        """Snapshot the dual-tail hiddens the instant the engine's forward
+        returns (same thread, before any interleaved forward of other
+        requests can clobber the model stash). post_prefill/post_decode then
+        read the snapshot — the engine rebuilds both the result object and
+        the forward_batch between the forward and the post hooks, so neither
+        carries custom fields."""
+        result = super()._prepare_and_forward(
+            forward_batch, schedule_batch, requests, is_prefill, **kw
+        )
+        self._dual_snapshot = (
+            self.model._last_text_hidden, self.model._last_audio_hidden
+        )
+        # The engine REORDERS post_prefill across other requests' steps
+        # (observed: post_prefill for req A ran after req B's decode), so
+        # no time-point handoff is safe. The model's rid+phase store is
+        # persistent — entries live until the matching post hook pops them.
+        return result
+
     @_logged
     def custom_prefill_forward(self, forward_batch, schedule_batch, requests) -> None:
         del schedule_batch
@@ -181,19 +201,73 @@ class MossSpeechModelRunner(ModelRunner):
             r = sched_req.rid if hasattr(sched_req, "rid") else f"req{i}"
             torch.save(
                 {"text": text_logits[i].detach().float().cpu(),
-                 "audio": audio_logits[i].detach().float().cpu()},
+                 "audio": audio_logits[i].detach().float().cpu(),
+                 "transport": self._last_transport,
+                 "gen_steps": [getattr(sr.data, "generation_steps", -1) for sr in requests],
+                 "snap_text_hidden": (self._dual_snapshot[0][i].detach().float().cpu()
+                                      if getattr(self, "_dual_snapshot", None) is not None else None),
+                 "head_w_first4": self.model.text_lm_head.weight[:4].detach().float().cpu()},
                 out / f"first_step_{r}.pt",
             )
 
-    def _collect_step(self, result, forward_batch, requests) -> None:
+    def _collect_step(self, result, forward_batch, requests, *, phase: str = "prefill") -> None:
+        rids = []
+        for sr in requests:
+            rid = getattr(sr, 'rid', None)
+            if rid is None:
+                rid = getattr(getattr(getattr(sr, 'data', None), 'req', None), 'rid', None)
+            if rid is None:
+                rid = getattr(getattr(sr, 'req', None), 'rid', None)
+            rids.append(rid)
         # primary transport: per-forward attribute set by model.forward
         # (interleaved forwards make model-level stash unsafe)
-        dual = getattr(forward_batch, "_moss_dual_logits", None)
-        if dual is not None:
-            text_logits, audio_logits = dual
+        # transport precedence: result.hidden_states (engine-preserved,
+        # moss_tts pattern) > forward_batch attribute > model stash
+        # rid-keyed: pop this batch's per-request dual logits (set by the
+        # forward itself; immune to fb rebuilds and interleaved forwards)
+        step_store = self.model._dual_logits_by_rid
+        per_req = [step_store.pop((r, phase), None) for r in rids]
+        if phase == "prefill" and all(p is None for p in per_req) and all(
+            getattr(sr.data, "generation_steps", 0) > 0 for sr in requests
+        ):
+            # Engine-reordered duplicate post_prefill delivery (observed at
+            # every other decode step under overlap scheduling): no fresh
+            # prefill logits exist for these requests — this is NOT the
+            # first token. Sampling here would duplicate rows. Skip.
+            import logging as _lg
+
+            _lg.getLogger(__name__).debug(
+                "moss_speech: skipped reordered post_prefill for %s", rids
+            )
+            return
+        if first_step_debug := os.environ.get("MOSS_DUMP_DIR"):
+            import pathlib as _pd
+
+            _pd.Path(first_step_debug).mkdir(parents=True, exist_ok=True)
+            _gs = sum(getattr(sr.data, "generation_steps", 0) for sr in requests)
+            torch.save(
+                {"remaining_keys": list(self.model._dual_logits_by_rid.keys()),
+                 "pop_head5": [p[0][:5].detach().float().cpu().tolist() if p else None for p in per_req],
+                 "phase": phase, "rids": rids,
+                 "max_new": [int(getattr(getattr(sr.data, "req", None), "sampling_params", None).max_new_tokens)
+                             if getattr(getattr(sr.data, "req", None), "sampling_params", None) is not None else None
+                             for sr in requests]},
+                _pd.Path(first_step_debug) / f"pop_gs{_gs}_phase{phase}.pt",
+            )
+        if all(p is not None for p in per_req):
+            self._last_transport = "rid"
+            text_logits = torch.stack([p[0] for p in per_req], dim=0)
+            audio_logits = torch.stack([p[1] for p in per_req], dim=0)
         else:
-            dual_out = self.model.compute_dual_logits()
-            text_logits, audio_logits = dual_out.text_logits, dual_out.audio_logits
+            snap = getattr(self, "_dual_snapshot", None)
+            self._last_transport = "snapshot" if snap is not None else "stash"
+            if snap is not None:
+                t_h, a_h = snap
+                text_logits = torch.nn.functional.linear(t_h, self.model.text_lm_head.weight)
+                audio_logits = torch.nn.functional.linear(a_h, self.model.audio_lm_head.weight)
+            else:
+                dual_out = self.model.compute_dual_logits()
+                text_logits, audio_logits = dual_out.text_logits, dual_out.audio_logits
         if text_logits is None or audio_logits is None:
             raise RuntimeError("MOSS-Speech runner failed to obtain dual-head logits")
         next_tokens: List[int] = []

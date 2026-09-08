@@ -112,15 +112,21 @@ def main() -> None:
     boot_s = time.time() - t0
     print(f"[boot] done in {boot_s:.1f}s", flush=True)
     # pre-queue both requests, then run the event loop on a worker thread
-    cases = [
-        ("t2t_short", "text"),
-        ("t2s_short_trans", "audio"),
-    ]
+    import os as _os3
+
+    only = _os3.environ.get("MOSS_ONLY_CASE")
+    cases = [("t2t_short", "text"), ("t2s_short_trans", "audio")]
+    if only:
+        cases = [c for c in cases if c[0] == only]
     rids = {}
-    for case, modality in cases:
-        case_dir = Path(args.ref_dir) / ("natural_transition/t2s_short_trans" if case == "t2s_short_trans" else case)
-        rids[case] = submit_case(scheduler, case_dir, modality)
-        print(f"[case] {case} queued", flush=True)
+    if os.environ.get("MOSS_SERIAL"):
+        # one request at a time: isolates mixed-batch prefill effects
+        pass
+    else:
+        for case, modality in cases:
+            case_dir = Path(args.ref_dir) / ("natural_transition/t2s_short_trans" if case == "t2s_short_trans" else case)
+            rids[case] = submit_case(scheduler, case_dir, modality)
+            print(f"[case] {case} queued", flush=True)
 
     import threading
 
@@ -170,7 +176,9 @@ def main() -> None:
             data = run_case(scheduler, case_dir, modality, args.timeout)
             inner = getattr(data, "data", data)  # result is a StagePayload
             grid = inner.get("output_grid") if isinstance(inner, dict) else getattr(inner, "output_grid", None)
+            print("[result] finish_reason:", inner.get("finish_reason") if isinstance(inner, dict) else getattr(inner, "finish_reason", None), flush=True)
             gen = [list(map(int, r)) for r in grid]
+            print("[result] first rows:", gen[:3], flush=True)
             n = min(len(gen), len(ref_grid))
             equal_rows = sum(1 for i in range(n) if gen[i] == ref_grid[i].tolist())
             first_diff = next((i for i in range(n) if gen[i] != ref_grid[i].tolist()), None)

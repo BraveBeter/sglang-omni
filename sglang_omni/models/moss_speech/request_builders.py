@@ -32,7 +32,7 @@ import torch
 
 from sglang_omni.proto import EXPLICIT_GENERATION_PARAMS_KEY
 from sglang_omni.proto import StagePayload
-from sglang_omni.scheduling.types import ARRequestData
+from sglang_omni.scheduling.sglang_backend.request_data import SGLangARRequestData
 
 MODALITY_PAD_TOKEN = 151667
 TEXT_ENDOFTEXT_TOKEN = 151643
@@ -397,14 +397,10 @@ def cleanup_vocoder_state(request_id: str) -> None:
 # finish/abort/cleanup (idempotent).
 # --------------------------------------------------------------------------
 @dataclass
-class MossSpeechSGLangRequestData(ARRequestData):
-    """Model-runner-visible request state (moss_tts_local pattern); the
-    scheduler reads base-class bookkeeping (enforce_request_limits etc.)."""
+class MossSpeechSGLangRequestData(SGLangARRequestData):
+    """Model-runner-visible request state; the sglang backend reads the
+    base-class bookkeeping (suppress_tokens / synced / feedback queues ...)."""
 
-    enforce_request_limits: bool = True
-    req: Any = None
-    synced: bool = False
-    sampling_steps: int | None = None
     # 1-D selected-token stream (mirrors zonos2: the prefill flow iterates it)
     input_ids: Any = None
     # canonical dual-channel prompt rows (L, 2), cpu int64
@@ -417,8 +413,6 @@ class MossSpeechSGLangRequestData(ARRequestData):
     params: Any = None
     effective_seed: int = 0
     generation_steps: int = 0
-    # feedback staging for decode (moss_tts pattern)
-    pending_feedback_queue: Any = None
     # terminal bookkeeping
     finished: bool = False
     stop_reason: Any = None
@@ -429,9 +423,9 @@ class MossSpeechSGLangRequestData(ARRequestData):
     def __post_init__(self):
         if self.output_rows is None:
             self.output_rows = []
-        if self.pending_feedback_queue is None:
-            import collections
+        import collections
 
+        if self.pending_feedback_queue is None:
             self.pending_feedback_queue = collections.deque()
 
     def reset(self) -> None:
@@ -440,7 +434,8 @@ class MossSpeechSGLangRequestData(ARRequestData):
         self.generation_steps = 0
         self.finished = False
         self.stop_reason = None
-        self.pending_feedback_queue.clear()
+        if self.pending_feedback_queue is not None:
+            self.pending_feedback_queue.clear()
         from sglang_omni.models.moss_speech.fsm import initial_mode
 
         self.mode = initial_mode(self.prompt_rows)

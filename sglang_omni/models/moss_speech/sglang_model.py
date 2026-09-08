@@ -210,6 +210,9 @@ class MossSpeechSGLangModel(torch.nn.Module):
             dtype=torch.bfloat16,
         )
         self._decode_input_embedding.weight.requires_grad_(False)
+        # per-request dual logits from the most recent forward (rid-keyed;
+        # the runner pops entries when consuming)
+        self._dual_logits_by_rid: dict = {}
         # Attention layers must cover exactly the allocator's 40 slots.
         ids = [l.self_attn.attn.layer_id for l in list(self.layers) + list(self.text_block) + list(self.audio_block)]
         assert sorted(ids) == list(range(self.total_attention_layers)), (
@@ -331,7 +334,36 @@ class MossSpeechSGLangModel(torch.nn.Module):
         # forward_batch (one forward == one batch object), never from model
         # state — a model-level stash gets clobbered by interleaved forwards
         # (engine warmup / other requests) before post_prefill consumes it.
+        # moss_tts transport: hidden_states rides the engine-preserved
+        # result object (forward_batch is rebuilt between the forward and
+        # post_prefill, and a model-level stash is clobbered by interleaved
+        # decode forwards of other requests). Stacked (2, bs, H).
+        dual_hidden = torch.stack(
+            [self._last_text_hidden, self._last_audio_hidden], dim=0
+        )
         out = self.compute_dual_logits()
+        # rid-keyed transport: forward_batch is rebuilt between the forward
+        # and the post hooks, and extra forwards (sampling/logprob recompute)
+        # clobber any single-slot stash. Keying by the batch's rids binds
+        # each request's dual logits to exactly this forward.
+        rids = getattr(forward_batch, "rids", None)
+        if rids is not None:
+            _fm = getattr(forward_batch, "forward_mode", None)
+            _is_dec = bool(
+                _fm is not None
+                and getattr(_fm, "is_decode", None) is not None
+                and _fm.is_decode()
+            )
+            _mode_key = "decode" if _is_dec else "prefill"
+            for _i, _rid in enumerate(rids):
+                # clone: the engine's sampler warps next_token_logits
+                # (same storage as text_logits) IN PLACE inside
+                # forward_batch_generation; slices would see the warped
+                # distribution (the cos -0.33 artifact)
+                self._dual_logits_by_rid[(_rid, _mode_key)] = (
+                    out.text_logits[_i].clone(), out.audio_logits[_i].clone()
+                )
+        out.hidden_states = dual_hidden
         import os as _os2
 
         _d2 = _os2.environ.get("MOSS_DUMP_DIR")
@@ -351,6 +383,12 @@ class MossSpeechSGLangModel(torch.nn.Module):
                     "audio_in_r": (audio_residual.detach().float().cpu()
                                    if audio_residual is not None else None),
                     "last_idx": last_idx.detach().cpu(),
+                    "rids": (list(rids) if isinstance(rids, (list, tuple)) else None),
+                    "out_text_head5": out.text_logits[0][:5].detach().float().cpu(),
+                    "recompute_head5": torch.nn.functional.linear(
+                        self._last_text_hidden, self.text_lm_head.weight
+                    )[0][:5].detach().float().cpu(),
+                    "hidden_head5": self._last_text_hidden[0][:5].detach().float().cpu(),
                 },
                 _pl2.Path(_d2) / f"hidden_{_n2:03d}.pt",
             )
@@ -360,47 +398,26 @@ class MossSpeechSGLangModel(torch.nn.Module):
         except AttributeError:
             # object.__new__-style test batches may not accept attributes
             return self.compute_dual_logits()
-        import os as _os
-
-        _d = _os.environ.get("MOSS_DUMP_DIR")
-        if _d:
-            import pathlib as _pl
-
-            _pl.Path(_d).mkdir(parents=True, exist_ok=True)
-            _n = sum(1 for _ in _pl.Path(_d).glob("hidden_*.pt"))
-            torch.save(
-                {
-                    "text_final": self._last_text_hidden.float().cpu(),
-                    "audio_final": self._last_audio_hidden.float().cpu(),
-                    "trunk_h": hidden_states.detach().float().cpu(),
-                    "trunk_r": (residual.detach().float().cpu()
-                                if residual is not None else None),
-                    "last_idx": last_idx.detach().cpu(),
-                },
-                _pl.Path(_d) / f"hidden_{_n:03d}.pt",
-            )
-        return self.compute_dual_logits()
 
     def compute_dual_logits(self):
         """Dual-head logits from the stashed final hiddens of the last
         forward. Must be called synchronously after forward (single
-        engine thread)."""
-        from sglang.srt.layers.logits_processor import LogitsMetadata
-        from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode, ForwardMode
+        engine thread).
 
-        logits_metadata = LogitsMetadata(
-            capture_hidden_mode=CaptureHiddenMode.NULL,
-            forward_mode=ForwardMode.DECODE,
+        Plain matmul against the head weights (TP=1, unquantized): the
+        per-channel LogitsProcessor path mangled the distribution (argmax
+        flipped to unrelated tokens at cos -0.33 while a direct
+        ``hidden @ W.T`` reproduced the reference at cos 0.999 — see the
+        T3.4 first-step dumps). The engine sampler is never used for this
+        model (the runner injects next_token_ids), so the sampler-contract
+        forwarding of ParallelLMHead is not needed here.
+        """
+        text_logits = torch.nn.functional.linear(
+            self._last_text_hidden, self.text_lm_head.weight
         )
-        logits_metadata.next_token_logits_buffer = None
-        text_logits = self.text_logits_processor(
-            None, hidden_states=self._last_text_hidden, lm_head=self.text_lm_head,
-            logits_metadata=logits_metadata,
-        ).next_token_logits
-        audio_logits = self.audio_logits_processor(
-            None, hidden_states=self._last_audio_hidden, lm_head=self.audio_lm_head,
-            logits_metadata=logits_metadata,
-        ).next_token_logits
+        audio_logits = torch.nn.functional.linear(
+            self._last_audio_hidden, self.audio_lm_head.weight
+        )
         return MossSpeechModelOutput(
             next_token_logits=text_logits,
             text_logits=text_logits,

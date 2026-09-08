@@ -45,6 +45,11 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
             "enable_torch_compile": False,
             "disable_radix_cache": True,
             "tp_size": 1,
+            # chunked prefill splits prompts across multiple EXTEND blocks,
+            # firing post_prefill per chunk; the reference-semantics sampling
+            # (one first token per request) is only verified for single-block
+            # prefill in V1 — keep it off (task note: unverified configs off).
+            "chunked_prefill_size": -1,
         }
 
     def adjust_overrides(self, overrides: dict[str, Any]) -> None:
@@ -54,6 +59,7 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
         overrides["enable_torch_compile"] = False
         overrides["disable_radix_cache"] = True
         overrides["tp_size"] = 1
+        overrides["chunked_prefill_size"] = -1
         overrides.setdefault("mem_fraction_static", 0.72)
 
     def customize_server_args(self, server_args: Any) -> None:
@@ -72,6 +78,8 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
             problems.append("torch_compile enabled")
         if not sa.disable_radix_cache:
             problems.append("radix_cache enabled")
+        if int(getattr(sa, "chunked_prefill_size", -1) or -1) != -1:
+            problems.append(f"chunked_prefill_size={sa.chunked_prefill_size}")
         if int(getattr(sa, "tp_size", 1)) != 1:
             problems.append(f"tp_size={sa.tp_size}")
         if str(getattr(sa, "dtype", "bfloat16")) not in ("bfloat16", "bf16"):
