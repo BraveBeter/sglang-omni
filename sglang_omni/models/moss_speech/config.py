@@ -29,7 +29,7 @@ class MossSpeechPipelineConfig(PipelineConfig):
     terminal_stages_fn: str | None = f"{_PKG}.request_builders.resolve_terminal_stages"
 
     @staticmethod
-    def validate_chat_request(request: Any) -> None:
+    def validate_chat_request(request: Any, *, allow_streaming: bool = False) -> None:
         """Reject unsupported chat requests before HTTP streaming headers."""
         from sglang_omni.proto.request import OmniRequest
         from sglang_omni.serve.openai_api import _build_chat_generate_request
@@ -48,6 +48,7 @@ class MossSpeechPipelineConfig(PipelineConfig):
         normalize_and_validate(
             OmniRequest(inputs=_build_chat_generate_request(request)),
             request_id="preflight",
+            allow_streaming=allow_streaming,
         )
 
     @classmethod
@@ -121,3 +122,38 @@ class MossSpeechPipelineConfig(PipelineConfig):
 
 
 EntryClass = MossSpeechPipelineConfig
+
+
+# An explicit variant keeps the qualified offline profile as the default.
+_streaming_stages = [
+    s.model_copy(deep=True)
+    for s in MossSpeechPipelineConfig.model_fields["stages"].default
+]
+for _stage in _streaming_stages:
+    if _stage.name == "preprocessing":
+        _stage.factory_args["allow_streaming"] = True
+    elif _stage.name == "ar_engine":
+        _stage.factory_args["streaming"] = True
+        _stage.stream_to = ["text_decode", "audio_vocoder"]
+        _stage.stream_done_to_fn = f"{_PKG}.streaming.resolve_stream_terminal"
+    elif _stage.name == "text_decode":
+        _stage.factory = f"{_PKG}.streaming.create_streaming_text_executor"
+        _stage.can_accept_stream_before_payload = True
+    elif _stage.name == "audio_vocoder":
+        _stage.factory = f"{_PKG}.streaming.create_streaming_audio_executor"
+        _stage.factory_args["chunk_size"] = 5
+        _stage.env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+        _stage.can_accept_stream_before_payload = True
+
+
+class MossSpeechStreamingPipelineConfig(MossSpeechPipelineConfig):
+    """Opt-in chunk-trained streaming; P6 qualification is independent of V1."""
+
+    stages: list[StageConfig] = _streaming_stages
+
+    @staticmethod
+    def validate_chat_request(request: Any) -> None:
+        MossSpeechPipelineConfig.validate_chat_request(request, allow_streaming=True)
+
+
+Variants = {"streaming": MossSpeechStreamingPipelineConfig}

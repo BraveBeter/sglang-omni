@@ -31,8 +31,11 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
     context_length = 40960
     model_arch_override = "MossSpeechForCausalLM"
 
-    def __init__(self, context_length: int | None = None) -> None:
+    def __init__(
+        self, context_length: int | None = None, *, streaming: bool = False
+    ) -> None:
         super().__init__()
+        self.streaming = streaming
         from sglang_omni.models.moss_speech.request_lifecycle import (
             MossSpeechRequestLifecycle,
         )
@@ -153,6 +156,13 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
         return make_moss_speech_scheduler_adapters(
             model=model, lifecycle=self.request_lifecycle
         )
+
+    def extra_scheduler_kwargs(self) -> dict[str, Any]:
+        if not self.streaming:
+            return {}
+        from .streaming import make_stream_output_builder
+
+        return {"stream_output_builder": make_stream_output_builder()}
 
     def make_abort_callback(self) -> Callable[[str], None]:
         return lambda rid: self.request_lifecycle.release(rid, aborted=True)

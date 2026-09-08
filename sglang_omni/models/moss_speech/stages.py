@@ -103,6 +103,7 @@ def create_preprocessing_executor(
     voice_wav: Optional[str] = None,
     encode_batch_size: int = 4,
     context_limit: int = DEFAULT_PROMPT_LIMIT,
+    allow_streaming: bool = False,
 ) -> SimpleScheduler:
     codec_dir = _resolve_codec_dir(model_path, codec_path)
     voice_wav = voice_wav or os.environ.get("MOSS_SPEECH_VOICE_WAV")
@@ -121,7 +122,11 @@ def create_preprocessing_executor(
     )
 
     def compute(payload: StagePayload) -> StagePayload:
-        state = normalize_and_validate(payload.request, request_id=payload.request_id)
+        state = normalize_and_validate(
+            payload.request,
+            request_id=payload.request_id,
+            allow_streaming=allow_streaming,
+        )
         decoded = pop_decoded_audio(state)
         codes: List[List[int]] = []
         if decoded:
@@ -182,6 +187,7 @@ def create_ar_engine_executor(
     gpu_id: int | None = None,
     context_length: int = DEFAULT_CONTEXT_LIMIT,
     server_args_overrides: dict[str, Any] | None = None,
+    streaming: bool = False,
 ) -> Any:
     """Build the validated native SGLang scheduler used by the formal YAML."""
     validate_ar_preconditions(model_path, dtype=dtype, codec_path=codec_path)
@@ -193,7 +199,9 @@ def create_ar_engine_executor(
         )
     overrides = dict(server_args_overrides or {})
     overrides["trust_remote_code"] = False
-    return MossSpeechEngineBuilder(context_length=context_length).build(
+    return MossSpeechEngineBuilder(
+        context_length=context_length, streaming=streaming
+    ).build(
         model_path,
         gpu_id=0 if gpu_id is None else gpu_id,
         dtype=dtype,

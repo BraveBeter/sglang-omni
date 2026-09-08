@@ -201,7 +201,9 @@ class NormalizedAudioTurn:
     source_key: str
 
 
-def normalize_and_validate(request: OmniRequest, *, request_id: str) -> MossSpeechState:
+def normalize_and_validate(
+    request: OmniRequest, *, request_id: str, allow_streaming: bool = False
+) -> MossSpeechState:
     """HTTP-layered request -> canonical MossSpeechState (pure CPU).
 
     Raises RequestValidationError for every matrix row in the chat contract
@@ -246,12 +248,20 @@ def normalize_and_validate(request: OmniRequest, *, request_id: str) -> MossSpee
         raise RequestValidationError(
             "custom stop strings are not supported in V1", reason="not_supported"
         )
-    if getattr(gen, "stream", False):
+    if getattr(gen, "stream", False) and not allow_streaming:
         raise RequestValidationError(
             "streaming is not supported in V1", reason="not_supported"
         )
     metadata = getattr(gen, "metadata", None) or {}
-    if metadata.get("audio_config"):
+    audio_config = metadata.get("audio_config")
+    valid_stream_format = (
+        allow_streaming
+        and getattr(gen, "stream", False)
+        and isinstance(audio_config, dict)
+        and set(audio_config) == {"format"}
+        and audio_config["format"] in ("wav", "pcm")
+    )
+    if audio_config and not valid_stream_format:
         raise RequestValidationError(
             "request-level voice selection (audio config) is not supported in V1",
             reason="not_supported",

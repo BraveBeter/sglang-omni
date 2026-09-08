@@ -256,9 +256,14 @@ def test_reset_clears_generation_keeps_prompt():
     data = build_sglang_moss_request(_state_fixture(), payload=payload)
     data.output_rows = [(1, 2)]
     data.generation_steps = 3
+    data.stream_grid_cursor = 3
+    data.stream_token_cursor = 2
+    data.stream_audio_ended = True
     data.pending_feedback_queue.append(torch.zeros(4))
     data.reset()
     assert data.output_rows == [] and data.generation_steps == 0
+    assert data.stream_grid_cursor == data.stream_token_cursor == 0
+    assert data.stream_audio_ended is False
     assert len(data.pending_feedback_queue) == 0
     assert data.mode == MODE_TEXT
     assert data.prompt_rows.shape == (3, 2)

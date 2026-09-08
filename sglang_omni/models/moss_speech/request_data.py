@@ -25,6 +25,9 @@ class MossSpeechSGLangRequestData(SGLangARRequestData):
     params: Any = None
     effective_seed: int = 0
     generation_steps: int = 0
+    stream_grid_cursor: int = 0
+    stream_token_cursor: int = 0
+    stream_audio_ended: bool = False
     # terminal bookkeeping
     finished: bool = False
     stop_reason: Any = None
@@ -44,6 +47,9 @@ class MossSpeechSGLangRequestData(SGLangARRequestData):
         """Idempotent reset for retry: drop generated state, keep prompt."""
         self.output_rows = []
         self.generation_steps = 0
+        self.stream_grid_cursor = 0
+        self.stream_token_cursor = 0
+        self.stream_audio_ended = False
         self.finished = False
         self.stop_reason = None
         self.rng_generator = None

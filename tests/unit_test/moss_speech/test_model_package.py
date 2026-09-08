@@ -6,12 +6,12 @@ import subprocess
 import sys
 
 
-def test_capabilities_all_false() -> None:
+def test_capabilities_match_qualified_features() -> None:
     from sglang_omni.models.moss_speech import CAPABILITIES
 
     assert CAPABILITIES.supports_reference_audio is False
     assert CAPABILITIES.supports_batch_vocoder is False
-    assert CAPABILITIES.supports_streaming_vocoder is False
+    assert CAPABILITIES.supports_streaming_vocoder is True
     assert CAPABILITIES.supports_cuda_graph is False
     assert CAPABILITIES.supports_torch_compile is False
     assert CAPABILITIES.supports_breakable_prefill_cuda_graph is False
@@ -39,7 +39,10 @@ def test_hf_config_registers_and_parses_locked_checkpoint() -> None:
 
     from transformers import AutoConfig
 
-    from sglang_omni.models.moss_speech.hf_config import MossSpeechConfig, ensure_moss_speech_config_registered
+    from sglang_omni.models.moss_speech.hf_config import (
+        MossSpeechConfig,
+        ensure_moss_speech_config_registered,
+    )
 
     ensure_moss_speech_config_registered()
     ensure_moss_speech_config_registered()  # idempotent
@@ -57,7 +60,9 @@ def test_hf_config_registers_and_parses_locked_checkpoint() -> None:
         }
     )
     assert cfg.model_type == "moss_speech"
-    assert cfg.num_hidden_layers == 36  # 32 + 4, preserved verbatim (NOT 40: KV is P3's concern)
+    assert (
+        cfg.num_hidden_layers == 36
+    )  # 32 + 4, preserved verbatim (NOT 40: KV is P3's concern)
     assert cfg.num_shared_layers == 32 and cfg.num_modality_layers == 4
     assert cfg.vocab_size == 151680 and cfg.audio_vocab_size == 16512
     assert cfg.sosp_token_id == 151646 and cfg.eosp_token_id == 16384
@@ -68,7 +73,9 @@ def test_hf_config_registers_and_parses_locked_checkpoint() -> None:
     if not model_dir or not os.path.isdir(model_dir):
         import pytest
 
-        pytest.skip("MOSS_SPEECH_MODEL_DIR not set; locked checkpoint parse check skipped")
+        pytest.skip(
+            "MOSS_SPEECH_MODEL_DIR not set; locked checkpoint parse check skipped"
+        )
     parsed = AutoConfig.from_pretrained(model_dir, trust_remote_code=False)
     assert type(parsed) is MossSpeechConfig
     assert parsed.num_hidden_layers == 36
