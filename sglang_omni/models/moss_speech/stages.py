@@ -5,9 +5,7 @@
   P1 encoder-only adapter; default voice precomputed once at factory time
   and transported in request payloads (no startup-queue handoff, no waiting
   inside the gpu_startup_lock).
-- ar_engine: P2 boundary — real server-args/hf_config checks, then a tagged
-  not-implemented error pointing at P3. Never calls
-  ``create_sglang_infrastructure``.
+- ar_engine: native SGLang dual-channel model with 40-layer paged KV.
 - text_decode: reference text-channel decode rules (skip special tokens +
   empty/end_empty replacements).
 - audio_vocoder: P1 decoder-only adapter, serial execution with a
@@ -23,16 +21,16 @@ from __future__ import annotations
 
 import os
 import random
-from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional
 
 import numpy as np
 import torch
 
-from sglang_omni.models.moss_speech.components.codec_adapter import MossSpeechCodecAdapter
+from sglang_omni.models.moss_speech.components.codec_adapter import (
+    MossSpeechCodecAdapter,
+)
 from sglang_omni.models.moss_speech.components.processor import MossSpeechGridProcessor
 from sglang_omni.models.moss_speech.payload_types import (
-    AUDIO_PAD_TOKEN_ID,
     EOSP_TOKEN_ID,
     MODALITY_PAD_TOKEN_ID,
     MossSpeechState,
@@ -52,10 +50,6 @@ from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 DEFAULT_CONTEXT_LIMIT = 10240  # SFT context bound (P0 contract §2)
 
 
-class MossSpeechARNotImplemented(NotImplementedError):
-    """AR engine boundary marker: the native SGLang model lands in P3."""
-
-
 def _resolve_codec_dir(model_path: str, codec_path: Optional[str]) -> str:
     if codec_path:
         if not os.path.isdir(codec_path):
@@ -69,10 +63,12 @@ def _resolve_codec_dir(model_path: str, codec_path: Optional[str]) -> str:
     )
 
 
-def _load_tokenizer(model_path: str):
+def _load_tokenizer(model_path: str) -> Any:
     from transformers import AutoTokenizer
 
-    from sglang_omni.models.moss_speech.hf_config import ensure_moss_speech_config_registered
+    from sglang_omni.models.moss_speech.hf_config import (
+        ensure_moss_speech_config_registered,
+    )
 
     ensure_moss_speech_config_registered()
     return AutoTokenizer.from_pretrained(model_path, trust_remote_code=False)
@@ -108,7 +104,9 @@ def create_preprocessing_executor(
     processor = MossSpeechGridProcessor(tokenizer)
     # default voice precomputed exactly once, on the encoder side (P1 chain)
     voice = adapter.encode_voice_ref(voice_wav)
-    voice_key = voice.meta.get("revision", "voice") + ":" + str(voice.prompt_token.shape[1])
+    voice_key = (
+        voice.meta.get("revision", "voice") + ":" + str(voice.prompt_token.shape[1])
+    )
 
     def compute(payload: StagePayload) -> StagePayload:
         state = normalize_and_validate(payload.request, request_id=payload.request_id)
@@ -135,56 +133,64 @@ def create_preprocessing_executor(
             state.voice_feat = voice.prompt_feat[0].tolist()
             state.voice_embedding = voice.embedding[0].tolist()
         remember_prepared(payload.request_id, state)
-        return StagePayload(request_id=payload.request_id, request=payload.request, data=state.to_dict())
+        return StagePayload(
+            request_id=payload.request_id, request=payload.request, data=state.to_dict()
+        )
 
     return SimpleScheduler(compute, abort_callback=cleanup_preprocessing_state)
 
 
-# --------------------------------------------------------------------- AR stub
-def create_ar_engine_executor(
+# -------------------------------------------------------------------- native AR
+def validate_ar_preconditions(
     model_path: str,
     *,
     dtype: str = "bfloat16",
     codec_path: Optional[str] = None,
 ) -> Any:
-    """Formal AR factory (P2 boundary).
-
-    Performs the real load-precondition checks — server args construction,
-    hf_config parse of the locked checkpoint (no trust_remote_code), asset
-    presence — and then raises :class:`MossSpeechARNotImplemented`. It never
-    initializes ModelWorker/KV pools/attention backends (P3 scope).
-    """
+    """CPU-only checkpoint/config validation, independent of model loading."""
     from transformers import AutoConfig
 
     from sglang_omni.models.moss_speech.hf_config import (
         MossSpeechConfig,
         ensure_moss_speech_config_registered,
     )
-    from sglang_omni.scheduling.sglang_backend.server_args_builder import build_sglang_server_args
 
+    if dtype not in ("bfloat16", "bf16"):
+        raise ValueError("MOSS-Speech V1 requires BF16 AR weights")
     if not os.path.isdir(model_path):
         raise FileNotFoundError(f"model_path {model_path!r} not found")
+    _resolve_codec_dir(model_path, codec_path)
     ensure_moss_speech_config_registered()
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=False)
     if not isinstance(config, MossSpeechConfig):
-        raise RuntimeError(
-            f"checkpoint at {model_path!r} did not resolve to MossSpeechConfig (got {type(config).__name__})"
+        raise ValueError(f"Expected MossSpeechConfig, got {type(config).__name__}")
+    return config
+
+
+def create_ar_engine_executor(
+    model_path: str,
+    *,
+    dtype: str = "bfloat16",
+    codec_path: Optional[str] = None,
+    gpu_id: int | None = None,
+    context_length: int = DEFAULT_CONTEXT_LIMIT,
+    server_args_overrides: dict[str, Any] | None = None,
+) -> Any:
+    """Build the validated native SGLang scheduler used by the formal YAML."""
+    validate_ar_preconditions(model_path, dtype=dtype, codec_path=codec_path)
+    from sglang_omni.models.moss_speech.engine_builder import MossSpeechEngineBuilder
+
+    if not 1 <= context_length <= DEFAULT_CONTEXT_LIMIT:
+        raise ValueError(
+            f"V1 context_length must be within [1, {DEFAULT_CONTEXT_LIMIT}]"
         )
-    server_args = build_sglang_server_args(
+    overrides = dict(server_args_overrides or {})
+    overrides["trust_remote_code"] = False
+    return MossSpeechEngineBuilder(context_length=context_length).build(
         model_path,
-        config.max_position_embeddings,
+        gpu_id=0 if gpu_id is None else gpu_id,
         dtype=dtype,
-        # V1 boundary per plan §0: TP=1, eager, no radix/cache/graph/compile.
-        disable_radix_cache=True,
-        enable_torch_compile=False,
-        trust_remote_code=False,  # hf_config is vendored & registered
-    )
-    raise MossSpeechARNotImplemented(
-        "MOSS-Speech native AR engine is implemented in P3 (SGLang model class "
-        "registration, dual-head runner, 40-layer KV accounting). Pre-checks "
-        f"passed: server_args dtype={server_args.dtype}, config "
-        f"layers={config.num_hidden_layers}, codec assets at "
-        f"{_resolve_codec_dir(model_path, codec_path)!r}."
+        server_args_overrides=overrides,
     )
 
 
@@ -202,9 +208,26 @@ def create_text_decode_executor(model_path: str) -> SimpleScheduler:
         # reference processor decode replacements (P0 contract §4)
         text = text.replace("<|empty|>", ".").replace("<|end_empty|>", ":")
         state.generated_text = text
-        return StagePayload(request_id=payload.request_id, request=payload.request, data=state.to_dict())
+        return StagePayload(
+            request_id=payload.request_id, request=payload.request, data=state.to_dict()
+        )
 
     return SimpleScheduler(compute)
+
+
+def extract_output_codes(state: MossSpeechState) -> List[int]:
+    """Extract the first audio segment; ignored text-mode audio cannot stop it."""
+    codes: List[int] = []
+    for text_token, audio_token in state.output_grid or []:
+        if int(text_token) != MODALITY_PAD_TOKEN_ID:
+            continue
+        token = int(audio_token)
+        if token == EOSP_TOKEN_ID:
+            break
+        if not 0 <= token < EOSP_TOKEN_ID:
+            raise RequestValidationError(f"Invalid generated audio code {token}")
+        codes.append(token)
+    return codes
 
 
 # --------------------------------------------------------------- audio_vocoder
@@ -216,18 +239,22 @@ def create_audio_vocoder_executor(
 ) -> SimpleScheduler:
     codec_dir = _resolve_codec_dir(model_path, codec_path)
     adapter = MossSpeechCodecAdapter(
-        codec_dir, load_encoder=False, load_decoder=True,
+        codec_dir,
+        load_encoder=False,
+        load_decoder=True,
         device=f"cuda:{gpu_id}" if gpu_id is not None else "cuda",
     )
     _VOICE_CACHE: dict[str, Any] = {}  # device tensor copies keyed by voice_key
 
-    def _voice_for(state: MossSpeechState):
+    def _voice_for(state: MossSpeechState) -> Any:
         key = state.voice_key
         if key is None:
             raise RequestValidationError("audio request missing voice conditioning")
         cached = _VOICE_CACHE.get(key)
         if cached is None:
-            from sglang_omni.models.moss_speech.components.voice import VoiceConditioning
+            from sglang_omni.models.moss_speech.components.voice import (
+                VoiceConditioning,
+            )
 
             cached = VoiceConditioning(
                 prompt_token=torch.tensor([state.voice_token_ids], dtype=torch.int32),
@@ -238,20 +265,9 @@ def create_audio_vocoder_executor(
             _VOICE_CACHE[key] = cached
         return cached
 
-    def _extract_output_codes(state: MossSpeechState) -> List[int]:
-        """P0 semantics: audio-channel codes while text channel streams
-        modality_pad; eosp (16384) ends the segment when present."""
-        codes: List[int] = []
-        for text_tok, audio_tok in state.output_grid or []:
-            if int(audio_tok) == EOSP_TOKEN_ID:
-                break  # P0 trace: the eosp row's text channel is a real token, not pad
-            if int(text_tok) == MODALITY_PAD_TOKEN_ID:
-                codes.append(int(audio_tok))  # audio-mode rows only (im_end tail leaks otherwise)
-        return codes
-
     def compute(payload: StagePayload) -> StagePayload:
         state = _state_from_payload(payload)
-        codes = _extract_output_codes(state)
+        codes = extract_output_codes(state)
         voice = _voice_for(state)
         remember_vocoder_session(payload.request_id)
         py_state = random.getstate()
@@ -272,6 +288,8 @@ def create_audio_vocoder_executor(
             cleanup_vocoder_state(payload.request_id)
         state.audio_samples = wav.tolist()
         state.audio_sample_rate = int(sr)
-        return StagePayload(request_id=payload.request_id, request=payload.request, data=state.to_dict())
+        return StagePayload(
+            request_id=payload.request_id, request=payload.request, data=state.to_dict()
+        )
 
     return SimpleScheduler(compute, abort_callback=cleanup_vocoder_state)

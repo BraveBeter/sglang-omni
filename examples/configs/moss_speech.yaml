@@ -1,7 +1,6 @@
 # SPDX-License: Apache-2.0
-# MOSS-Speech V1 baseline (single A800-80G, AR BF16 [P3], codec FP32).
-# Launch preconditions are checkable today; the formal ar_engine factory
-# raises MossSpeechARNotImplemented until the native SGLang model lands (P3).
+# MOSS-Speech V1 baseline (single A800-80G, AR BF16, codec FP32).
+# Native AR, 40 KV layers; TP=1 and eager execution.
 #
 # Assets: model_path is the materialized AR/tokenizer dir; the codec resolves
 # to the sibling "<model_path>-Codec" directory (override per factory args in

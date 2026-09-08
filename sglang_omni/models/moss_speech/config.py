@@ -1,25 +1,20 @@
 # SPDX-License: Apache-2.0
-"""Pipeline configuration for MOSS-Speech (P2 skeleton).
+"""Native MOSS-Speech pipeline: preprocessing -> AR -> text/audio terminal.
 
-Topology (P1 placement decision D-1/D-3, P2 chat contract §7):
-
-    preprocessing (validate + lower + codec encode, Layout A)
-        -> ar_engine (native SGLang AR; P3 — factory raises a tagged
-           not-implemented error until then)
-        -> route_fn -> text_decode (terminal, CPU)
-                    |-> audio_vocoder (terminal, GPU, serial + RNG scope)
-
-Preprocessing/vocoder consume the P1 codec adapter exclusively; no codec
-logic is duplicated here. The formal ``ar_engine`` factory performs its
-argument and hf_config checks and then raises
-``MossSpeechARNotImplemented`` (P3 pointer) — see stages.py.
+P1 codec components are shared by preprocessing and vocoder. The AR stage
+uses the same native builder validated by the Phase 3 parity drivers.
 """
 
 from __future__ import annotations
 
 from typing import ClassVar
 
-from sglang_omni.config import PipelineConfig, StageConfig, StageResourceConfig, StageRuntimeConfig
+from sglang_omni.config import (
+    PipelineConfig,
+    StageConfig,
+    StageResourceConfig,
+    StageRuntimeConfig,
+)
 
 _PKG = "sglang_omni.models.moss_speech"
 
@@ -56,7 +51,9 @@ class MossSpeechPipelineConfig(PipelineConfig):
             factory=f"{_PKG}.stages.create_preprocessing_executor",
             factory_args={"encode_batch_size": 4},
             gpu=0,
-            runtime=StageRuntimeConfig(resources=StageResourceConfig(total_gpu_memory_fraction=0.06)),
+            runtime=StageRuntimeConfig(
+                resources=StageResourceConfig(total_gpu_memory_fraction=0.06)
+            ),
             next="ar_engine",
         ),
         StageConfig(
@@ -65,7 +62,9 @@ class MossSpeechPipelineConfig(PipelineConfig):
             factory=f"{_PKG}.stages.create_ar_engine_executor",
             factory_args={"dtype": "bfloat16"},
             gpu=0,
-            runtime=StageRuntimeConfig(resources=StageResourceConfig(total_gpu_memory_fraction=0.72)),
+            runtime=StageRuntimeConfig(
+                resources=StageResourceConfig(total_gpu_memory_fraction=0.72)
+            ),
             next=["text_decode", "audio_vocoder"],
             route_fn=f"{_PKG}.request_builders.resolve_output_terminal",
         ),
@@ -80,7 +79,9 @@ class MossSpeechPipelineConfig(PipelineConfig):
             process="vocoder",
             factory=f"{_PKG}.stages.create_audio_vocoder_executor",
             gpu=0,
-            runtime=StageRuntimeConfig(resources=StageResourceConfig(total_gpu_memory_fraction=0.12)),
+            runtime=StageRuntimeConfig(
+                resources=StageResourceConfig(total_gpu_memory_fraction=0.12)
+            ),
             terminal=True,
         ),
     ]

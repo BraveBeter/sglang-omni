@@ -46,7 +46,9 @@ from sglang_omni.serve.protocol import ChatCompletionRequest
 
 def _blake(arr) -> str:
     a = arr.detach().cpu().numpy() if isinstance(arr, torch.Tensor) else np.asarray(arr)
-    return hashlib.blake2b(np.asarray(a, dtype=np.float32).tobytes(), digest_size=16).hexdigest()
+    return hashlib.blake2b(
+        np.asarray(a, dtype=np.float32).tobytes(), digest_size=16
+    ).hexdigest()
 
 
 def _chat_omni(**kwargs):
@@ -63,18 +65,28 @@ async def main_async(args) -> dict:
     # swap ONLY the ar factory to the replay stub (test config copy)
     for stage in config.stages:
         if stage.name == "ar_engine":
-            stage.factory = "tests.unit_test.moss_speech.ar_stub.create_ar_stub_executor"
+            stage.factory = (
+                "tests.unit_test.moss_speech.ar_stub.create_ar_stub_executor"
+            )
             stage.factory_args = {
                 "audio_grid_file": args.audio_grid,
                 "text_grid_file": args.text_grid,
             }
     runner = MultiProcessPipelineRunner(config)
     out: dict = {}
-    await runner.start(timeout=600.0)
+    processes = []
     try:
+        await runner.start(timeout=600.0)
+        processes = [p for g in runner._groups for p in g.processes]
         # ---- text request -----------------------------------------------------
-        text_req = _chat_omni(messages=[{"role": "user", "content": "Introduce yourself in one sentence."}])
-        result = await asyncio.wait_for(runner.coordinator.submit("smoke-t1", text_req), timeout=180)
+        text_req = _chat_omni(
+            messages=[
+                {"role": "user", "content": "Introduce yourself in one sentence."}
+            ]
+        )
+        result = await asyncio.wait_for(
+            runner.coordinator.submit("smoke-t1", text_req), timeout=180
+        )
         data = result.data if hasattr(result, "data") else result
         expected_text = Path(args.text_expected).read_text()
         out["text"] = {
@@ -88,41 +100,70 @@ async def main_async(args) -> dict:
         audio_req = _chat_omni(
             modalities=["audio"],
             seed=0,
-            messages=[{"role": "user", "content": [
-                {"type": "input_audio", "input_audio": {"data": voice_b64, "format": "wav"}}
-            ]}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_audio",
+                            "input_audio": {"data": voice_b64, "format": "wav"},
+                        }
+                    ],
+                }
+            ],
         )
-        result = await asyncio.wait_for(runner.coordinator.submit("smoke-a1", audio_req), timeout=600)
+        result = await asyncio.wait_for(
+            runner.coordinator.submit("smoke-a1", audio_req), timeout=600
+        )
         data = result.data if hasattr(result, "data") else result
         ref = json.loads(Path(args.reference_json).read_text())
         out["audio"] = {
             "sr": data.get("audio_sample_rate"),
             "n_samples": len(data.get("audio_samples") or []),
-            "hash_equals_p1": _blake(data.get("audio_samples")) == ref["decode"]["mixed_cn_s0"]["blake2b"],
+            "hash_equals_p1": _blake(data.get("audio_samples"))
+            == ref["decode"]["mixed_cn_s0"]["blake2b"],
             "text_empty": not data.get("generated_text"),
         }
 
         # ---- abort then recover --------------------------------------------------
         long_req = _chat_omni(messages=[{"role": "user", "content": "another"}])
-        submit_task = asyncio.create_task(runner.coordinator.submit("smoke-x1", long_req))
-        await asyncio.sleep(0.05)
-        await runner.coordinator.abort("smoke-x1")
+        submit_task = asyncio.create_task(
+            runner.coordinator.submit("smoke-x1", long_req)
+        )
+        deadline = asyncio.get_running_loop().time() + 10
+        while "smoke-x1" not in runner.coordinator._requests:
+            if submit_task.done() or asyncio.get_running_loop().time() > deadline:
+                raise AssertionError(
+                    "stub request completed before cancellation could be tested"
+                )
+            await asyncio.sleep(0)
+        assert await runner.coordinator.abort("smoke-x1")
+        finalized = False
         try:
             await asyncio.wait_for(submit_task, timeout=60)
+        except asyncio.CancelledError:
+            finalized = True
         except asyncio.TimeoutError:
-            out["abort"] = {"submit_finalized": False}
+            finalized = False
         result2 = await asyncio.wait_for(
-            runner.coordinator.submit("smoke-t2", _chat_omni(messages=[{"role": "user", "content": "again"}])),
+            runner.coordinator.submit(
+                "smoke-t2", _chat_omni(messages=[{"role": "user", "content": "again"}])
+            ),
             timeout=240,
         )
         data2 = result2.data if hasattr(result2, "data") else result2
         out["abort"] = {
-            "submit_finalized": True,
+            "submit_finalized": finalized,
             "next_request_recovered": bool(data2.get("generated_text")),
         }
     finally:
+        if not processes:
+            processes = [p for g in runner._groups for p in g.processes]
         await runner.stop()
-    out["children_exited"] = all(p.returncode is not None for g in runner._groups for p in g.processes)
+    out["processes"] = [{"pid": p.pid, "exitcode": p.exitcode} for p in processes]
+    out["children_exited"] = len(processes) == 4 and all(
+        p.exitcode is not None and not p.is_alive() for p in processes
+    )
     return out
 
 
@@ -133,7 +174,9 @@ def main() -> None:
     parser.add_argument("--text-grid", required=True)
     parser.add_argument("--text-expected", required=True)
     parser.add_argument("--voice-wav", required=True)
-    parser.add_argument("--reference-json", required=True, help="P1 alignment reference_export.json")
+    parser.add_argument(
+        "--reference-json", required=True, help="P1 alignment reference_export.json"
+    )
     parser.add_argument("--json-out", required=True)
     args = parser.parse_args()
     out = asyncio.run(main_async(args))
@@ -142,7 +185,7 @@ def main() -> None:
     print(json.dumps(out, indent=1))
     assert out["text"]["generated_matches_fixture"] and out["text"]["audio_absent"]
     assert out["audio"]["hash_equals_p1"] and out["audio"]["sr"] == 24000
-    assert out["abort"]["next_request_recovered"]
+    assert out["abort"]["submit_finalized"] and out["abort"]["next_request_recovered"]
     assert out["children_exited"]
     print("MULTIPROC SMOKE PASSED")
 
