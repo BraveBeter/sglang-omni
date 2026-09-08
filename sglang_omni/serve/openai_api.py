@@ -793,6 +793,44 @@ async def _chat_stream(
     req: ChatCompletionRequest,
     audio_format: str,
 ) -> AsyncIterator[str]:
+    """Report post-header failures as SSE errors and preserve cancellation."""
+    try:
+        async with aclosing(
+            _chat_stream_impl(
+                client,
+                gen_req,
+                request_id,
+                response_id,
+                created,
+                model,
+                req,
+                audio_format,
+            )
+        ) as stream:
+            async for event in stream:
+                yield event
+    except Exception:
+        logger.exception("Chat stream failed for request %s", request_id)
+        error = {
+            "error": {
+                "message": "Generation failed during streaming.",
+                "type": "server_error",
+                "code": "stream_error",
+            }
+        }
+        yield f"data: {json.dumps(error)}\n\n"
+
+
+async def _chat_stream_impl(
+    client: Client,
+    gen_req: GenerateRequest,
+    request_id: str,
+    response_id: str,
+    created: int,
+    model: str,
+    req: ChatCompletionRequest,
+    audio_format: str,
+) -> AsyncIterator[str]:
     """Streaming chat completion generator (yields SSE events)."""
     role_sent = False
     requested_modalities = req.modalities or ["text"]

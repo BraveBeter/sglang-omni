@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 from typing import Any
 
@@ -857,8 +858,10 @@ def test_chat_stream_failure_closes_without_done_sentinel() -> None:
         ):
             chunks.append(chunk)
 
-    with pytest.raises(RuntimeError, match="cuda out of memory"):
-        asyncio.run(_drive())
+    asyncio.run(_drive())
+    assert (
+        json.loads(chunks[-1].removeprefix("data: "))["error"]["code"] == "stream_error"
+    )
 
     assert chunks
     assert all(chunk != "data: [DONE]\n\n" for chunk in chunks)
