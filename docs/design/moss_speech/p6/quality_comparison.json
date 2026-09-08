@@ -1,0 +1,139 @@
+{
+  "pass": true,
+  "p5_evaluation_sha256": "631b51c39f4dc1c0c09f777003614d456d9c990d63a439152e0b81d568dedb26",
+  "p6_evaluation_sha256": "44077897c8ef32ea979d2c350085c91a3604ee2ff63758fd1c65c7c8b2433eb8",
+  "aggregate_asr_summary_equal": true,
+  "quality_thresholds": false,
+  "human_mos": null,
+  "scope": "Descriptive offline/streaming profile comparison; waveform RMSE is not a perceptual quality gate. S2S has no ground truth transcript; only reference/native agreement is scored.",
+  "audio": [
+    {
+      "id": "en_00_s2s",
+      "offline_samples": 599040,
+      "streaming_samples": 599040,
+      "samples_equal": true,
+      "pcm_equal": false,
+      "aligned_rmse": 0.09262622366608372
+    },
+    {
+      "id": "en_00_t2s",
+      "offline_samples": 59520,
+      "streaming_samples": 59520,
+      "samples_equal": true,
+      "pcm_equal": false,
+      "aligned_rmse": 0.08019296226592902
+    },
+    {
+      "id": "en_01_s2s",
+      "offline_samples": 599040,
+      "streaming_samples": 599040,
+      "samples_equal": true,
+      "pcm_equal": false,
+      "aligned_rmse": 0.09262622366608372
+    },
+    {
+      "id": "en_01_t2s",
+      "offline_samples": 78720,
+      "streaming_samples": 78720,
+      "samples_equal": true,
+      "pcm_equal": false,
+      "aligned_rmse": 0.08720678786930486
+    },
+    {
+      "id": "en_02_s2s",
+      "offline_samples": 639360,
+      "streaming_samples": 639360,
+      "samples_equal": true,
+      "pcm_equal": false,
+      "aligned_rmse": 0.09345553963314693
+    },
+    {
+      "id": "en_02_t2s",
+      "offline_samples": 161280,
+      "streaming_samples": 161280,
+      "samples_equal": true,
+      "pcm_equal": false,
+      "aligned_rmse": 0.09389211729374505
+    },
+    {
+      "id": "en_03_s2s",
+      "offline_samples": 639360,
+      "streaming_samples": 639360,
+      "samples_equal": true,
+      "pcm_equal": false,
+      "aligned_rmse": 0.09345553963314693
+    },
+    {
+      "id": "en_03_t2s",
+      "offline_samples": 63360,
+      "streaming_samples": 63360,
+      "samples_equal": true,
+      "pcm_equal": false,
+      "aligned_rmse": 0.0802864191276069
+    },
+    {
+      "id": "zh_00_s2s",
+      "offline_samples": 983040,
+      "streaming_samples": 983040,
+      "samples_equal": true,
+      "pcm_equal": false,
+      "aligned_rmse": 0.11838768939013745
+    },
+    {
+      "id": "zh_00_t2s",
+      "offline_samples": 109440,
+      "streaming_samples": 109440,
+      "samples_equal": true,
+      "pcm_equal": false,
+      "aligned_rmse": 0.11822680383879444
+    },
+    {
+      "id": "zh_01_s2s",
+      "offline_samples": 983040,
+      "streaming_samples": 983040,
+      "samples_equal": true,
+      "pcm_equal": false,
+      "aligned_rmse": 0.11838768939013745
+    },
+    {
+      "id": "zh_01_t2s",
+      "offline_samples": 130560,
+      "streaming_samples": 130560,
+      "samples_equal": true,
+      "pcm_equal": false,
+      "aligned_rmse": 0.10984619637051722
+    },
+    {
+      "id": "zh_02_s2s",
+      "offline_samples": 938880,
+      "streaming_samples": 938880,
+      "samples_equal": true,
+      "pcm_equal": false,
+      "aligned_rmse": 0.12931024089507565
+    },
+    {
+      "id": "zh_02_t2s",
+      "offline_samples": 107520,
+      "streaming_samples": 107520,
+      "samples_equal": true,
+      "pcm_equal": false,
+      "aligned_rmse": 0.11956086546669863
+    },
+    {
+      "id": "zh_03_s2s",
+      "offline_samples": 938880,
+      "streaming_samples": 938880,
+      "samples_equal": true,
+      "pcm_equal": false,
+      "aligned_rmse": 0.12931024089507565
+    },
+    {
+      "id": "zh_03_t2s",
+      "offline_samples": 92160,
+      "streaming_samples": 92160,
+      "samples_equal": true,
+      "pcm_equal": false,
+      "aligned_rmse": 0.10560335737132336
+    }
+  ]
+}

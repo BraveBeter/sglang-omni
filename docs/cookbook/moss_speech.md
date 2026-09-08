@@ -1,10 +1,11 @@
 # MOSS-Speech
 
-MOSS-Speech provides non-streaming text/speech input and text/speech output through
+MOSS-Speech provides text/speech input and text/speech output, with an opt-in
+streaming profile, through
 `POST /v1/chat/completions`. It is a conversation model; speech transcription and
 verbatim reading are prompting tasks, without a dedicated ASR/TTS quality claim.
 The measured baseline is one A80080GB, TP1, BF16 native AR/KV, FP32 codec, eager
-PyTorch attention. Streaming, uploaded voices, radix caching, CUDA Graph, compile,
+PyTorch attention. Uploaded voices, radix caching, CUDA Graph, compile,
 quantization and TP>1 are disabled. The pipeline uses one inline input encoder and
 separate text/audio terminals. Codec execution concurrency is1.
 
@@ -111,6 +112,92 @@ Omitted sampling values use0.6/0.95/20/1.1; explicit values are preserved.
 The default output budget is200 grid rows. `finish_reason=length` means the
 utterance may be incomplete. Usage counts one dual-channel grid row as one token,
 including template/input-audio positions. A disconnect aborts outstanding work.
+
+## Explicit streaming variant
+
+P6 qualifies chunk5 streaming on the A80080GB profile. The default P5 YAML
+continues to reject streaming; the capability declaration describes availability
+of the separate variant.
+Render the separate profile and launch it with the same serving command:
+
+```bash
+.venv-omni/bin/python sglang-omni/scripts/moss_speech/p6/make_config.py \
+  --model-path models/MOSS-Speech --codec-path models/MOSS-Speech-Codec \
+  --voice-wav repos/MOSS-Speech/assets/prompt-cn.wav \
+  --runtime-dir artifacts/moss-stream-runtime --output artifacts/moss-stream.yaml
+.venv-omni/bin/python -m sglang_omni.cli serve \
+  --config artifacts/moss-stream.yaml --host 127.0.0.1 --port 8000
+```
+
+This requires `flow/flow-chunk-5.pt` in addition to the offline codec assets.
+Chunk25 is component-tested separately; the HTTP baseline uses chunk5. The
+profile keeps BF16 AR/KV and FP32 codec, with deterministic cuDNN scoped to the
+streaming codec. The vocoder worker also defaults
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to avoid accumulating unused
+CUDA reservations as prefixes grow. Keep this measured setting; overriding it
+requires separate memory qualification. It does not change the default offline
+computation or the AR worker environment.
+
+Set `stream=True` on the four-mode request above. For speech output, explicitly
+select PCM to obtain headerless signed16-bit little-endian samples at24kHz mono:
+
+```python
+import json
+
+body["stream"] = True
+if speech_output:
+    body["audio"] = {"format": "pcm"}
+with httpx.Client(timeout=900) as client, open("output.pcm", "wb") as audio_file:
+    with client.stream("POST", "http://127.0.0.1:8000/v1/chat/completions", json=body) as response:
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if not line.startswith("data: "):
+                continue
+            if line[6:] == "[DONE]":
+                break
+            event = json.loads(line[6:])
+            if "error" in event:
+                raise RuntimeError(event["error"])
+            choice = event["choices"][0]
+            delta = choice["delta"]
+            print(delta.get("content") or "", end="", flush=True)
+            if delta.get("audio", {}).get("data"):
+                audio_file.write(base64.b64decode(delta["audio"]["data"]))
+            if choice.get("finish_reason"):
+                print(choice["finish_reason"], event.get("usage"))
+```
+
+WAV is also supported, but each audio delta is a complete WAV container; decode
+each one and concatenate its samples instead of concatenating file headers.
+Text buffers incomplete UTF-8. If a length cap splits a multibyte sequence, only
+the valid Unicode prefix is emitted; full token usage and `length` remain intact.
+A successful stream has one finish/usage event and one `[DONE]`. A post-header
+failure has a sanitized SSE error and ends without success finish or `[DONE]`.
+Closing the connection aborts unfinished backend work.
+
+Streaming speech uses separately trained flow weights and prefix/overlap decoding;
+it need not equal the offline waveform. The hard comparison is against an
+independent reference with the same streaming profile. Early audio delivery does
+not establish real-time playback throughput or a latency SLA. Do not reuse the
+P5 offline memory estimate for streaming. On the fixed 16 audio cases, client
+TTFA p50/p95 was 2.563/2.719s and E2E RTF p50/p95 was 3.868/5.639. This profile
+therefore does not sustain real-time playback. The full streaming run sampled
+26.487GiB peak GPU memory, including four two-request waves with identical idle
+memory. HTTP concurrency2 was verified; the inherited AR limit4 is not a measured
+four-stream load claim. Chunk25 and other hardware need separate HTTP qualification.
+
+All 32 canonical requests preserved the frozen 4001-row AR grid; all 16 PCM
+outputs exactly matched the independent streaming reference. P5 and P6 aggregate
+ASR scores were unchanged, including Chinese T2S CER38.75% and two S2S length
+stops. This small sample and the absence of human listening scores limit quality
+claims. Details and retained failures are in
+`sglang-omni/docs/design/moss_speech/p6/03_gate_report.md`.
+
+Full component, HTTP, offline-regression and independent ASR reproduction is in
+`sglang-omni/docs/design/moss_speech/p6/02_reproduction.md`. The CPU CI entry also
+runs P6 contracts. The separate GPU entry is
+`sglang-omni/scripts/moss_speech/ci/run_streaming_gpu.sh`; the original
+`sglang-omni/scripts/moss_speech/ci/run_gpu.sh` retains the offline profile.
 
 ## Capacity and numerical contract
 
