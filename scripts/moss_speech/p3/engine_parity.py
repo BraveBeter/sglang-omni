@@ -182,6 +182,8 @@ def main() -> None:
             n = min(len(gen), len(ref_grid))
             equal_rows = sum(1 for i in range(n) if gen[i] == ref_grid[i].tolist())
             first_diff = next((i for i in range(n) if gen[i] != ref_grid[i].tolist()), None)
+            Path("artifacts/p3").mkdir(exist_ok=True)
+            torch.save(torch.tensor(gen), f"artifacts/p3/gen_{case}.pt")
             results[case] = {
                 "gen_len": len(gen), "ref_len": len(ref_grid),
                 "equal_rows": equal_rows, "first_diff": first_diff,

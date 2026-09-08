@@ -534,6 +534,18 @@ def make_moss_speech_scheduler_adapters(*, model: Any):
     @_logged
     def result_adapter(data):
         try:
+            import os as _osr
+
+            if _osr.environ.get("MOSS_DUMP_DIR"):
+                _r = getattr(data, "req", None)
+                print(
+                    "[adapter] finish_reason:",
+                    getattr(data, "finish_reason", None),
+                    "output_rows:", len(data.output_rows),
+                    "req_output_ids:", (list(_r.output_ids)[-6:] if _r is not None else None),
+                    "fr_detail:", (str(_r.finished_reason)[:120] if _r is not None else None),
+                    flush=True,
+                )
             payload = data.stage_payload
             state = payload.data
             if not isinstance(state, MossSpeechState):
