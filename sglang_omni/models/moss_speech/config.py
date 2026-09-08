@@ -7,7 +7,7 @@ uses the same native builder validated by the Phase 3 parity drivers.
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from sglang_omni.config import (
     PipelineConfig,
@@ -27,6 +27,32 @@ class MossSpeechPipelineConfig(PipelineConfig):
     # (qwen3_omni precedent; without this the coordinator joins BOTH terminals
     # and single-modality requests hang).
     terminal_stages_fn: str | None = f"{_PKG}.request_builders.resolve_terminal_stages"
+
+    @staticmethod
+    def validate_chat_request(request: Any) -> None:
+        """Reject unsupported chat requests before HTTP streaming headers."""
+        from sglang_omni.proto.request import OmniRequest
+        from sglang_omni.serve.openai_api import _build_chat_generate_request
+
+        from .request_builders import normalize_and_validate
+
+        lengths = [
+            value
+            for value in (request.max_tokens, request.max_completion_tokens)
+            if value is not None
+        ]
+        if any(not 1 <= value <= 512 for value in lengths):
+            raise ValueError("max_tokens/max_completion_tokens must be within [1, 512]")
+        if len(set(lengths)) > 1:
+            raise ValueError("max_tokens and max_completion_tokens conflict")
+        normalize_and_validate(
+            OmniRequest(inputs=_build_chat_generate_request(request)),
+            request_id="preflight",
+        )
+
+    @classmethod
+    def generation_admission_defaults(cls) -> dict[str, Any]:
+        return {"max_running_requests": 4, "max_queued_requests": 20}
 
     @classmethod
     def generation_sglang_role_to_stage(cls) -> dict[str, str]:
@@ -60,7 +86,14 @@ class MossSpeechPipelineConfig(PipelineConfig):
             name="ar_engine",
             process="ar",
             factory=f"{_PKG}.stages.create_ar_engine_executor",
-            factory_args={"dtype": "bfloat16"},
+            factory_args={
+                "dtype": "bfloat16",
+                "server_args_overrides": {
+                    "max_running_requests": 4,
+                    "max_queued_requests": 20,
+                    "max_total_tokens": 4096,
+                },
+            },
             gpu=0,
             runtime=StageRuntimeConfig(
                 resources=StageResourceConfig(total_gpu_memory_fraction=0.72)

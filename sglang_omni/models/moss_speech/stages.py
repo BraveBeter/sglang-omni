@@ -47,7 +47,8 @@ from sglang_omni.models.moss_speech.request_builders import (
 from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
-DEFAULT_CONTEXT_LIMIT = 10240  # SFT context bound (P0 contract §2)
+DEFAULT_CONTEXT_LIMIT = 1024  # P4 eager deployment budget, not checkpoint capacity
+DEFAULT_PROMPT_LIMIT = 512
 
 
 def _resolve_codec_dir(model_path: str, codec_path: Optional[str]) -> str:
@@ -84,13 +85,24 @@ def _state_from_payload(payload: StagePayload) -> MossSpeechState:
 
 
 # ---------------------------------------------------------------- preprocessing
+def validate_prompt_length(length: int, limit: int = DEFAULT_PROMPT_LIMIT) -> None:
+    """Reject oversized canonical grids before native AR admission."""
+    if not 1 <= limit <= DEFAULT_PROMPT_LIMIT:
+        raise ValueError(f"V1 prompt limit must be within [1, {DEFAULT_PROMPT_LIMIT}]")
+    if length > limit:
+        raise RequestValidationError(
+            f"context length {length} exceeds the {limit} prompt limit (post-encode exact check)",
+            reason="context_too_long",
+        )
+
+
 def create_preprocessing_executor(
     model_path: str,
     *,
     codec_path: Optional[str] = None,
     voice_wav: Optional[str] = None,
     encode_batch_size: int = 4,
-    context_limit: int = DEFAULT_CONTEXT_LIMIT,
+    context_limit: int = DEFAULT_PROMPT_LIMIT,
 ) -> SimpleScheduler:
     codec_dir = _resolve_codec_dir(model_path, codec_path)
     voice_wav = voice_wav or os.environ.get("MOSS_SPEECH_VOICE_WAV")
@@ -118,12 +130,7 @@ def create_preprocessing_executor(
             )
         state.audio_codes = codes
         built = processor.build(state.turns, codes, state.output_modality)
-        if built.prompt_len > context_limit:
-            raise RequestValidationError(
-                f"context length {built.prompt_len} exceeds the {context_limit} limit "
-                "(post-encode exact check)",
-                reason="context_too_long",
-            )
+        validate_prompt_length(built.prompt_len, context_limit)
         state.input_grid = built.grid[0].tolist()
         state.attention_mask = built.attention_mask[0].tolist()
         state.prompt_grid_len = built.prompt_len
@@ -195,6 +202,21 @@ def create_ar_engine_executor(
 
 
 # ----------------------------------------------------------------- text_decode
+def terminal_result(state: MossSpeechState) -> dict[str, Any]:
+    """Expose the common Client response schema without dropping parity state."""
+    data = state.to_dict()
+    data["text"] = state.generated_text
+    data["usage"] = {
+        "prompt_tokens": state.prompt_grid_len,
+        "completion_tokens": len(state.output_grid),
+        "total_tokens": state.prompt_grid_len + len(state.output_grid),
+    }
+    if state.output_modality == "audio":
+        data["audio_data"] = state.audio_samples
+        data["sample_rate"] = state.audio_sample_rate
+    return data
+
+
 def create_text_decode_executor(model_path: str) -> SimpleScheduler:
     tokenizer = _load_tokenizer(model_path)
 
@@ -209,7 +231,9 @@ def create_text_decode_executor(model_path: str) -> SimpleScheduler:
         text = text.replace("<|empty|>", ".").replace("<|end_empty|>", ":")
         state.generated_text = text
         return StagePayload(
-            request_id=payload.request_id, request=payload.request, data=state.to_dict()
+            request_id=payload.request_id,
+            request=payload.request,
+            data=terminal_result(state),
         )
 
     return SimpleScheduler(compute)
@@ -289,7 +313,9 @@ def create_audio_vocoder_executor(
         state.audio_samples = wav.tolist()
         state.audio_sample_rate = int(sr)
         return StagePayload(
-            request_id=payload.request_id, request=payload.request, data=state.to_dict()
+            request_id=payload.request_id,
+            request=payload.request,
+            data=terminal_result(state),
         )
 
     return SimpleScheduler(compute, abort_callback=cleanup_vocoder_state)

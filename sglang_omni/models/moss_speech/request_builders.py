@@ -59,7 +59,7 @@ class RequestValidationError(ValueError):
     """Invalid request (maps to HTTP 400 at the boundary)."""
 
     def __init__(self, message: str, *, reason: str = "invalid_request") -> None:
-        super().__init__(message)
+        super().__init__(f"Invalid model request: {message}")
         self.reason = reason
 
 
@@ -82,6 +82,47 @@ def _as_generate_request(inputs: Any) -> Any:
             data["sampling"] = SamplingParams(**sampling)
         return GenerateRequest(**data)
     raise RequestValidationError(f"unsupported request inputs type {type(inputs)!r}")
+
+
+def _request_generate(request: OmniRequest) -> Any:
+    """Restore the public Client's split wire form; retain P3 full requests."""
+    from dataclasses import fields
+
+    from sglang_omni.client.types import SamplingParams
+
+    inputs = request.inputs
+    if not isinstance(inputs, list) and not request.params and not request.metadata:
+        return _as_generate_request(inputs)
+    if isinstance(inputs, dict) and "sampling" in inputs:
+        return _as_generate_request(inputs)
+    metadata = dict(request.metadata or {})
+    if isinstance(inputs, dict):
+        messages = inputs.get("messages")
+        for key in ("audios", "images", "videos"):
+            if key in inputs:
+                metadata[key] = inputs[key]
+    else:
+        messages = inputs
+    if not isinstance(messages, list):
+        raise RequestValidationError("MOSS-Speech requires chat messages")
+    params = dict(request.params or {})
+    keys = {field.name for field in fields(SamplingParams)}
+    sampling = {key: value for key, value in params.items() if key in keys}
+    extra = set(params) - keys - {"stream", "stage_sampling", "stage_params"}
+    if extra:
+        raise RequestValidationError(f"unsupported request parameters: {sorted(extra)}")
+    return _as_generate_request(
+        dict(
+            messages=messages,
+            metadata=metadata,
+            sampling=sampling,
+            output_modalities=metadata.get("output_modalities", ["text"]),
+            stream=params.get("stream", False),
+            max_tokens=params.get("max_new_tokens"),
+            stage_sampling=params.get("stage_sampling"),
+            stage_params=params.get("stage_params"),
+        )
+    )
 
 
 def _derive_effective_seed(request_id: str) -> int:
@@ -131,7 +172,7 @@ def _load_audio_source(source: str) -> tuple[torch.Tensor, int]:
     if source.startswith("data:"):
         _, _, b64 = source.partition(",")
         try:
-            data = base64.b64decode(b64, validate=False)
+            data = base64.b64decode(b64, validate=True)
         except (binascii.Error, ValueError) as exc:
             raise RequestValidationError(
                 f"invalid data-URI audio: {exc}", reason="invalid_audio"
@@ -164,7 +205,7 @@ def normalize_and_validate(request: OmniRequest, *, request_id: str) -> MossSpee
     Raises RequestValidationError for every matrix row in the chat contract
     §6 before any GPU/codec work.
     """
-    gen = _as_generate_request(request.inputs)
+    gen = _request_generate(request)
 
     sampling = getattr(gen, "sampling", None)
     for name in ("temperature", "top_p", "repetition_penalty", "min_p"):
@@ -187,6 +228,16 @@ def normalize_and_validate(request: OmniRequest, *, request_id: str) -> MossSpee
         and penalty <= 0
     ):
         raise RequestValidationError("invalid sampling parameters")
+
+    top_k = getattr(sampling, "top_k", None)
+    seed = getattr(sampling, "seed", None)
+    length = getattr(gen, "max_tokens", None)
+    if top_k is not None and top_k < -1:
+        raise RequestValidationError("top_k must be -1, 0 or positive")
+    if seed is not None and not -(2**63) <= seed < 2**64:
+        raise RequestValidationError("seed must fit torch.Generator's 64-bit range")
+    if length is not None and not 1 <= length <= 512:
+        raise RequestValidationError("max_new_tokens must be within [1, 512]")
 
     # ---- V1 capability rejections ----------------------------------------
     if getattr(getattr(gen, "sampling", None), "stop", None):
@@ -301,7 +352,7 @@ def normalize_and_validate(request: OmniRequest, *, request_id: str) -> MossSpee
     # ---- audios[] binding (contract §3.2) -----------------------------------
     audios_meta = metadata.get("audios")
     if audios_meta:
-        if inline_audio_sources:
+        if any(inline_audio_sources):
             raise RequestValidationError(
                 "provide either per-turn input_audio parts or audios[], not both",
                 reason="invalid_request",
@@ -332,7 +383,7 @@ def normalize_and_validate(request: OmniRequest, *, request_id: str) -> MossSpee
             # inline base64 payload arrives as raw base64 string
             try:
                 data = (
-                    base64.b64decode(source, validate=False)
+                    base64.b64decode(source, validate=True)
                     if not source.startswith("data:")
                     else None
                 )
@@ -426,7 +477,9 @@ def resolve_terminal_stages(request: OmniRequest) -> List[str]:
         modalities = inputs.get("output_modalities")
     else:
         modalities = getattr(inputs, "output_modalities", None)
-    modalities = list(modalities or ["text"])
+    modalities = list(
+        modalities or (request.metadata or {}).get("output_modalities") or ["text"]
+    )
     if modalities == ["audio"]:
         return [AUDIO_TERMINAL]
     if modalities == ["text"]:

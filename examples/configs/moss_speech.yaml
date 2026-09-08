@@ -1,6 +1,10 @@
 # SPDX-License: Apache-2.0
 # MOSS-Speech V1 baseline (single A800-80G, AR BF16, codec FP32).
 # Native AR, 40 KV layers; TP=1 and eager execution.
+# P4 eager budget: prompt <=512 grid rows, generation <=512, context <=1024.
+# AR running <=4, waiting <=20; HTTP overflow returns 503.
+# KV pool capped at 4096 positions (4 * 1024), avoiding unused eager reserve.
+# Longer contexts require separate memory/parity qualification.
 #
 # Assets: model_path is the materialized AR/tokenizer dir; the codec resolves
 # to the sibling "<model_path>-Codec" directory (override per factory args in
