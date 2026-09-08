@@ -52,7 +52,7 @@ No other gaps: routing/terminal/registry/audio-parts mechanisms cover P2 needs.
   50 MB, sample-rate range 8k–48k. URL sources fetched by the existing HTTP
   client path with timeout (no new download stack).
 - `output_modality: text|audio`; `explicit_params: set[str]`;
-  `effective_seed` (§5); `stop` passthrough for reference semantics.
+  `effective_seed` (§5). P3 V1 rejects custom `stop` strings and nonzero `min_p` before codec/GPU work; generation stops on the frozen text-channel stop IDs or the requested length limit.
 
 ### 3.3 Canonical model input (grid — built in T2.3 processor)
 
@@ -106,3 +106,10 @@ no-GPU-call assertion applies to rejected requests only.
 3. AR boundary: no `create_sglang_infrastructure` probing; formal factory
    raises a tagged `NotImplementedError` (P3 pointer) after arg/hf_config
    checks; test-only AR stub used for the multi-process smoke.
+
+
+## P3 takeover correction (2026-09-08)
+
+The formal AR factory now builds the native engine. The CPU-only preflight remains in `sglang-omni/sglang_omni/models/moss_speech/stages.py` (`validate_ar_preconditions`); it is not a serving-readiness test. Native acceptance and the historical P2 stub regression are reported separately in `sglang-omni/docs/design/moss_speech/p3/03_gate_report.md`.
+
+Explicit sampling parameters retain their exact values. Absent parameters use the model defaults (0.6/0.95/20/1.1); explicit temperature=0 selects greedy. Nonfinite values and unsupported min_p/custom stop are rejected. The single-request wire grid is `(L,2)`, mask `(L,)`, and output grid `(L_new,2)`; the processor batch API remains `(B,L,2)`. The generated audio EOSP ends decoding only on an audio-mode row, not on an ignored audio value in text mode.

@@ -83,3 +83,14 @@ Note: tail blocks both instantiate with `start_idx=0` (they read `layer_types[0:
 ## 9. Version lock
 
 See `p0/01_version_lock.md` (HF snapshots `cff025bb…` / `eeec733e…`, GitHub `feat/docs@1ea408a`, Matcha `bd4d90d`, hashes, licenses).
+
+
+## 13. Native P3 implementation status (2026-09-08)
+
+The native model retains 32 shared + 4 text + 4 audio attention layers, BF16 weights/KV, both heads at every step, and 160 KiB of KV per logical token. It uses SGLang paged KV and the common scheduler/builder; the formal pipeline factory initializes this native model. Numerical acceptance remains frozen protocol v1, including exact greedy values in both channels. See `sglang-omni/docs/design/moss_speech/p3/03_gate_report.md` for evidence and reproduction commands.
+
+Native sampling is request-local. Missing HTTP values use 0.6/0.95/20/1.1 (temperature/top_p/top_k/repetition penalty); explicit values, including temperature=0, are preserved. Custom stop strings and nonzero min_p are rejected before codec/GPU work. Stop IDs remain 151643 and 151645 in the text channel, and max_new_tokens is honored. Native random samples with a fixed seed reproduce across batch ordering and cancellation; cross-HF random token equality is not promised.
+
+Audio code extraction accepts code IDs from rows whose text token is modality_pad; EOSP in such a row ends the segment. Text-mode audio values remain in the full parity grid but cannot terminate vocoding. Same-step SOSP/EOSP transitions execute in reference order. The official processor's default-system behavior is unchanged: use explicit interface system messages when reproducing interface fixtures.
+
+Serving wire tensors are lists for one request `(L,2)`/`(L,)`; adapters validate vocabulary bounds and remove left padding before native prefill. V1 rejects unqualified attention backends, remote config execution, graph/compile/radix/chunked prefill, TP>1 and quantization. P3 validates the pipeline on A800 and two-request correctness; HTTP four-mode readiness, production load/VRAM validation and 24G feasibility are not P3 claims.

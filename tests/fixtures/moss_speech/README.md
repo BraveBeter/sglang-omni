@@ -6,7 +6,7 @@ Parity ground truth exported from the locked reference (see
 ## Generation settings
 
 - greedy (`do_sample=False`, repetition_penalty=1.1, max_new_tokens=200, min_new=0), seed 0
-- reference env: transformers 4.57.1, torch 2.9.1+cu128, A800-SXM4-80GB (bf16)
+- reference env: transformers 4.57.1, torch 2.9.1+cu128, A800-SXM4-80GB. These P0 exports used FP32 AR computation; FP32 file storage alone does not determine computation dtype (corrected by P3 baseline audit).
 - exported by `scripts/moss_speech/p0/export_fixtures.py`; determinism gate: rerun tokens bit-equal, sanitized logits max-abs diff = 0.0
 
 ## Per-case contents
@@ -23,6 +23,9 @@ Cases: `t2t_short`, `t2s_cn`, `s2s_cn`, `s2t_cn`, `mixed_multiturn` (fixed-liter
 
 ## Notes for P3 parity consumers
 
-- The audio channel's `[16385:]` region is already −inf **in the stored tensors** (masked capture, see above); sanitize with `nan_to_num` before diffing (−inf−(−inf)=NaN).
+- The audio channel's `[16385:]` region is already −inf **in the stored tensors** (masked capture, see above); first compare finite/inf/sign patterns and reject NaNs, then compare only finite entries. Do not use `nan_to_num` to hide mismatches (−inf−(−inf)=NaN).
 - Full 64-step logits dumps + `_rerun` determinism artifacts live outside git in the workspace `artifacts/p0/fixtures/`.
 - `mixed_multiturn` exercises per-turn processor dispatch over mixed text/audio history; `s2*` cases exercise codec encode of user audio.
+
+- P3 native greedy targets are the separate explicit-BF16 `artifacts/p3/reference/` grids, not these P0 FP32 grids. Missing long-case captures are supplemented in `artifacts/p3/reference_complete_3838/`, with original grid and capture hashes unchanged. P0 files are preserved for processor/codec and historical regression.
+- Final native validation: `sglang-omni/docs/design/moss_speech/p3/03_gate_report.md`. No native result is used to replace a reference expected value.

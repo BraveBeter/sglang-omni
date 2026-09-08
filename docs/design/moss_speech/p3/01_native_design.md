@@ -164,8 +164,13 @@ P0 的 16×127 个 -inf 列即 masked 档的音频约束痕迹；与 native 比�
 | rep penalty 需每通道完整历史（含覆写后的 151667） | 请求状态保存双通道历史，processor 输入与 reference 相同序列 |
 | bf16 kernel 顺序差异 | P3-02 预注册容差（fp32-vs-bf16 差距为参考尺度，不依 native 结果定阈值） |
 
-## 6. 开放项（移交 T3.2+）
+## 6. 已落地接口与执行边界（2026-09-08）
 
-- 40 层 runtime 配置的具体 hook（覆盖点）在实现时定稿并记录于此文档附录。
-- `prepare_inputs_for_generation` 的 position_ids/cache_position 细节（left-pad 时位置计算）
-  在 T3.5 left-padding 用例中验证。
+- `sglang-omni/sglang_omni/models/moss_speech/engine_builder.py` 复用公共 builder：预注册 vendored hf_config，禁用 remote code，固定 torch_native attention、TP=1/BF16 KV，拒绝量化、radix、graph、compile、chunked prefill。共享注册与40层runtime覆盖由独立 commit `fec09e5` 引入，原始checkpoint不变。
+- `sglang-omni/sglang_omni/models/moss_speech/sglang_model.py` 复用 Qwen3 模块/packed权重和原生 RadixAttention。模型专用 forward 保留 BF16 舍入、CPU 初始化的 RoPE 逆频率，以及每请求 GEMM/RMSNorm 形状；attention 仍接收真实 batch 与原生分页 KV。这些约束优先保证正确性，P3 不提供吞吐承诺。
+- `sglang-omni/sglang_omni/models/moss_speech/model_runner.py` 在 forward 绑定 `(rid, phase)` 双 logits，post hook 只消费一次；缺失 logits/反馈硬失败。双通道生成步数取 `len(output_rows)`，不依赖框架计数器。每请求独立 CUDA Generator，reset/finish/abort 回收。
+- `sglang-omni/sglang_omni/models/moss_speech/request_lifecycle.py` 是 engine-local 状态 owner：同输出模态可组 batch，其他模态通过 DeferredAdmission 排队；正常结束和取消都释放，取消的待构建请求有有界 tombstone。KV 槽位所有权仍属于通用 scheduler/allocator。
+- wire 单请求为 `(L,2)` 和 `(L,)`；参考 processor 的 batch API 为 `(B,L,2)`。adapter 去掉有效 mask 指明的左 padding；两层形状不可混写。默认采样为 temperature=0.6/top_p=0.95/top_k=20/rep=1.1，明确传入的 0 或 1 不被默认值覆盖。
+- 正式工厂服务 context 上限为 10240；独立 parity builder 使用 checkpoint 上限40960，只表示配置上限，P3实测不是40K性能验证。两请求正确性在A800完成；完整HTTP、多负载和24G验证仍留后续阶段。
+
+数值、KV、生命周期与多进程证据见 `sglang-omni/docs/design/moss_speech/p3/03_gate_report.md`。

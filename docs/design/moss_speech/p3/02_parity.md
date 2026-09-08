@@ -1,8 +1,7 @@
 # P3-02 Parity 协议（冻结版 v1）
 
-> 状态：**v1.1 生效（2026-09-08 用户裁决 ESCALATION-1，采纳 E2 分通道判据；v1.0
-> 冻结于 2026-09-07，见文末变更历史）**。v1.0 阈值仅依据 reference 内部证据选定，
-> 未使用任何 native 结果。
+> 状态：T3.1 冻结（2026-09-07）。阈值仅依据 reference 内部证据（bf16 重跑确定性、
+> 同 dtype 核路径差异、fp32↔bf16 dtype 差距）选定，**未使用任何 native 结果**。
 > 修改政策：只允许收紧；任何调整须保留旧版本与失败结果并记录评审结论。
 
 ## 1. 基线定义（artifacts/p3/reference/）
@@ -52,20 +51,15 @@ P0 网格与 P0 logits 仅作 dtype 差距证据与历史对照；**native 贪�
    （dtype 级差距在该组合界下超限 ~4.6%，同 dtype 差异距界约两个数量级——阈值有效区分
    「实现错误」与「合法核路径噪声」。）
 
-## 4. 贪心序列判据（v1.1：分通道；独立于 logits 容差）
+## 4. 贪心序列判据（独立于 logits 容差）
 
-- **text 通道 = 逐位硬门**：全部生成行的 text 通道值与 bf16 reference 网格逐位相等。
-  （v1.0 下 t2t 30/31 中的唯一 text 差异行系 audio 偏差经 rep-penalty 传导；audio 通道
-  判据修复后此行应回归相等，T3.5/T3.6 验证。）
-- **audio 通道 = 容差判据**：逐步 raw logits 通过 §3 冻结容差；argmax 在 reference 侧
-  近平局（|top1 − top2| < τ，τ = 0.05，与 §3 同 dtype 差异尺度一致）处免逐位相等；
-  非近平局步仍须逐位相等。近平局分叉步逐一列表报告。
-- **tie-break 语义**：reference 采样 = `torch.argmax`（精确平局取**最低索引**），native
-  采样器同语义并配 CPU 定向测试；跨实现 ULP 差异导致的近平局分叉按上一条豁免。
-- 停止行为：终止行计入 grid；终止原因（im_end / `<|endoftext|>` / 长度上限）分开记录，
-  **逐请求与 reference 完全一致（硬门，不分通道）**。
-- audio 主导任务（t2s 类）补充：生成 audio 码经锁定 P1 codec 解码，抽样比对可听性与
-  码序列距离（非 bit-exact 判据，防语义劣化）。
+- **全 grid 逐位相等**（含被忽略通道：文本模式下保留的 audio 采样值、音频模式下被覆写为
+  151667 的 text 通道），对照 bf16 reference 网格。
+- **tie-break 语义**：reference 采样 = `torch.argmax`（精确平局取**最低索引**）。基线统计：
+  1154 通道步中 **159 步存在精确平局**（audio 通道 ~14%、text 通道偶发）——native 采样器
+  必须复现「平局取最低索引」，并配 CPU 定向测试（构造平局向量断言选择）。此为全 grid
+  相等的必要条件。
+- 停止行为：终止行计入 grid；终止原因（im_end / `<|endoftext|>` / 长度上限）分开记录。
 
 ## 5. 随机采样判据（T3.6）
 
@@ -194,13 +188,29 @@ reference 分别位于 `artifacts/p3/reference/t2t_short/` 与
   `4ce633c7d5a179de26de2adca18a774b7f94009e` 追溯。
 - 本次只完成文档裁决及 CPU 证据审查，未修改采样/模型实现、未运行 GPU、未宣称新的 parity 通过。
 
----
+- 并发版本说明：本轮校验期间出现commit `163cb3e`，将正文标为E2/v1.1生效，
+  与本附录及Tasks中的E1相反。该版本保留于Git历史；本轮按实际审核结果统一为E1，
+  原CHANGE条目保留并追加更正。执行时以当前正文及本附录为准，不把历史E2条目当作本轮批准。
 
-## 变更历史
 
-- **v1.0（2026-09-07 冻结）**：全 grid 逐位相等（含被忽略通道）；阈值 atol=1.0+rtol=0.02 /
-  max-abs≤4.5 / 非有限值模式硬门。
-- **v1.1（2026-09-08，ESCALATION-1 裁决采纳 E2）**：§4 改为分通道判据——text 通道+停止
-  语义逐位硬门；audio 通道 §3 容差 + reference 侧近平位（|top1−top2|<0.05）argmax 豁免；
-  audio 主导任务补 codec 解码抽检。动因：跨实现 bf16 kernel ULP 差使精确平局（159/1154
-  步）在两侧关系断裂，逐位判据不可达（附录 A 证据：t2t step0 top2 双 77.0）。
+## 附录 B：ESCALATION-1 执行闭环（2026-09-08）
+
+附录 A 的“未通过”是裁决当时的状态。本附录记录后续实现修复与验收；正文 v1、原 BF16 reference、冻结阈值及最低索引 argmax 规则均保持不变。没有采用 E2、τ 豁免或替换 expected。
+
+### B.1 已证实的实现差异
+
+- RMSNorm 保留 reference 的两次 BF16 舍入边界：先 residual 相加再转 FP32 求方差，归一化值先转 BF16 再乘权重。Q/K norm 也走同一实现。
+- packed QKV/gate-up 仅作权重存储；前向分别计算 Q/K/V 和 gate/up GEMM，使用原始逐运算 SiLU/RoPE。两 tail 仍执行全部 40 层原生分页 attention/KV。
+- reference 在 prefill 投影完整序列后取末位。先裁剪 hidden 再算 LM head 会改变 GEMM 形状，并使精确平局分叉。
+- reference 在 CPU 初始化 RoPE 的 FP32 逆频率，再移到 GPU。CUDA pow 的频率差最大为 1.8626e-9，首次在 position 459 改变 BF16 sin/cos，精确对应三例总长度 460 的分叉（`artifacts/p3/rope_probe_3843.log`）。缓存布局诊断无效，相关临时代码已撤除。
+- 真正并发时，GEMM 和 RMSNorm reduction 都须保持每请求形状。仅固定 GEMM 足以让已选随机样例通过，却仍在 greedy step17 产生 raw 差异；固定 norm 后逐步 raw 与 grid 均与独立运行完全相等（`artifacts/p3/lifecycle_3856/report.json`）。没有将 scheduler 串行化来规避实际 batch。
+
+### B.2 验收证据与基线保全
+
+- `artifacts/p3/validation_3844/report.json`：六例合计 707 行，每步两 head raw logits 最大误差均为 0；自由生成完整 grid 全等，含忽略的 audio 值。停止/长度分别为 31 stop、200 length、153 stop、200 length、110 stop、13 stop。
+- `artifacts/p3/probes_3846/report.json`：4 个转换前缀的 cached/reference、fresh/reference、cached/fresh 全在原阈值内。定向擦除音频位置的 text-tail K 只改变 text head（3.875）；擦除 audio-tail K 只改变 audio head（1.5），另一 head 均不变。
+- `artifacts/p3/reference_complete_3838/manifest.json`：补齐 130 个原未保存的长案例捕获；原 grid 及所有已保存 raw/masked/scored 值逐位不变。补充文件独立保存，原基线未覆盖。
+- `artifacts/p3/lifecycle_3856/report.json`：同模态真实 batch、顺序变化、非零温度/不同参数/seed、left padding、decode 取消/存活者/恢复及槽位全回收通过；greedy batch raw 全等。
+- `artifacts/p3/takeover_3855/report.json`：正式 YAML 的 native 文本/音频、双请求、AR prefill 事件后取消/恢复通过；音频 hash 等于冻结 HF codes 经 P1 codec 的独立解码，4 个进程正常退出。
+
+完整最终报告与运行命令见 `sglang-omni/docs/design/moss_speech/p3/03_gate_report.md`；早期失败产物保留供追溯。旧 `engine_parity.py` 属于历史排障驱动，当前验收入口为 `sglang-omni/scripts/moss_speech/p3/validate_native.py`，一次提交对应一个 run/rid/step 序列。

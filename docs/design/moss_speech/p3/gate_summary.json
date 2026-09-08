@@ -1,0 +1,503 @@
+{
+  "phase": 3,
+  "date": "2026-09-08",
+  "protocol": "v1 (E1, unchanged)",
+  "pass": true,
+  "gates": {
+    "G1": true,
+    "G2": true,
+    "G3": true,
+    "G4": true
+  },
+  "cpu": {
+    "passed": 110,
+    "skipped": 0
+  },
+  "cases": {
+    "t2t_short": {
+      "steps": 31,
+      "grid_equal": true,
+      "finish_reason": "stop",
+      "max_raw_abs": {
+        "text": 0.0,
+        "audio": 0.0
+      }
+    },
+    "t2s_cn": {
+      "steps": 200,
+      "grid_equal": true,
+      "finish_reason": "length",
+      "max_raw_abs": {
+        "text": 0.0,
+        "audio": 0.0
+      }
+    },
+    "s2t_cn": {
+      "steps": 153,
+      "grid_equal": true,
+      "finish_reason": "stop",
+      "max_raw_abs": {
+        "text": 0.0,
+        "audio": 0.0
+      }
+    },
+    "s2s_cn": {
+      "steps": 200,
+      "grid_equal": true,
+      "finish_reason": "length",
+      "max_raw_abs": {
+        "text": 0.0,
+        "audio": 0.0
+      }
+    },
+    "mixed_multiturn": {
+      "steps": 110,
+      "grid_equal": true,
+      "finish_reason": "stop",
+      "max_raw_abs": {
+        "text": 0.0,
+        "audio": 0.0
+      }
+    },
+    "t2s_short_trans": {
+      "steps": 13,
+      "grid_equal": true,
+      "finish_reason": "stop",
+      "max_raw_abs": {
+        "text": 0.0,
+        "audio": 0.0
+      }
+    }
+  },
+  "kv": {
+    "layers": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39
+    ],
+    "dtype": "torch.bfloat16",
+    "per_slot_bytes": 163840,
+    "allocator_slots": 198370,
+    "physical_slots_with_padding": 198371,
+    "pool_bytes": 32501104640,
+    "all_buffers_distinct": true,
+    "weight_load": {
+      "consumed_sources": 446,
+      "unique_sources": 446,
+      "expected_sources": 446,
+      "unexpected_sources": 0,
+      "exact_shapes_checked": true
+    }
+  },
+  "reused_physical_slots": 35,
+  "lifecycle_checks": {
+    "t2t_short-batch-a-a": true,
+    "t2t_short-batch-a-b": true,
+    "t2t_short-batch-b-b": true,
+    "t2t_short-batch-b-a": true,
+    "t2t_short-padded": true,
+    "t2t_short-survivor": true,
+    "t2t_short-recovery": true,
+    "t2s_cn-batch-a-a": true,
+    "t2s_cn-batch-a-b": true,
+    "t2s_cn-batch-b-b": true,
+    "t2s_cn-batch-b-a": true,
+    "t2s_cn-padded": true,
+    "t2s_cn-survivor": true,
+    "t2s_cn-recovery": true,
+    "greedy-batch-1": true,
+    "greedy-batch-2": true,
+    "greedy_batch_raw_exact": true,
+    "seed_only_changes_sample": true,
+    "gpu_sampler_mask_topk": true,
+    "allocator_reset_keeps_stale_kv": true,
+    "actual_slot_reuse": true,
+    "reused_slots_no_old_history": true,
+    "kv_40_layers_160kib": true,
+    "kv_no_alias_capacity": true,
+    "weight_coverage_446": true,
+    "cancelled_no_result": true,
+    "real_decode_batch": true,
+    "no_mixed_output_batch": true
+  },
+  "probe_checks": {
+    "probe_t2s_cn_audio_eosp_30": {
+      "fresh_reference": {
+        "text": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.03125,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        },
+        "audio": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.125,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        }
+      },
+      "cached_reference": {
+        "text": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.0,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        },
+        "audio": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.0,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        }
+      },
+      "cached_fresh": {
+        "text": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.453125,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        },
+        "audio": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.125,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        }
+      },
+      "prefix_length": 72,
+      "pass": true
+    },
+    "probe_t2s_cn_audio_eosp_60": {
+      "fresh_reference": {
+        "text": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.03125,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        },
+        "audio": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.125,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        }
+      },
+      "cached_reference": {
+        "text": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.0,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        },
+        "audio": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.0,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        }
+      },
+      "cached_fresh": {
+        "text": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.4375,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        },
+        "audio": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 1.125,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        }
+      },
+      "prefix_length": 102,
+      "pass": true
+    },
+    "probe_t2t_short_text_eos_10": {
+      "fresh_reference": {
+        "text": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.015625,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        },
+        "audio": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.5,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        }
+      },
+      "cached_reference": {
+        "text": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.0,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        },
+        "audio": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.0,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        }
+      },
+      "cached_fresh": {
+        "text": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.640625,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        },
+        "audio": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 1.0,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        }
+      },
+      "prefix_length": 45,
+      "pass": true
+    },
+    "probe_t2t_short_text_sosp_8": {
+      "fresh_reference": {
+        "text": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.03125,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        },
+        "audio": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.125,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        }
+      },
+      "cached_reference": {
+        "text": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.0,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        },
+        "audio": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.0,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        }
+      },
+      "cached_fresh": {
+        "text": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.3671875,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        },
+        "audio": {
+          "pass": true,
+          "nonfinite_match": true,
+          "max_abs": 0.25,
+          "exceed_fraction": 0.0,
+          "exceed_count": 0
+        }
+      },
+      "prefix_length": 43,
+      "pass": true
+    }
+  },
+  "tail_history_perturbation": {
+    "deltas": {
+      "text": {
+        "text": 3.875,
+        "audio": 0.0
+      },
+      "audio": {
+        "text": 0.0,
+        "audio": 1.5
+      }
+    },
+    "pass": true
+  },
+  "takeover_checks": {
+    "t2t_short_input": true,
+    "t2t_short_grid": true,
+    "t2t_short_seed": true,
+    "t2t_short_terminal": true,
+    "t2s_cn_input": true,
+    "t2s_cn_grid": true,
+    "t2s_cn_seed": true,
+    "t2s_cn_terminal": true,
+    "parallel_equal": true,
+    "abort_ack": true,
+    "abort_finalized": true,
+    "survivor_grid": true,
+    "survivor_audio": true,
+    "recovered_grid": true,
+    "children_exited": true,
+    "audio_reference_hash": true,
+    "audio_sample_rate": true
+  },
+  "takeover_processes": [
+    {
+      "pid": 1476073,
+      "exitcode": 0,
+      "alive": false
+    },
+    {
+      "pid": 1476074,
+      "exitcode": 0,
+      "alive": false
+    },
+    {
+      "pid": 1476075,
+      "exitcode": 0,
+      "alive": false
+    },
+    {
+      "pid": 1476076,
+      "exitcode": 0,
+      "alive": false
+    }
+  ],
+  "audio_hash": "0a2a59c14d750214b3cd1187c625d043",
+  "startup_failure_processes": [
+    {
+      "pid": 1470138,
+      "exitcode": -15,
+      "alive": false
+    },
+    {
+      "pid": 1470139,
+      "exitcode": 1,
+      "alive": false
+    },
+    {
+      "pid": 1470140,
+      "exitcode": -15,
+      "alive": false
+    },
+    {
+      "pid": 1470141,
+      "exitcode": -15,
+      "alive": false
+    }
+  ],
+  "evidence": {
+    "parity": {
+      "path": "artifacts/p3/validation_3857/report.json",
+      "sha256": "f35cb2f03693ea06c47ada26e7ec5b5d1f1d49bb44ed09677c1ff767a885ea15"
+    },
+    "lifecycle_kv": {
+      "path": "artifacts/p3/lifecycle_3858/report.json",
+      "sha256": "670511383cc36e7265743e375f272e9fab2692660d00a3da9c727487272af805"
+    },
+    "probes": {
+      "path": "artifacts/p3/probes_3846/report.json",
+      "sha256": "2d6963f5bab1ce617f6acaa2094fdc2caec63f1bfe28001e2416da5b76e6e868"
+    },
+    "takeover": {
+      "path": "artifacts/p3/takeover_3855/report.json",
+      "sha256": "331a9d29258c40846d2bde79cd7372760bca2462e5349ad942e053f80d23a954"
+    },
+    "startup_failure": {
+      "path": "artifacts/p3/takeover_3849/report.json",
+      "sha256": "a28a3a46130f67f738e4d4dbe9744e0489d86d0f0a8918865ca36303ab7b7c68"
+    },
+    "reference_supplement": {
+      "path": "artifacts/p3/reference_complete_3838/manifest.json",
+      "sha256": "693c41005069edfe5a8f2b21f3f46cb96018358c2b1b9ace662902e736543b48"
+    },
+    "p2_components": {
+      "path": "artifacts/p3/p2_regression_3854/components.json",
+      "sha256": "2339e4c18acbb408e94827e73158bbcc5a246e0eb67b2d77db52d3a0001f558c"
+    },
+    "p2_stub": {
+      "path": "artifacts/p3/p2_regression_3854/stub_pipeline.json",
+      "sha256": "ed2ef2523a508d6f0c97d56a0af844ec7dd5ff7e06f7c66c1e72828878b538d0"
+    },
+    "cpu": {
+      "path": "artifacts/p3/cpu_release.log",
+      "sha256": "76889a30a8db550918834f23396a96c2abe5be087aea882ae64c29fdbdde2135"
+    },
+    "static_checks": {
+      "path": "artifacts/p3/static_checks.json",
+      "sha256": "a31a01278b1869d436ac09739b6b7fa737214af21437b7bc3a7ee310f4777dbc"
+    }
+  },
+  "limits": [
+    "A800 80GB only",
+    "TP=1; BF16 AR/KV; FP32 codec",
+    "torch_native attention; eager; no radix/graph/compile/chunked prefill/quantization",
+    "two-request correctness; no throughput claim",
+    "Phase 4 not started"
+  ],
+  "historical_evidence_note": "kv_spike.json has overall pass=false and no actual slot overlap; final G1 uses lifecycle_3858 and probes_3846. P0/P1/P2 original artifacts and BF16 reference were not overwritten.",
+  "implementation_commits": [
+    "af4f076",
+    "cfca840"
+  ],
+  "independent_registration_commit": "fec09e5",
+  "publication": "Local commits only; remote push rejected by automatic approval review pending explicit user authorization."
+}
