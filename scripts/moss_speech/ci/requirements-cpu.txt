@@ -1,0 +1,35 @@
+# CPU contract lane, installed independently of the GPU runtime pins.
+# Install torch/torchaudio from the official CPU index first.
+torch==2.9.1
+torchaudio==2.9.1
+torchcodec==0.8.1
+einops==0.8.1
+transformers==5.12.1
+numpy==2.2.6
+httpx==0.28.1
+fastapi==0.141.1
+pyzmq==27.2.0
+msgpack==1.2.1
+msgspec==0.21.1
+soundfile==0.13.1
+scipy==1.15.3
+librosa==0.11.0
+onnxruntime==1.23.2
+pyyaml==6.0.3
+python-multipart==0.0.32
+xxhash==4.0.1
+psutil==7.2.2
+pydantic==2.14.0b1
+uvicorn==0.52.4
+requests==2.34.2
+aiohttp==3.14.3
+pytest==9.1.1
+pytest-asyncio==1.4.0
+jiwer==4.0.0
+zhon==2.1.1
+openai-whisper==20250625
+pybase64==1.5.0
+openai==2.6.1
+av==17.1.0
+safetensors==0.8.0
+diffusers==0.37.0
