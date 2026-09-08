@@ -84,3 +84,56 @@ P0 网格与 P0 logits 仅作 dtype 差距证据与历史对照；**native 贪�
 - 分段落盘；step 文件命名 `step_%04d.pt`（raw/masked/scored 三键，168192 维拼接）。
 - 保留策略：不覆盖 P0 原始产物；本基线为 native parity 唯一 expected 来源，
   禁止从 native 输出生成 expected。
+
+---
+
+## 附录 A（待评审）：G3 全 grid 判据的 audio 通道近平局问题 [ESCALATION-1]
+
+> 状态：**2026-09-08 提请评审**；v1 正文（§4）原样保留，本附录不构成对冻结判据的修改。
+> 评审通过前，T3.5/T3.6 的验收暂按 v1 执行并如实报告分通道结果。
+
+### A.1 事实
+
+T3.4 正式引擎路径（OmniScheduler 全链路）已达成：
+
+| 案例 | 长度/停止 | text 通道逐位 | 全行逐位（text+audio） |
+|---|---|---|---|
+| t2t_short | 31/31 步，im_end 停止与 ref 一致 | **30/31**（唯一 text 差异行 28 由前期 audio 偏差经 rep penalty 传导） | 20/31 |
+| t2s_short_trans | 13/13 步，自然转换+停止一致 | **13/13** | 9/13 |
+
+全部差异行均为 **audio 通道**（t2t 10 行、t2s 4 行），且首因在 step0 即出现。
+
+### A.2 根因
+
+t2t step0 的 reference raw audio top2：**13375=77.0 与 7672=77.0（精确平局，fp32 存储）**。
+两侧 greedy 均为 `torch.argmax`（平局取最低索引），但 native（sglang bf16 kernel 路径）
+与 reference（HF bf16 kernel 路径）的 logits 存在 ULP 级差异，**平局关系在两侧不一致**
+（native 侧两值非严格相等，次序翻转）→ argmax 分叉 → 该行 audio 值不同 → 经每通道
+repetition-penalty 历史传导至后续步。
+
+T3.1 基线统计：1154 通道步中 **159 步存在精确平局**（audio 通道 ~14%）。该风险在
+P3-01 §2.3 已标注为「全 grid 相等的必要条件」，现实测坐实：**跨实现的 bf16 kernel
+ULP 差使部分平局步不可判定一致**。
+
+### A.3 判据影响与选项（待决策）
+
+- **text 通道判据已达标**（t2t 30/31 中的 1 行差异亦源于 audio 传导；t2s 13/13）。
+- 停止语义、长度、FSM、生成步数全部一致。
+
+| 选项 | 内容 | 代价 |
+|---|---|---|
+| E1（维持 v1） | audio 通道仍要求逐位相等 | 需 bit-exact 复现 HF kernel（sglang 层不支持切换 norm/attention kernel 实现），实际不可达；T3.6 无法通过 |
+| E2（分通道判据） | text 通道+停止语义保持逐位硬门；audio 通道改为「raw logits 落在 §3 冻结容差内 + argmax 在 |Δ|<τ 近平局处允许分叉（τ 按 §3 同 dtype 差异尺度定，如 0.05）」 | 修订协议 v1.1；需复核 audio 主导任务（t2s 类）的语义质量（audio 码经 P1 codec 解码后听感/码距） |
+| E3（对齐 kernel） | native 侧对 logits→argmax 之前用 reference 完全相同的 fp32 重算路径 | 无法消除 forward 本身的 ULP 差异（平局在 raw 层面已断），无效 |
+
+建议 **E2**，理由：平局处的分叉在 reference 自身的确定性重跑下是稳定的（同机 bit-exact），
+但在跨实现下数学上无仲裁标准；容差判据（§3 已冻结）本就为「合法核路径噪声」设计，
+近平局 argmax 分叉是该噪声的唯一可见后果；且 audio 通道在 text 模式行本就被 reference
+自身忽略（其值不进入嵌入与停止判定），仅影响 rep-penalty 历史。
+
+### A.4 若采纳 E2：v1.1 修订点
+
+1. §4 贪心判据拆分：text 通道与终止行为=逐位硬门；audio 通道=逐步 raw logits 过 §3
+   容差 + 近平局（|top1−top2|<τ 于 reference 侧）处 argmax 免逐位。
+2. T3.6 验收：全 grid 逐位改为分通道报告；audio 主导任务补充 codec 解码一致性抽检。
+3. 本附录升级为 v1.1 正文，v1 移入变更历史。
