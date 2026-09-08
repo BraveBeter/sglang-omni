@@ -83,3 +83,19 @@ codec:
 limits:
   decoder_in_flight: 1
 ```
+
+
+## P4 native re-verification (2026-09-08)
+
+Layout A is retained after actual native HTTP load (run3865): the P1 input
+composition is repeated for3 warmup +3 measured rounds of24 requests, with
+native generation replacing synthetic decode codes/background AR. Measured
+preprocessing p95 is0.157s, vocoder3.321s and native AR38.521s (the latter excludes
+admission waiting). There is no encoder-admission evidence requiring Layout B.
+Final native budgets are prompt512/new512/context1024, running4/queued20 and
+KV4096; sampled peaks are27.026GiB for load and29.188GiB for the HTTP boundary
+run. The old reference-AR23.5GiB footprint is not a native24G commitment.
+The once-at-startup voice transfer wording above was superseded in P2 by voice
+conditioning in each normal payload, with per-process caching. See the final
+P4 evidence and measurement limits in
+`sglang-omni/docs/design/moss_speech/p4/03_gate_report.md`.

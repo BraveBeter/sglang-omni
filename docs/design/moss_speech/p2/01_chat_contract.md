@@ -113,3 +113,18 @@ no-GPU-call assertion applies to rejected requests only.
 The formal AR factory now builds the native engine. The CPU-only preflight remains in `sglang-omni/sglang_omni/models/moss_speech/stages.py` (`validate_ar_preconditions`); it is not a serving-readiness test. Native acceptance and the historical P2 stub regression are reported separately in `sglang-omni/docs/design/moss_speech/p3/03_gate_report.md`.
 
 Explicit sampling parameters retain their exact values. Absent parameters use the model defaults (0.6/0.95/20/1.1); explicit temperature=0 selects greedy. Nonfinite values and unsupported min_p/custom stop are rejected. The single-request wire grid is `(L,2)`, mask `(L,)`, and output grid `(L_new,2)`; the processor batch API remains `(B,L,2)`. The generated audio EOSP ends decoding only on an audio-mode row, not on an ignored audio value in text mode.
+
+
+## P4 implementation audit errata (2026-09-08)
+
+The frozen P2 design above described intended URL download and alias conflict
+checks that the actual public Client path did not provide. P4 verifies the real
+HTTP path: URL audio is explicitly rejected; inline base64 or an audios[] source
+bound to an empty input_audio placeholder works. Soundfile-supported audio
+formats are accepted only if decoding succeeds. Length alias conflict/invalid
+values now fail in model-specific HTTP preflight. Public Client wire splitting,
+terminal output schema and non-streaming disconnect ownership are covered by
+new CPU and real TCP tests. P4 serving limits and evidence supersede the old
+unqualified context and configurable-limit statements for deployment; see
+`sglang-omni/docs/design/moss_speech/p4/01_http_contract.md` and
+`sglang-omni/docs/design/moss_speech/p4/02_serving.md`.

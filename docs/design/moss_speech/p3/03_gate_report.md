@@ -71,4 +71,4 @@ env -i HOME="$HOME" PATH=/usr/bin:/bin TMPDIR=/dev/shm OMP_NUM_THREADS=1 \
 4. 缺省采样0.6/0.95/20/1.1，显式temperature=0保持greedy；custom stop字符串及非零min_p明确拒绝。复现reference界面案例须传显式system消息；processor默认system规则未更改。
 5. P5再做24G/CI/质量与权重条款，P6流式，P7/V2性能能力；本轮到P3归档结束。
 
-发布状态：本轮结果已本地提交；向fork的推送被自动审批拒绝，需用户明确授权后才能执行。该限制不影响上述本地验收证据。
+发布状态：用户明确授权后，P3提交af4f076、cfca840、dc2c517已推送至fork/feat/moss-speech。此前自动审批拒绝保留在CHANGE历史记录中。

@@ -1,0 +1,227 @@
+{
+  "phase": 4,
+  "gates": {
+    "G1_http_four_modes": true,
+    "G2_validation": true,
+    "G3_lifecycle": true,
+    "G4_native_load": true
+  },
+  "evidence": [
+    {
+      "kind": "http",
+      "path": "artifacts/p4/http_3864/report.json",
+      "sha256": "7e113ae9cf33a7989a11dcbf1d871687d0dbde35cabc381a50b5d5f8c86c9585"
+    },
+    {
+      "kind": "workload",
+      "path": "artifacts/p4/http_3865/report.json",
+      "sha256": "4c7de52679df19b0fd8bf4d87ca84cf2ee9fc3231e6a41f8c8b46ad33c2cf67c"
+    },
+    {
+      "kind": "cli",
+      "path": "artifacts/p4/cli_3866/report.json",
+      "sha256": "aefd39d6f2e9912352131cf35dc91c32990a23efc544baa9e492d0d691778a7a"
+    },
+    {
+      "kind": "soak",
+      "path": "artifacts/p4/http_3867/report.json",
+      "sha256": "4f1652fde780a0de5f05548667cb2e9118f7a8bd1424c74f7fb1cb4c7e3c993e"
+    },
+    {
+      "kind": "cpu",
+      "path": "artifacts/p4/cpu_release_final.log",
+      "sha256": "db59e796ab2b27a33a8dcba637fae665540d5ca9bd3a1e6bc536f2a440f2f914",
+      "passed": 148
+    },
+    {
+      "kind": "cpu",
+      "path": "artifacts/p4/cpu_http_launcher.log",
+      "sha256": "4be7bb70c0f46e471f2a97394dc8fd5e7d25e39b237220d448d2915d402ddb00",
+      "passed": 7
+    },
+    {
+      "kind": "cpu",
+      "path": "artifacts/p4/cpu_launcher.log",
+      "sha256": "24a15791320a75ff0f789667dab1fca3721f985e2a51069d53a3627ec57dc94a",
+      "passed": 14
+    }
+  ],
+  "limits": {
+    "prompt_grid_rows": 512,
+    "requested_new_grid_rows": 512,
+    "context_length": 1024,
+    "native_running": 4,
+    "pipeline_waiting": 20,
+    "kv_positions": 4096,
+    "kv_bytes_per_position": 163840,
+    "boundary_actual_generated_rows": 476
+  },
+  "metrics": {
+    "measured_requests": 72,
+    "warmup_requests": 72,
+    "measured_rounds": [
+      {
+        "kind": "measured",
+        "round": 3,
+        "seconds": 232.06111874431372,
+        "rps": 0.10342103032970094,
+        "p50": 124.43792503233999,
+        "p95": 221.5116284299642,
+        "memory": {
+          "t": 1788869085.8018153,
+          "used": 29018619904,
+          "free": 56880726016,
+          "total": 85899345920,
+          "processes": {
+            "1578836": 22827499520,
+            "1578840": 3105882112,
+            "1578834": 2258632704
+          }
+        }
+      },
+      {
+        "kind": "measured",
+        "round": 4,
+        "seconds": 232.15555062703788,
+        "rps": 0.10337896266179065,
+        "p50": 124.2086728643626,
+        "p95": 221.60239724935963,
+        "memory": {
+          "t": 1788869317.9575496,
+          "used": 29018619904,
+          "free": 56880726016,
+          "total": 85899345920,
+          "processes": {
+            "1578836": 22827499520,
+            "1578840": 3105882112,
+            "1578834": 2258632704
+          }
+        }
+      },
+      {
+        "kind": "measured",
+        "round": 5,
+        "seconds": 234.3100453671068,
+        "rps": 0.10242838697930276,
+        "p50": 125.83849320188165,
+        "p95": 223.75769492862747,
+        "memory": {
+          "t": 1788869552.020802,
+          "used": 29018619904,
+          "free": 56880726016,
+          "total": 85899345920,
+          "processes": {
+            "1578836": 22827499520,
+            "1578840": 3105882112,
+            "1578834": 2258632704
+          }
+        }
+      }
+    ],
+    "concurrency_probes": [
+      {
+        "kind": "concurrency",
+        "concurrency": 1,
+        "seconds": 15.535601198673248
+      },
+      {
+        "kind": "concurrency",
+        "concurrency": 2,
+        "seconds": 12.896820655092597
+      },
+      {
+        "kind": "concurrency",
+        "concurrency": 4,
+        "seconds": 10.159085221588612
+      }
+    ],
+    "rps": 0.10307408218017569,
+    "latency_seconds": {
+      "p50": 124.87520575709641,
+      "p95": 222.7451656858437,
+      "max": 225.10690209828317
+    },
+    "generated_grid_rows": 13932,
+    "max_prompt_grid_rows": 375,
+    "sampled_device_peak_gib": 27.02569580078125,
+    "measured_idle_spread_mib": 0.0,
+    "process_sampled_peak_gib": {
+      "ar_engine": 21.259765625,
+      "audio_vocoder": 2.892578125,
+      "preprocessing": 2.103515625
+    },
+    "stage_dispatch_to_complete_seconds": {
+      "preprocessing": {
+        "p50": 0.01951338,
+        "p95": 0.1571149574,
+        "max": 0.165615759
+      },
+      "audio_vocoder": {
+        "p50": 1.9427135655,
+        "p95": 3.32128067335,
+        "max": 3.350952125
+      },
+      "ar_engine": {
+        "p50": 37.7652900005,
+        "p95": 38.52102459225,
+        "max": 38.932264553
+      }
+    },
+    "actual_native_batch_size": 4,
+    "waveform_soak_requests": 15
+  },
+  "limitations": [
+    "NVML sampled usage is not an instantaneous allocator peak.",
+    "AR stage elapsed starts at prefill, excluding admission waiting; codec stage elapsed includes its queue.",
+    "The native workload replaces P1 synthetic codes/background AR; throughput is not a like-for-like P1 speedup.",
+    "Run 3865 checks long-run grid hashes; the separate soak checks serial/interleaved HTTP WAV hashes.",
+    "Longer contexts, 24GB, streaming, graph/radix/quantization/TP>1 remain unqualified.",
+    "Broad HTTP M4A regression has a reproduced pre-existing torchcodec/torch ABI failure."
+  ],
+  "pass": true,
+  "code_commits": {
+    "shared_http": "6b22b8d",
+    "moss_serving": "9dae728"
+  },
+  "static_checks": {
+    "path": "artifacts/p4/static_checks.json",
+    "sha256": "f822058f179698d6ebda37f49e7edeaf0b5642f8cc9f59ee0b7bb34edcb1ec82"
+  },
+  "code_sha256": {
+    "sglang-omni/sglang_omni/config/schema.py": "ffd08f1464e8fbf1cb7c03d2fbbdd2e9c5cd82fc690d0c2e628a54fffd849248",
+    "sglang-omni/sglang_omni/models/moss_speech/config.py": "c46ee58c268004c4041035dd346aca378b3e76b1ff0dceb487b5de213b77fbf5",
+    "sglang-omni/sglang_omni/models/moss_speech/request_builders.py": "1adccacec690ffdd65e01544838c33505685774081d7d77d5f389d371610d05f",
+    "sglang-omni/sglang_omni/models/moss_speech/stages.py": "ba13a156c78dd6f6bd96b9b48218d8a5f76df137aaf087ce7f2f1fed2ce5acb3",
+    "sglang-omni/sglang_omni/serve/launcher.py": "c635fc735b7b20489fbf4602e3cf201308a94303594b50c5a0a79f26e16dc0e4",
+    "sglang-omni/sglang_omni/serve/openai_api.py": "f822895ad2f649335c61de89acbdd33897b690459d4d2209a8c9b1e91f3f7efa",
+    "sglang-omni/sglang_omni/serve/openai_errors.py": "ca8f9cb801863fbeba06ebae083c786c04356414a93e9253a559796ef2befb8a",
+    "sglang-omni/scripts/moss_speech/p4/summarize.py": "dd710181593ce35100b90cf3433d936af2d70cb36d29c32fab920aaccc06422a",
+    "sglang-omni/scripts/moss_speech/p4/validate_cli.py": "2b60d6c6b95365fa108418b6e24c694798ced3585a3883fd3adfe0758bda981d",
+    "sglang-omni/scripts/moss_speech/p4/validate_http.py": "dd5426eef35ebd67130e2d85bf47f72f01a6d3e91c6f08a90e260ae30a62da1c",
+    "sglang-omni/tests/unit_test/moss_speech/test_http_contract.py": "3a83f476fe5d6549998bd1ade199bb8e5432bb0c1b9218d3aaa31f95899c88b4",
+    "sglang-omni/tests/unit_test/serve/test_chat_lifecycle.py": "43fa27dcab9d58671ca2b99e913b0cf3a5b69d697108eef525aca77dbbe72e15"
+  },
+  "retained_failures": [
+    {
+      "path": "artifacts/p4/http_3861/report.json",
+      "sha256": "909a9081c2e44427090ac0bdf755a2529da57f279461eefd9c7dd6ffc5115df2"
+    },
+    {
+      "path": "artifacts/p4/http_3862/report.json",
+      "sha256": "c702f144b92bd53da0164c5a297549ea11ab7654baf5a1eb42409fbead3d5248"
+    },
+    {
+      "path": "artifacts/p4/preexisting_m4a_failure.log",
+      "sha256": "544e327d838c73b26bce2e4d3e2b1d52b7cfb6d2ee2998af56f2afabb6e00c55"
+    },
+    {
+      "path": "artifacts/p4/cpu_regression_final.log",
+      "sha256": "9ae96364892c252bc243b6f0806f684a209e84e44f78af72c1c6459357167c51"
+    }
+  ],
+  "slurm": {
+    "path": "artifacts/p4/slurm_accounting.txt",
+    "sha256": "580def582d35ff62ea63ed976231b5b27955d04ebb4286c6f57ca4c9160cb7c1"
+  },
+  "date": "2026-09-08"
+}
