@@ -28,21 +28,18 @@ ModelWorker._apply_arch_override branch + tests).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Iterable, List, Optional, Tuple
 
 import torch
 from sglang.srt.layers.layernorm import RMSNorm
-from sglang.srt.layers.logits_processor import (
-    LogitsProcessor,
-    LogitsProcessorOutput,
-)
+from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen3 import Qwen3DecoderLayer
 
@@ -94,10 +91,168 @@ def as_qwen3_layer_config(config: Any) -> Any:
 
 def moss_attention_layer_count(config: Any) -> int:
     """num_shared + 2 * num_modality (both tails hold KV every position)."""
-    get = (lambda k, d=None: config.get(k, d)) if isinstance(config, dict) else (
-        lambda k, d=None: getattr(config, k, d)
+    get = (
+        (lambda k, d=None: config.get(k, d))
+        if isinstance(config, dict)
+        else (lambda k, d=None: getattr(config, k, d))
     )
     return int(get("num_shared_layers")) + 2 * int(get("num_modality_layers"))
+
+
+class MossSpeechRMSNorm(RMSNorm):
+    """Preserve the checkpoint's explicit BF16 rounding boundaries.
+
+    Residual addition is rounded before normalization; the normalized value
+    is rounded before multiplying the learned weight. A fused float32
+    residual+norm or norm+weight operation changes these semantics.
+    """
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+        post_residual_addition: Optional[torch.Tensor] = None,
+    ) -> Any:
+        if residual is not None:
+            if post_residual_addition is not None:
+                residual = residual + post_residual_addition
+            x = x + residual
+            residual = x
+        dtype = x.dtype
+        value = x.float()
+        value = value * torch.rsqrt(
+            value.square().mean(-1, keepdim=True) + self.variance_epsilon
+        )
+        value = self.weight * value.to(dtype)
+        return value if residual is None else (value, residual)
+
+
+@lru_cache(maxsize=8)
+def reference_rope_frequencies(head_dim: int, theta: float) -> torch.Tensor:
+    """Reference initializes frequencies on CPU before moving them to CUDA.
+
+    CUDA pow differs by one ULP for some frequencies, which first changes
+    BF16 sin/cos at position 459 for the locked checkpoint.
+    """
+    exponents = (
+        torch.arange(0, head_dim, 2, device="cpu", dtype=torch.int64).float() / head_dim
+    )
+    return 1.0 / (theta**exponents)
+
+
+def request_linear(
+    x: torch.Tensor, weight: torch.Tensor, lengths: list[int]
+) -> torch.Tensor:
+    """Keep each request's GEMM shape independent of unrelated batch members."""
+    if sum(lengths) != x.shape[0]:
+        raise ValueError("request lengths do not cover the packed tensor")
+    if len(lengths) <= 1:
+        return torch.nn.functional.linear(x, weight)
+    return torch.cat(
+        [torch.nn.functional.linear(part, weight) for part in x.split(lengths, dim=0)],
+        dim=0,
+    )
+
+
+def request_norm(
+    norm: Any,
+    x: torch.Tensor,
+    lengths: list[int],
+    residual: Optional[torch.Tensor] = None,
+) -> Any:
+    """Evaluate reduction shapes independently for each packed request."""
+    if len(lengths) <= 1:
+        return norm(x, residual) if residual is not None else norm(x)
+    chunks = x.split(lengths, dim=0)
+    if residual is None:
+        return torch.cat([norm(chunk) for chunk in chunks], dim=0)
+    results = [
+        norm(chunk, r) for chunk, r in zip(chunks, residual.split(lengths, dim=0))
+    ]
+    return tuple(torch.cat([result[i] for result in results], dim=0) for i in range(2))
+
+
+class MossSpeechDecoderLayer(Qwen3DecoderLayer):
+    """TP=1 decoder that does not bypass model-specific Q/K norm rounding."""
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: Any,
+        residual: Optional[torch.Tensor] = None,
+        post_residual_addition: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        lengths = forward_batch._moss_request_lengths
+        if post_residual_addition is not None:
+            raise ValueError("Post residual addition is not supported in V1")
+        if residual is None:
+            residual = hidden_states
+            hidden_states = request_norm(self.input_layernorm, hidden_states, lengths)
+        else:
+            hidden_states, residual = request_norm(
+                self.input_layernorm, hidden_states, lengths, residual
+            )
+        attn = self.self_attn
+        # Keep separate GEMMs and BF16 elementwise rounding as in the checkpoint.
+        # Packed storage remains unchanged for SGLang's weight loader.
+        q_weight, k_weight, v_weight = attn.qkv_proj.weight.split(
+            [attn.q_size, attn.kv_size, attn.kv_size], dim=0
+        )
+        q = request_linear(hidden_states, q_weight, lengths)
+        k = request_linear(hidden_states, k_weight, lengths)
+        v = request_linear(hidden_states, v_weight, lengths)
+        q = request_norm(
+            attn.q_norm, q.reshape(-1, attn.num_heads, attn.head_dim), lengths
+        )
+        k = request_norm(
+            attn.k_norm, k.reshape(-1, attn.num_kv_heads, attn.head_dim), lengths
+        )
+        inv_freq = reference_rope_frequencies(attn.head_dim, attn.rope_theta).to(
+            positions.device
+        )
+        with torch.autocast(device_type=positions.device.type, enabled=False):
+            freqs = (
+                inv_freq[None, :, None] @ positions[None, None, :].float()
+            ).transpose(1, 2)
+            angles = torch.cat((freqs, freqs), dim=-1)
+            cos = angles.cos().to(q.dtype)[0, :, None, :]
+            sin = angles.sin().to(q.dtype)[0, :, None, :]
+
+        def rotate(x: torch.Tensor) -> torch.Tensor:
+            left, right = x.chunk(2, dim=-1)
+            return torch.cat((-right, left), dim=-1)
+
+        q = (q * cos + rotate(q) * sin).reshape(-1, attn.q_size)
+        k = (k * cos + rotate(k) * sin).reshape(-1, attn.kv_size)
+        hidden_states = attn.attn(q, k, v, forward_batch)
+        hidden_states = request_linear(hidden_states, attn.o_proj.weight, lengths)
+        hidden_states, residual = request_norm(
+            self.post_attention_layernorm, hidden_states, lengths, residual
+        )
+        gate_weight, up_weight = self.mlp.gate_up_proj.weight.chunk(2, dim=0)
+        gate = request_linear(hidden_states, gate_weight, lengths)
+        up = request_linear(hidden_states, up_weight, lengths)
+        hidden_states = request_linear(
+            torch.nn.functional.silu(gate) * up, self.mlp.down_proj.weight, lengths
+        )
+        return hidden_states, residual
+
+
+def make_moss_decoder_layer(config: Any, **kwargs: Any) -> MossSpeechDecoderLayer:
+    """Reuse native projections/attention/KV, retaining reference norm math."""
+    layer = MossSpeechDecoderLayer(config, **kwargs)
+    for name in ("input_layernorm", "post_attention_layernorm"):
+        norm = MossSpeechRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        setattr(layer, name, norm)
+        setattr(layer.layer_communicator, name, norm)
+    for name in ("q_norm", "k_norm"):
+        setattr(
+            layer.self_attn,
+            name,
+            MossSpeechRMSNorm(layer.self_attn.head_dim, eps=config.rms_norm_eps),
+        )
+    return layer
 
 
 class MossSpeechSGLangModel(torch.nn.Module):
@@ -122,17 +277,22 @@ class MossSpeechSGLangModel(torch.nn.Module):
         super().__init__()
         del kwargs
         self.config = config
-        _dt = str(getattr(config, 'dtype', 'bfloat16') or 'bfloat16')
-        self.dtype = {'bfloat16': torch.bfloat16, 'float16': torch.float16,
-                      'float32': torch.float32}.get(_dt, torch.bfloat16)
+        _dt = str(getattr(config, "dtype", "bfloat16") or "bfloat16")
+        self.dtype = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "float32": torch.float32,
+        }.get(_dt, torch.bfloat16)
         self.hidden_size = int(config.hidden_size)
         self.text_vocab_size = int(config.vocab_size)
         self.audio_vocab_size = int(config.audio_vocab_size)
         self.num_shared_layers = int(config.num_shared_layers)
         self.num_modality_layers = int(config.num_modality_layers)
         self.total_attention_layers = moss_attention_layer_count(config)
-        self.head_dim = int(getattr(config, "head_dim", 0) or
-                            (int(config.hidden_size) // int(config.num_attention_heads)))
+        self.head_dim = int(
+            getattr(config, "head_dim", 0)
+            or (int(config.hidden_size) // int(config.num_attention_heads))
+        )
 
         qcfg = as_qwen3_layer_config(config)
 
@@ -150,7 +310,7 @@ class MossSpeechSGLangModel(torch.nn.Module):
         )
 
         self.layers = torch.nn.ModuleList(
-            Qwen3DecoderLayer(
+            make_moss_decoder_layer(
                 qcfg,
                 layer_id=i,
                 start_layer=0,
@@ -162,7 +322,7 @@ class MossSpeechSGLangModel(torch.nn.Module):
         text_start = self.num_shared_layers
         audio_start = text_start + self.num_modality_layers
         self.text_block = torch.nn.ModuleList(
-            Qwen3DecoderLayer(
+            make_moss_decoder_layer(
                 qcfg,
                 layer_id=text_start + i,
                 start_layer=0,
@@ -172,7 +332,7 @@ class MossSpeechSGLangModel(torch.nn.Module):
             for i in range(self.num_modality_layers)
         )
         self.audio_block = torch.nn.ModuleList(
-            Qwen3DecoderLayer(
+            make_moss_decoder_layer(
                 qcfg,
                 layer_id=audio_start + i,
                 start_layer=0,
@@ -182,8 +342,8 @@ class MossSpeechSGLangModel(torch.nn.Module):
             for i in range(self.num_modality_layers)
         )
 
-        self.text_norm = RMSNorm(self.hidden_size, eps=qcfg.rms_norm_eps)
-        self.audio_norm = RMSNorm(self.hidden_size, eps=qcfg.rms_norm_eps)
+        self.text_norm = MossSpeechRMSNorm(self.hidden_size, eps=qcfg.rms_norm_eps)
+        self.audio_norm = MossSpeechRMSNorm(self.hidden_size, eps=qcfg.rms_norm_eps)
         self.text_lm_head = ParallelLMHead(
             self.text_vocab_size, self.hidden_size, quant_config=quant_config
         )
@@ -205,7 +365,8 @@ class MossSpeechSGLangModel(torch.nn.Module):
         # rewrites forward_batch.input_ids to row indices before decode.
         buffer_bs = int(getattr(config, "moss_decode_buffer_bs", 128))
         self._decode_input_embedding = torch.nn.Embedding(
-            buffer_bs, self.hidden_size,
+            buffer_bs,
+            self.hidden_size,
             device=init_device or torch.device("cpu"),
             dtype=torch.bfloat16,
         )
@@ -214,10 +375,15 @@ class MossSpeechSGLangModel(torch.nn.Module):
         # the runner pops entries when consuming)
         self._dual_logits_by_rid: dict = {}
         # Attention layers must cover exactly the allocator's 40 slots.
-        ids = [l.self_attn.attn.layer_id for l in list(self.layers) + list(self.text_block) + list(self.audio_block)]
-        assert sorted(ids) == list(range(self.total_attention_layers)), (
-            f"attention layer ids {sorted(ids)} != 0..{self.total_attention_layers - 1}"
-        )
+        ids = [
+            layer.self_attn.attn.layer_id
+            for layer in list(self.layers)
+            + list(self.text_block)
+            + list(self.audio_block)
+        ]
+        assert sorted(ids) == list(
+            range(self.total_attention_layers)
+        ), f"attention layer ids {sorted(ids)} != 0..{self.total_attention_layers - 1}"
 
     @staticmethod
     def _make_logits_processor(config: Any, vocab_size: int) -> LogitsProcessor:
@@ -229,12 +395,14 @@ class MossSpeechSGLangModel(torch.nn.Module):
 
     # ------------------------------------------------------------------ utils
     def attention_layer_ids(self) -> List[int]:
-        ids = [l.self_attn.attn.layer_id for l in self.layers]
-        ids += [l.self_attn.attn.layer_id for l in self.text_block]
-        ids += [l.self_attn.attn.layer_id for l in self.audio_block]
+        ids = [layer.self_attn.attn.layer_id for layer in self.layers]
+        ids += [layer.self_attn.attn.layer_id for layer in self.text_block]
+        ids += [layer.self_attn.attn.layer_id for layer in self.audio_block]
         return ids
 
-    def _last_token_indices(self, hidden: torch.Tensor, forward_batch: Any) -> torch.Tensor:
+    def _last_token_indices(
+        self, hidden: torch.Tensor, forward_batch: Any
+    ) -> torch.Tensor:
         """Indices of each request's last position in the packed token dim."""
         mode = getattr(forward_batch, "forward_mode", None)
         if mode is None or getattr(mode, "is_decode", None) and mode.is_decode():
@@ -258,24 +426,16 @@ class MossSpeechSGLangModel(torch.nn.Module):
         if input_embeds is None:
             if input_ids is None:
                 raise ValueError("require input_ids or input_embeds")
-            forward_mode = getattr(forward_batch, "forward_mode", None) if forward_batch is not None else None
+            forward_mode = (
+                getattr(forward_batch, "forward_mode", None)
+                if forward_batch is not None
+                else None
+            )
             is_decode = (
                 forward_mode is not None
                 and getattr(forward_mode, "is_decode", None) is not None
                 and bool(forward_mode.is_decode())
             )
-            import os as _osd
-
-            if not _osd.environ.get("MOSS_QUIET_EMBED_FALLBACK"):
-                import logging as _lg
-
-                _lg.getLogger(__name__).warning(
-                    "moss_speech forward fell back to text-token embedding "
-                    "for %s (input_embeds missing)",
-                    "decode" if (forward_batch is not None and getattr(
-                        getattr(forward_batch, "forward_mode", None), "is_decode", lambda: False)())
-                    else "PREFILL",
-                )
             if is_decode:
                 staging = self._decode_input_embedding
                 if staging.weight.device != input_ids.device:
@@ -288,6 +448,18 @@ class MossSpeechSGLangModel(torch.nn.Module):
                 # canonical dual-channel prefill always passes input_embeds.
                 input_embeds = self.embed_tokens(input_ids)
 
+        mode = getattr(forward_batch, "forward_mode", None)
+        if mode is not None and mode.is_decode():
+            lengths = [1] * input_embeds.shape[0]
+        else:
+            seq_lengths = getattr(forward_batch, "extend_seq_lens", None)
+            lengths = (
+                seq_lengths.tolist()
+                if seq_lengths is not None
+                else [input_embeds.shape[0]]
+            )
+        forward_batch._moss_request_lengths = lengths
+        self._last_request_lengths = lengths
         hidden_states = input_embeds
         residual: Optional[torch.Tensor] = None
         for layer in self.layers:
@@ -322,8 +494,13 @@ class MossSpeechSGLangModel(torch.nn.Module):
             )
 
         last_idx = self._last_token_indices(text_hidden, forward_batch)
-        text_final, _ = self.text_norm(text_hidden[last_idx], text_residual[last_idx] if text_residual is not None else None)
-        audio_final, _ = self.audio_norm(audio_hidden[last_idx], audio_residual[last_idx] if audio_residual is not None else None)
+        text_final, _ = request_norm(
+            self.text_norm, text_hidden, lengths, text_residual
+        )
+        audio_final, _ = request_norm(
+            self.audio_norm, audio_hidden, lengths, audio_residual
+        )
+        self._last_head_indices = last_idx
         # Stash the dual-tail finals for the runner's compute_dual_logits()
         # (moss_tts blueprint: the engine's standard forward replaces custom
         # fields on the result object, so the runner recomputes channel
@@ -339,7 +516,7 @@ class MossSpeechSGLangModel(torch.nn.Module):
         # post_prefill, and a model-level stash is clobbered by interleaved
         # decode forwards of other requests). Stacked (2, bs, H).
         dual_hidden = torch.stack(
-            [self._last_text_hidden, self._last_audio_hidden], dim=0
+            [self._last_text_hidden[last_idx], self._last_audio_hidden[last_idx]], dim=0
         )
         out = self.compute_dual_logits()
         # rid-keyed transport: forward_batch is rebuilt between the forward
@@ -361,7 +538,8 @@ class MossSpeechSGLangModel(torch.nn.Module):
                 # forward_batch_generation; slices would see the warped
                 # distribution (the cos -0.33 artifact)
                 self._dual_logits_by_rid[(_rid, _mode_key)] = (
-                    out.text_logits[_i].clone(), out.audio_logits[_i].clone()
+                    out.text_logits[_i].clone(),
+                    out.audio_logits[_i].clone(),
                 )
         out.hidden_states = dual_hidden
         import os as _os2
@@ -377,18 +555,30 @@ class MossSpeechSGLangModel(torch.nn.Module):
                     "text_final": self._last_text_hidden.float().cpu(),
                     "audio_final": self._last_audio_hidden.float().cpu(),
                     "trunk_h": hidden_states.detach().float().cpu(),
-                    "trunk_r": (residual.detach().float().cpu()
-                                if residual is not None else None),
+                    "trunk_r": (
+                        residual.detach().float().cpu()
+                        if residual is not None
+                        else None
+                    ),
                     "audio_in_h": audio_hidden.detach().float().cpu(),
-                    "audio_in_r": (audio_residual.detach().float().cpu()
-                                   if audio_residual is not None else None),
+                    "audio_in_r": (
+                        audio_residual.detach().float().cpu()
+                        if audio_residual is not None
+                        else None
+                    ),
                     "last_idx": last_idx.detach().cpu(),
                     "rids": (list(rids) if isinstance(rids, (list, tuple)) else None),
                     "out_text_head5": out.text_logits[0][:5].detach().float().cpu(),
                     "recompute_head5": torch.nn.functional.linear(
                         self._last_text_hidden, self.text_lm_head.weight
-                    )[0][:5].detach().float().cpu(),
-                    "hidden_head5": self._last_text_hidden[0][:5].detach().float().cpu(),
+                    )[0][:5]
+                    .detach()
+                    .float()
+                    .cpu(),
+                    "hidden_head5": self._last_text_hidden[0][:5]
+                    .detach()
+                    .float()
+                    .cpu(),
                 },
                 _pl2.Path(_d2) / f"hidden_{_n2:03d}.pt",
             )
@@ -399,7 +589,7 @@ class MossSpeechSGLangModel(torch.nn.Module):
             # object.__new__-style test batches may not accept attributes
             return self.compute_dual_logits()
 
-    def compute_dual_logits(self):
+    def compute_dual_logits(self) -> MossSpeechModelOutput:
         """Dual-head logits from the stashed final hiddens of the last
         forward. Must be called synchronously after forward (single
         engine thread).
@@ -412,12 +602,19 @@ class MossSpeechSGLangModel(torch.nn.Module):
         model (the runner injects next_token_ids), so the sampler-contract
         forwarding of ParallelLMHead is not needed here.
         """
-        text_logits = torch.nn.functional.linear(
-            self._last_text_hidden, self.text_lm_head.weight
+        text_logits = request_linear(
+            self._last_text_hidden, self.text_lm_head.weight, self._last_request_lengths
         )
-        audio_logits = torch.nn.functional.linear(
-            self._last_audio_hidden, self.audio_lm_head.weight
+        audio_logits = request_linear(
+            self._last_audio_hidden,
+            self.audio_lm_head.weight,
+            self._last_request_lengths,
         )
+        # Reference projects the complete prefill before selecting its last
+        # row. Selecting hidden first changes the BF16 GEMM shape and ties.
+        indices = self._last_head_indices
+        text_logits = text_logits[indices]
+        audio_logits = audio_logits[indices]
         return MossSpeechModelOutput(
             next_token_logits=text_logits,
             text_logits=text_logits,
@@ -459,7 +656,7 @@ class MossSpeechSGLangModel(torch.nn.Module):
             ("model.audio_block.layers.", "audio_block."),
         ):
             if name.startswith(ckpt_prefix):
-                rest = name[len(ckpt_prefix):]
+                rest = name[len(ckpt_prefix) :]
                 break
         else:
             return None  # unexpected checkpoint key
@@ -479,8 +676,10 @@ class MossSpeechSGLangModel(torch.nn.Module):
 
     def _shard_row_span(self, shard: str) -> Tuple[int, int]:
         """Row range of ``shard`` inside its fused matrix (TP=1)."""
-        head_dim = self.head_dim if getattr(self, "head_dim", None) else int(
-            getattr(self.config, "head_dim", 0)
+        head_dim = (
+            self.head_dim
+            if getattr(self, "head_dim", None)
+            else int(getattr(self.config, "head_dim", 0))
         )
         num_heads = int(self.config.num_attention_heads)
         num_kv = int(self.config.num_key_value_heads)
@@ -500,16 +699,29 @@ class MossSpeechSGLangModel(torch.nn.Module):
         consumed_sources = 0
         shards_seen: dict[str, set] = {}
         direct_seen: set[str] = set()
+        source_names: set[str] = set()
         for name, tensor in weights:
+            if name in source_names:
+                raise RuntimeError(f"duplicate checkpoint source {name}")
+            source_names.add(name)
             mapped = self._map_checkpoint_name(name)
             if mapped is None:
-                logger.warning("moss_speech load_weights: unexpected checkpoint key %s", name)
-                continue
+                raise RuntimeError(f"unexpected checkpoint key {name}")
             target, shard = mapped
             if target not in params:
-                raise KeyError(f"mapped module {target} not found for checkpoint key {name}")
+                raise KeyError(
+                    f"mapped module {target} not found for checkpoint key {name}"
+                )
             data = tensor.data if hasattr(tensor, "data") else tensor
             param = params[target]
+            expected_shape = param.shape
+            if shard is not None:
+                start, end = self._shard_row_span(shard)
+                expected_shape = param[start:end].shape
+            if data.shape != expected_shape:
+                raise RuntimeError(
+                    f"checkpoint shape mismatch for {name}: {tuple(data.shape)} != {tuple(expected_shape)}"
+                )
             if shard is None:
                 default_weight_loader(param, data)
                 direct_seen.add(target)
@@ -522,8 +734,12 @@ class MossSpeechSGLangModel(torch.nn.Module):
 
         # coverage: every source tensor of the 446-checkpoint layout consumed
         per_layer_direct = [
-            "self_attn.o_proj.weight", "self_attn.q_norm.weight", "self_attn.k_norm.weight",
-            "mlp.down_proj.weight", "input_layernorm.weight", "post_attention_layernorm.weight",
+            "self_attn.o_proj.weight",
+            "self_attn.q_norm.weight",
+            "self_attn.k_norm.weight",
+            "mlp.down_proj.weight",
+            "input_layernorm.weight",
+            "post_attention_layernorm.weight",
         ]
         per_layer_fused = {
             "self_attn.qkv_proj.weight": {"q", "k", "v"},
@@ -533,7 +749,9 @@ class MossSpeechSGLangModel(torch.nn.Module):
             prefix = f"layers.{i}."
             for d in per_layer_direct:
                 if prefix + d not in direct_seen:
-                    raise RuntimeError(f"moss_speech load_weights: missing {prefix + d}")
+                    raise RuntimeError(
+                        f"moss_speech load_weights: missing {prefix + d}"
+                    )
             for fused, shards in per_layer_fused.items():
                 got = shards_seen.get(prefix + fused, set())
                 if got != shards:
@@ -545,31 +763,47 @@ class MossSpeechSGLangModel(torch.nn.Module):
                 prefix = f"{blk}.{i}."
                 for d in per_layer_direct:
                     if prefix + d not in direct_seen:
-                        raise RuntimeError(f"moss_speech load_weights: missing {prefix + d}")
+                        raise RuntimeError(
+                            f"moss_speech load_weights: missing {prefix + d}"
+                        )
                 for fused, shards in per_layer_fused.items():
                     got = shards_seen.get(prefix + fused, set())
                     if got != shards:
                         raise RuntimeError(
                             f"moss_speech load_weights: {prefix + fused} shards {sorted(got)} != {sorted(shards)}"
                         )
-        for d in ("embed_tokens.weight", "audio_embed.weight", "text_norm.weight",
-                  "audio_norm.weight", "text_lm_head.weight", "audio_lm_head.weight"):
+        for d in (
+            "embed_tokens.weight",
+            "audio_embed.weight",
+            "text_norm.weight",
+            "audio_norm.weight",
+            "text_lm_head.weight",
+            "audio_lm_head.weight",
+        ):
             if d not in direct_seen:
                 raise RuntimeError(f"moss_speech load_weights: missing {d}")
         expected_sources = (
-            6
-            + (self.num_shared_layers + 2 * self.num_modality_layers) * 11
+            6 + (self.num_shared_layers + 2 * self.num_modality_layers) * 11
         )
         logger.info(
             "moss_speech load_weights: %d/%d source tensors consumed "
             "(4 independent large matrices; qkv/gate-up fused per sglang layout)",
-            consumed_sources, expected_sources,
+            consumed_sources,
+            expected_sources,
         )
         if consumed_sources != expected_sources:
             raise RuntimeError(
                 f"moss_speech load_weights: consumed {consumed_sources} sources, "
                 f"expected {expected_sources} (dedup or missing checkpoint tensors)"
             )
+
+        self._weight_load_report = {
+            "consumed_sources": consumed_sources,
+            "unique_sources": len(source_names),
+            "expected_sources": expected_sources,
+            "unexpected_sources": 0,
+            "exact_shapes_checked": True,
+        }
 
     # -------------------------------------------------- anti-tying assertion
     def assert_heads_independent(self) -> None:
@@ -583,7 +817,10 @@ class MossSpeechSGLangModel(torch.nn.Module):
                 ew = emb.weight
                 hw = head.weight if hasattr(head, "weight") else head.logits_processor
                 if ew.shape == hw.shape and torch.equal(ew, hw):
-                    raise RuntimeError(f"{label} embedding and lm_head share storage/values (tying forbidden)")
+                    raise RuntimeError(
+                        f"{label} embedding and lm_head share storage/values (tying forbidden)"
+                    )
+
 
 EntryClass = MossSpeechSGLangModel  # symmetry with package-level discovery
 

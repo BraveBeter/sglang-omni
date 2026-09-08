@@ -9,7 +9,7 @@ float/int tensors materialized only at the serialization boundary
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from sglang_omni.scheduling.pipeline_state import DeclarativeStateBase, wire
@@ -51,8 +51,10 @@ class MossSpeechState(DeclarativeStateBase):
     audio_codes: list[list[int]] = wire(default_factory=list, codec="list")
 
     # ---- canonical grid (processor output, before AR) ----------------------
-    input_grid: list[list[list[int]]] = wire(default_factory=list, codec="list")  # (B, L, 2)
-    attention_mask: list[list[int]] = wire(default_factory=list, codec="list")
+    input_grid: list[list[int]] = wire(
+        default_factory=list, codec="list"
+    )  # (L, 2), one request
+    attention_mask: list[int] = wire(default_factory=list, codec="list")
     prompt_grid_len: int = wire(0, codec="int")
 
     # ---- voice conditioning transport (audio requests only) ----------------
@@ -65,8 +67,11 @@ class MossSpeechState(DeclarativeStateBase):
     voice_embedding: list[float] = wire(default_factory=list, codec="list")  # (192,)
 
     # ---- AR output (stub or native) ----------------------------------------
-    output_grid: list[list[list[int]]] = wire(default_factory=list, codec="list")  # (B, L_new, 2)
+    output_grid: list[list[int]] = wire(
+        default_factory=list, codec="list"
+    )  # (L_new, 2), one request
     generated_text: str = wire("", codec="str")
+    finish_reason: Optional[str] = wire(None, codec="str_or")
 
     # ---- terminal outputs ----------------------------------------------------
     audio_samples: list[float] = wire(default_factory=list, codec="list")

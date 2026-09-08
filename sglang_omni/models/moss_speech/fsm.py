@@ -78,14 +78,15 @@ def initial_mode(prompt_rows: torch.Tensor) -> int:
 def next_mode(last_row: torch.Tensor, current_mode: int) -> int:
     """Transition evaluated before each forward from the last appended row."""
     if current_mode == MODE_TEXT and int(last_row[0]) == SOSP:
-        return MODE_AUDIO
+        current_mode = MODE_AUDIO
     if current_mode == MODE_AUDIO and int(last_row[1]) == EOSP:
-        return MODE_TEXT
+        current_mode = MODE_TEXT
     return current_mode
 
 
-def apply_audio_constraints(audio_logits: torch.Tensor, generating_length: int,
-                            min_new_tokens: int) -> torch.Tensor:
+def apply_audio_constraints(
+    audio_logits: torch.Tensor, generating_length: int, min_new_tokens: int
+) -> torch.Tensor:
     """In-place reference rule on the (V_a,) audio logits of one step."""
     audio_logits[AUDIO_FORBIDDEN_FROM:] = float("-inf")
     if generating_length < min_new_tokens:
@@ -93,8 +94,9 @@ def apply_audio_constraints(audio_logits: torch.Tensor, generating_length: int,
     return audio_logits
 
 
-def repetition_penalty_scores(logits: torch.Tensor, history: torch.Tensor,
-                              penalty: float) -> torch.Tensor:
+def repetition_penalty_scores(
+    logits: torch.Tensor, history: torch.Tensor, penalty: float
+) -> torch.Tensor:
     """HF RepetitionPenaltyLogitsProcessor math on a single channel row.
 
     history: 1-D long tensor of that channel's tokens so far (prompt +
@@ -109,8 +111,9 @@ def repetition_penalty_scores(logits: torch.Tensor, history: torch.Tensor,
     return scores
 
 
-def sample_channel(scores: torch.Tensor, do_sample: bool,
-                   generator: Optional[torch.Generator] = None) -> int:
+def sample_channel(
+    scores: torch.Tensor, do_sample: bool, generator: Optional[torch.Generator] = None
+) -> int:
     """Greedy argmax (lowest index on exact ties — torch.argmax semantics) or
     seeded multinomial over softmax(scores)."""
     if not do_sample:
@@ -201,8 +204,9 @@ def stop_hit(row: Tuple[int, int]) -> bool:
     return row[0] in (TEXT_ENDOFTEXT, IM_END)
 
 
-def channel_histories(prompt_rows: torch.Tensor,
-                      output_rows: List[Tuple[int, int]]) -> Tuple[torch.Tensor, torch.Tensor]:
+def channel_histories(
+    prompt_rows: torch.Tensor, output_rows: List[Tuple[int, int]]
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """Full per-channel histories (prompt + generated) for the penalty."""
     gen = torch.tensor(output_rows, dtype=torch.long).reshape(-1, 2)
     full = torch.cat([prompt_rows.to(torch.long), gen], dim=0)

@@ -22,25 +22,25 @@ import base64
 import binascii
 import hashlib
 import io
+import math
 import os
 import threading
 from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence
+from typing import Any, List, Optional
 
 import soundfile as _sf
 import torch
 
 from sglang_omni.proto import EXPLICIT_GENERATION_PARAMS_KEY
-from sglang_omni.proto import StagePayload
+from sglang_omni.proto.request import OmniRequest, StagePayload
 from sglang_omni.scheduling.sglang_backend.request_data import SGLangARRequestData
+
+from .payload_types import MossSpeechState
 
 MODALITY_PAD_TOKEN = 151667
 TEXT_ENDOFTEXT_TOKEN = 151643
 IM_END_TOKEN = 151645
 TEXT_VOCAB_LIMIT = 151680
-from sglang_omni.proto.request import OmniRequest, StagePayload
-
-from .payload_types import MossSpeechState
 
 # V1 limits (chat contract §3.2; overridable via stage factory args later).
 MAX_AUDIO_DURATION_S = 30.0
@@ -64,7 +64,7 @@ class RequestValidationError(ValueError):
 
 
 # --------------------------------------------------------------------- helpers
-def _as_generate_request(inputs: Any):
+def _as_generate_request(inputs: Any) -> Any:
     """Accept a client GenerateRequest object or its serialized dict form."""
     from sglang_omni.client.types import GenerateRequest, Message, SamplingParams
 
@@ -74,7 +74,9 @@ def _as_generate_request(inputs: Any):
         data = dict(inputs)
         messages = data.get("messages")
         if isinstance(messages, list):
-            data["messages"] = [Message(**m) if isinstance(m, dict) else m for m in messages]
+            data["messages"] = [
+                Message(**m) if isinstance(m, dict) else m for m in messages
+            ]
         sampling = data.get("sampling")
         if isinstance(sampling, dict):
             data["sampling"] = SamplingParams(**sampling)
@@ -102,14 +104,18 @@ def _decode_audio_bytes(data: bytes, *, source: str) -> tuple[torch.Tensor, int]
             f"audio {source} could not be decoded: {exc}", reason="invalid_audio"
         ) from exc
     if wav.shape[0] == 0:
-        raise RequestValidationError(f"audio {source} decodes to zero samples", reason="invalid_audio")
+        raise RequestValidationError(
+            f"audio {source} decodes to zero samples", reason="invalid_audio"
+        )
     if not MIN_SAMPLE_RATE <= sr <= MAX_SAMPLE_RATE:
         raise RequestValidationError(
             f"audio {source} sample rate {sr} outside [{MIN_SAMPLE_RATE}, {MAX_SAMPLE_RATE}]",
             reason="invalid_audio",
         )
     if not torch.isfinite(torch.from_numpy(wav)).all():
-        raise RequestValidationError(f"audio {source} contains non-finite samples", reason="invalid_audio")
+        raise RequestValidationError(
+            f"audio {source} contains non-finite samples", reason="invalid_audio"
+        )
     duration = wav.shape[0] / sr
     if duration > MAX_AUDIO_DURATION_S:
         raise RequestValidationError(
@@ -127,7 +133,9 @@ def _load_audio_source(source: str) -> tuple[torch.Tensor, int]:
         try:
             data = base64.b64decode(b64, validate=False)
         except (binascii.Error, ValueError) as exc:
-            raise RequestValidationError(f"invalid data-URI audio: {exc}", reason="invalid_audio") from exc
+            raise RequestValidationError(
+                f"invalid data-URI audio: {exc}", reason="invalid_audio"
+            ) from exc
         return _decode_audio_bytes(data, source="data-uri")
     if source.startswith(("http://", "https://", "ftp://")):
         raise RequestValidationError(
@@ -135,7 +143,9 @@ def _load_audio_source(source: str) -> tuple[torch.Tensor, int]:
             reason="not_supported",
         )
     if not os.path.isfile(source):
-        raise RequestValidationError(f"audio path {source!r} not found", reason="invalid_audio")
+        raise RequestValidationError(
+            f"audio path {source!r} not found", reason="invalid_audio"
+        )
     with open(source, "rb") as fh:
         return _decode_audio_bytes(fh.read(), source=source)
 
@@ -156,9 +166,37 @@ def normalize_and_validate(request: OmniRequest, *, request_id: str) -> MossSpee
     """
     gen = _as_generate_request(request.inputs)
 
+    sampling = getattr(gen, "sampling", None)
+    for name in ("temperature", "top_p", "repetition_penalty", "min_p"):
+        value = getattr(sampling, name, None)
+        if value is not None and not math.isfinite(float(value)):
+            raise RequestValidationError(f"{name} must be finite")
+    if getattr(sampling, "min_p", 0.0) not in (None, 0.0):
+        raise RequestValidationError(
+            "min_p is not supported in V1", reason="not_supported"
+        )
+    temperature = getattr(sampling, "temperature", None)
+    top_p = getattr(sampling, "top_p", None)
+    penalty = getattr(sampling, "repetition_penalty", None)
+    if (
+        temperature is not None
+        and temperature < 0
+        or top_p is not None
+        and not 0 < top_p <= 1
+        or penalty is not None
+        and penalty <= 0
+    ):
+        raise RequestValidationError("invalid sampling parameters")
+
     # ---- V1 capability rejections ----------------------------------------
+    if getattr(getattr(gen, "sampling", None), "stop", None):
+        raise RequestValidationError(
+            "custom stop strings are not supported in V1", reason="not_supported"
+        )
     if getattr(gen, "stream", False):
-        raise RequestValidationError("streaming is not supported in V1", reason="not_supported")
+        raise RequestValidationError(
+            "streaming is not supported in V1", reason="not_supported"
+        )
     metadata = getattr(gen, "metadata", None) or {}
     if metadata.get("audio_config"):
         raise RequestValidationError(
@@ -166,16 +204,26 @@ def normalize_and_validate(request: OmniRequest, *, request_id: str) -> MossSpee
             reason="not_supported",
         )
     if getattr(gen, "stage_sampling", None) or getattr(gen, "stage_params", None):
-        raise RequestValidationError("stage sampling/params overrides are not supported in V1", reason="not_supported")
+        raise RequestValidationError(
+            "stage sampling/params overrides are not supported in V1",
+            reason="not_supported",
+        )
     if getattr(gen, "extra_params", None):
-        raise RequestValidationError("extra params are not supported in V1", reason="not_supported")
+        raise RequestValidationError(
+            "extra params are not supported in V1", reason="not_supported"
+        )
     if metadata.get("images") or metadata.get("videos"):
-        raise RequestValidationError("image/video inputs are not supported in V1", reason="not_supported")
+        raise RequestValidationError(
+            "image/video inputs are not supported in V1", reason="not_supported"
+        )
 
     # ---- output modality ---------------------------------------------------
     modalities = list(getattr(gen, "output_modalities", None) or ["text"])
     modality_set = {str(m) for m in modalities}
-    if modality_set not in [set(s) for s in _VALID_MODALITY_SETS] or len(modalities) != 1:
+    if (
+        modality_set not in [set(s) for s in _VALID_MODALITY_SETS]
+        or len(modalities) != 1
+    ):
         raise RequestValidationError(
             f"modalities must be exactly one of ['text'] or ['audio']; got {modalities!r}"
         )
@@ -189,8 +237,14 @@ def normalize_and_validate(request: OmniRequest, *, request_id: str) -> MossSpee
     audio_turns: List[int] = []  # indices into turns
     inline_audio_sources: List[str] = []
     for i, msg in enumerate(messages):
-        role = getattr(msg, "role", None) or (msg.get("role") if isinstance(msg, dict) else None)
-        content = getattr(msg, "content", None) if not isinstance(msg, dict) else msg.get("content")
+        role = getattr(msg, "role", None) or (
+            msg.get("role") if isinstance(msg, dict) else None
+        )
+        content = (
+            getattr(msg, "content", None)
+            if not isinstance(msg, dict)
+            else msg.get("content")
+        )
         if role not in ("system", "user", "assistant"):
             raise RequestValidationError(f"unsupported role {role!r} at message {i}")
         text_parts: List[str] = []
@@ -205,21 +259,34 @@ def normalize_and_validate(request: OmniRequest, *, request_id: str) -> MossSpee
                 elif ptype == "input_audio":
                     if audio_part is not None:
                         raise RequestValidationError(
-                            f"message {i} contains multiple input_audio parts", reason="invalid_request"
+                            f"message {i} contains multiple input_audio parts",
+                            reason="invalid_request",
                         )
                     audio_part = part.get("input_audio") or {}
-                elif ptype in ("image_url", "image", "video", "video_url", "input_image"):
+                elif ptype in (
+                    "image_url",
+                    "image",
+                    "video",
+                    "video_url",
+                    "input_image",
+                ):
                     raise RequestValidationError(
-                        f"content part type {ptype!r} is not supported in V1", reason="not_supported"
+                        f"content part type {ptype!r} is not supported in V1",
+                        reason="not_supported",
                     )
                 elif ptype is None:
-                    raise RequestValidationError(f"message {i} has a content part without a type")
+                    raise RequestValidationError(
+                        f"message {i} has a content part without a type"
+                    )
                 else:
                     raise RequestValidationError(
-                        f"unsupported content part type {ptype!r} in message {i}", reason="not_supported"
+                        f"unsupported content part type {ptype!r} in message {i}",
+                        reason="not_supported",
                     )
         else:
-            raise RequestValidationError(f"message {i} content must be string or parts list")
+            raise RequestValidationError(
+                f"message {i} content must be string or parts list"
+            )
         if audio_part is not None and text_parts:
             raise RequestValidationError(
                 f"message {i} mixes text and audio in one turn; single modality per turn required"
@@ -257,12 +324,22 @@ def normalize_and_validate(request: OmniRequest, *, request_id: str) -> MossSpee
     decoded: List[NormalizedAudioTurn] = []
     total_duration = 0.0
     for idx, source in zip(audio_turns, inline_audio_sources):
-        if source.startswith("data:") or not source.startswith(("http://", "https://")) and not os.path.isfile(source):
+        if (
+            source.startswith("data:")
+            or not source.startswith(("http://", "https://"))
+            and not os.path.isfile(source)
+        ):
             # inline base64 payload arrives as raw base64 string
             try:
-                data = base64.b64decode(source, validate=False) if not source.startswith("data:") else None
+                data = (
+                    base64.b64decode(source, validate=False)
+                    if not source.startswith("data:")
+                    else None
+                )
             except (binascii.Error, ValueError) as exc:
-                raise RequestValidationError(f"invalid base64 audio: {exc}", reason="invalid_audio") from exc
+                raise RequestValidationError(
+                    f"invalid base64 audio: {exc}", reason="invalid_audio"
+                ) from exc
             if data is not None:
                 wav, sr = _decode_audio_bytes(data, source=f"turn[{idx}]")
             else:
@@ -271,7 +348,9 @@ def normalize_and_validate(request: OmniRequest, *, request_id: str) -> MossSpee
             wav, sr = _load_audio_source(source)
         total_duration += wav.shape[0] / sr
         digest = hashlib.blake2b(wav.numpy().tobytes(), digest_size=16).hexdigest()
-        decoded.append(NormalizedAudioTurn(waveform=wav, sample_rate=sr, source_key=digest))
+        decoded.append(
+            NormalizedAudioTurn(waveform=wav, sample_rate=sr, source_key=digest)
+        )
     if total_duration > MAX_TOTAL_AUDIO_DURATION_S:
         raise RequestValidationError(
             f"total audio duration {total_duration:.1f}s exceeds {MAX_TOTAL_AUDIO_DURATION_S}s",
@@ -284,16 +363,24 @@ def normalize_and_validate(request: OmniRequest, *, request_id: str) -> MossSpee
     est_tokens = _PRECHECK_TEMPLATE_TOKENS + sum(
         max(len(t.get("text") or "") / _PRECHECK_CHARS_PER_TOKEN, 1.0) for t in turns
     )
-    est_tokens += sum(waveform.shape[0] / sr * 12.5 for waveform, sr in ((d.waveform, d.sample_rate) for d in decoded))
-    if est_tokens > 10240:  # SFT context bound (P0 contract); exact check is post-encode
+    est_tokens += sum(
+        waveform.shape[0] / sr * 12.5
+        for waveform, sr in ((d.waveform, d.sample_rate) for d in decoded)
+    )
+    if (
+        est_tokens > 10240
+    ):  # SFT context bound (P0 contract); exact check is post-encode
         raise RequestValidationError(
-            f"estimated context length {int(est_tokens)} exceeds the 10240 limit", reason="context_too_long"
+            f"estimated context length {int(est_tokens)} exceeds the 10240 limit",
+            reason="context_too_long",
         )
 
     # ---- parameters -----------------------------------------------------------
     sampling = getattr(gen, "sampling", None)
     seed_val = getattr(sampling, "seed", None) if sampling is not None else None
-    effective_seed = int(seed_val) if seed_val is not None else _derive_effective_seed(request_id)
+    effective_seed = (
+        int(seed_val) if seed_val is not None else _derive_effective_seed(request_id)
+    )
     explicit = list(metadata.get(EXPLICIT_GENERATION_PARAMS_KEY, []) or [])
 
     state = MossSpeechState(
@@ -301,15 +388,23 @@ def normalize_and_validate(request: OmniRequest, *, request_id: str) -> MossSpee
         turns=turns,
         explicit_params=explicit,
         effective_seed=effective_seed,
-        temperature=getattr(sampling, "temperature", None) if sampling is not None else None,
+        temperature=(
+            getattr(sampling, "temperature", None) if sampling is not None else None
+        ),
         top_p=getattr(sampling, "top_p", None) if sampling is not None else None,
         top_k=getattr(sampling, "top_k", None) if sampling is not None else None,
-        repetition_penalty=getattr(sampling, "repetition_penalty", None) if sampling is not None else None,
+        repetition_penalty=(
+            getattr(sampling, "repetition_penalty", None)
+            if sampling is not None
+            else None
+        ),
         max_new_tokens=getattr(gen, "max_tokens", None),
         stop=list(getattr(sampling, "stop", None) or []),
     )
     # stash decoded audio for the same-process encode step (never serialized)
-    state.__dict__["_decoded_audio"] = [(d.waveform, d.sample_rate, d.source_key) for d in decoded]
+    state.__dict__["_decoded_audio"] = [
+        (d.waveform, d.sample_rate, d.source_key) for d in decoded
+    ]
     return state
 
 
@@ -420,7 +515,7 @@ class MossSpeechSGLangRequestData(SGLangARRequestData):
     # paths never draw. Owned by this data object; freed with it.
     rng_generator: Any = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> Any:
         if self.output_rows is None:
             self.output_rows = []
         import collections
@@ -434,6 +529,7 @@ class MossSpeechSGLangRequestData(SGLangARRequestData):
         self.generation_steps = 0
         self.finished = False
         self.stop_reason = None
+        self.rng_generator = None
         if self.pending_feedback_queue is not None:
             self.pending_feedback_queue.clear()
         from sglang_omni.models.moss_speech.fsm import initial_mode
@@ -441,7 +537,9 @@ class MossSpeechSGLangRequestData(SGLangARRequestData):
         self.mode = initial_mode(self.prompt_rows)
 
 
-def build_sglang_moss_request(state: Any, *, payload: Any = None) -> MossSpeechSGLangRequestData:
+def build_sglang_moss_request(
+    state: Any, *, payload: Any = None
+) -> MossSpeechSGLangRequestData:
     """MossSpeechState (P2 wire) -> engine request data.
 
     Consumes the frozen P2 fields: input grid rows, explicit/derived sampling
@@ -452,26 +550,69 @@ def build_sglang_moss_request(state: Any, *, payload: Any = None) -> MossSpeechS
     from sglang_omni.models.moss_speech.fsm import MossSamplingParams, initial_mode
 
     explicit = set(getattr(state, "explicit_params", []) or [])
-    _temp = float(getattr(state, "temperature", 1.0) or 1.0)
-    _top_p = float(getattr(state, "top_p", 1.0) or 1.0)
-    _top_k = int(getattr(state, "top_k", -1) or -1)
-    # Sampling is engaged only by warper values that actually reshape the
-    # distribution; the HTTP fill-ins (1.0/1.0/-1/1.0) and temperature<=0 /
-    # top_k==1 are greedy. Documented V1 boundary.
-    do_sample = bool(_temp > 0 and (_temp != 1.0 or _top_p != 1.0 or _top_k not in (-1, 1)))
+    defaults = {
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "repetition_penalty": 1.1,
+    }
+
+    def value(name: Any) -> Any:
+        raw = getattr(state, name, None)
+        return raw if name in explicit and raw is not None else defaults[name]
+
+    temperature = float(value("temperature"))
+    top_p = float(value("top_p"))
+    top_k = int(value("top_k"))
+    penalty = float(value("repetition_penalty"))
+    max_new = getattr(state, "max_new_tokens", None)
+    max_new = 200 if max_new is None else int(max_new)
+    if not 0 <= temperature or not 0 < top_p <= 1 or top_k not in (-1, 0) and top_k < 1:
+        raise RequestValidationError("invalid native sampling parameters")
+    if (
+        not all(math.isfinite(v) for v in (temperature, top_p, penalty))
+        or penalty <= 0
+        or max_new < 1
+    ):
+        raise RequestValidationError(
+            "repetition_penalty and max_new_tokens must be positive"
+        )
+    if getattr(state, "stop", None):
+        raise RequestValidationError(
+            "custom stop strings are not supported in V1", reason="not_supported"
+        )
     params = MossSamplingParams(
-        do_sample=do_sample,
-        temperature=_temp,
-        top_p=_top_p,
-        top_k=_top_k,
-        repetition_penalty=float(getattr(state, "repetition_penalty", 1.0) or 1.0),
+        do_sample=temperature > 0 and top_k != 1,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        repetition_penalty=penalty,
         min_new_tokens=int(getattr(state, "min_new_tokens", 0) or 0),
-        max_new_tokens=int(getattr(state, "max_tokens", 200) or 200),
+        max_new_tokens=max_new,
     )
-    prompt_rows = torch.tensor(state.input_grid, dtype=torch.long) if not torch.is_tensor(
-        state.input_grid) else state.input_grid.to(torch.long).cpu()
-    if prompt_rows.dim() == 3:
+    prompt_rows = torch.as_tensor(state.input_grid, dtype=torch.long)
+    if prompt_rows.dim() == 3 and prompt_rows.shape[0] == 1:
         prompt_rows = prompt_rows[0]
+    if prompt_rows.dim() != 2 or prompt_rows.shape[1] != 2 or not len(prompt_rows):
+        raise RequestValidationError("native input_grid must have shape (L, 2)")
+    mask = getattr(state, "attention_mask", None)
+    if mask is not None and len(mask):
+        mask = torch.as_tensor(mask).reshape(-1)
+        if mask.numel() != len(prompt_rows) or not ((mask == 0) | (mask == 1)).all():
+            raise RequestValidationError("invalid native attention_mask")
+        if not mask.any() or (mask[1:] < mask[:-1]).any():
+            raise RequestValidationError(
+                "native attention_mask must be nonempty left padding"
+            )
+        prompt_rows = prompt_rows[mask.bool()]
+    if ((prompt_rows[:, 0] < 0) | (prompt_rows[:, 0] >= TEXT_VOCAB_LIMIT)).any() or (
+        (prompt_rows[:, 1] < 0) | (prompt_rows[:, 1] >= 16512)
+    ).any():
+        raise RequestValidationError("native input_grid contains out-of-vocabulary IDs")
+    if not 0 <= params.min_new_tokens <= params.max_new_tokens:
+        raise RequestValidationError(
+            "min_new_tokens must be within [0, max_new_tokens]"
+        )
     # 1-D scheduler representation: one selected token per grid row (the
     # embedding-selected channel value; lossless per P3-01 §3.1)
     selected = [
@@ -504,6 +645,8 @@ def build_sglang_moss_request(state: Any, *, payload: Any = None) -> MossSpeechS
         mode=initial_mode(prompt_rows),
         params=params,
         effective_seed=int(getattr(state, "effective_seed", 0) or 0),
+        max_new_tokens=params.max_new_tokens,
+        enforce_request_limits=True,
     )
     data.stage_payload = payload
     # record which fields were explicit for the adapter contract test
@@ -511,28 +654,37 @@ def build_sglang_moss_request(state: Any, *, payload: Any = None) -> MossSpeechS
     return data
 
 
-def make_moss_speech_scheduler_adapters(*, model: Any):
+def make_moss_speech_scheduler_adapters(*, model: Any, lifecycle: Any = None) -> Any:
     """StagePayload <-> engine request adapters (moss_tts_local pattern)."""
     import traceback as _tb
 
-    def _logged(fn):
-        def wrapper(*a, **k):
+    if lifecycle is None:
+        from sglang_omni.models.moss_speech.request_lifecycle import (
+            MossSpeechRequestLifecycle,
+        )
+
+        lifecycle = MossSpeechRequestLifecycle(model)
+
+    def _logged(fn: Any) -> Any:
+        def wrapper(*a: Any, **k: Any) -> Any:
             try:
                 return fn(*a, **k)
             except Exception:
                 _tb.print_exc()
                 raise
+
         return wrapper
 
     @_logged
-    def request_builder(payload):
+    def request_builder(payload: Any) -> Any:
         state = payload.data
         if not isinstance(state, MossSpeechState):
             state = MossSpeechState.from_dict(state)
-        return build_sglang_moss_request(state, payload=payload)
+        data = build_sglang_moss_request(state, payload=payload)
+        return lifecycle.admit(data, state.output_modality)
 
     @_logged
-    def result_adapter(data):
+    def result_adapter(data: Any) -> Any:
         try:
             import os as _osr
 
@@ -541,9 +693,12 @@ def make_moss_speech_scheduler_adapters(*, model: Any):
                 print(
                     "[adapter] finish_reason:",
                     getattr(data, "finish_reason", None),
-                    "output_rows:", len(data.output_rows),
-                    "req_output_ids:", (list(_r.output_ids)[-6:] if _r is not None else None),
-                    "fr_detail:", (str(_r.finished_reason)[:120] if _r is not None else None),
+                    "output_rows:",
+                    len(data.output_rows),
+                    "req_output_ids:",
+                    (list(_r.output_ids)[-6:] if _r is not None else None),
+                    "fr_detail:",
+                    (str(_r.finished_reason)[:120] if _r is not None else None),
                     flush=True,
                 )
             payload = data.stage_payload
@@ -551,13 +706,14 @@ def make_moss_speech_scheduler_adapters(*, model: Any):
             if not isinstance(state, MossSpeechState):
                 state = MossSpeechState.from_dict(state)
             state.output_grid = [list(map(int, r)) for r in data.output_rows]
+            state.finish_reason = data.finish_reason
             return StagePayload(
                 request_id=payload.request_id,
                 request=payload.request,
                 data=state.to_dict(),
             )
         finally:
-            cleanup_ar_request_state(data)
+            lifecycle.release(data.req.rid)
 
     return request_builder, result_adapter
 
@@ -566,6 +722,11 @@ def cleanup_ar_request_state(data: MossSpeechSGLangRequestData) -> None:
     """Idempotent AR-owner cleanup: release per-request state only."""
     if data is None:
         return
-    data.pending_feedback_queue.clear() if data.pending_feedback_queue is not None else None
+    (
+        data.pending_feedback_queue.clear()
+        if data.pending_feedback_queue is not None
+        else None
+    )
     data.output_rows = []
+    data.rng_generator = None
     data.finished = True

@@ -2,23 +2,21 @@
 """T3.4 CPU tests: FSM table, sampling order, adapter contract, state
 lifecycle. Pure-logic tests (no GPU, no engine construction)."""
 
-import tests.unit_test.moss_speech.sglang_cpu_env  # noqa: F401
-
 from types import SimpleNamespace
 
-import pytest
 import torch
 
+import tests.unit_test.moss_speech.sglang_cpu_env  # noqa: F401
 from sglang_omni.models.moss_speech import fsm
 from sglang_omni.models.moss_speech.fsm import (
     AUDIO_PAD,
     EOSP,
     IM_END,
     MODALITY_PAD,
-    SOSP,
-    TEXT_ENDOFTEXT,
     MODE_AUDIO,
     MODE_TEXT,
+    SOSP,
+    TEXT_ENDOFTEXT,
     MossSamplingParams,
     apply_audio_constraints,
     apply_warpers,
@@ -87,7 +85,9 @@ def test_repetition_penalty_hf_math():
     assert out[1] == -4.0  # negative -> score*penalty
     assert out[2] == 1.0  # unseen untouched
     # penalty 1.0 is a no-op
-    assert torch.equal(repetition_penalty_scores(logits, torch.tensor([0]), 1.0), logits)
+    assert torch.equal(
+        repetition_penalty_scores(logits, torch.tensor([0]), 1.0), logits
+    )
 
 
 def test_warper_order_temperature_topk_topp():
@@ -136,7 +136,9 @@ def test_sample_row_rep_penalty_applies_per_channel():
     prompt = torch.tensor([[42, AUDIO_PAD]])
     # 42 seen in text history: 5.0 -> 2.5, so 43 (4.9) wins
     t_hist, a_hist = channel_histories(prompt, [])
-    text_tok, _ = sample_row(text_logits, audio_logits, params, t_hist, a_hist, 1, MODE_TEXT)
+    text_tok, _ = sample_row(
+        text_logits, audio_logits, params, t_hist, a_hist, 1, MODE_TEXT
+    )
     assert text_tok == 43
 
 
@@ -172,7 +174,8 @@ def _state_fixture(**over):
     s = MossSpeechState()
     s.input_grid = [[[151644, AUDIO_PAD], [77091, AUDIO_PAD], [198, AUDIO_PAD]]]
     s.output_modality = "text"
-    s.temperature = 1.0
+    s.temperature = 0.0
+    s.explicit_params = ["temperature", "top_p", "top_k", "repetition_penalty"]
     s.top_p = 1.0
     s.top_k = -1
     s.repetition_penalty = 1.1
@@ -193,7 +196,7 @@ def test_build_sglang_moss_request_contract():
     assert data.prompt_rows.shape == (3, 2)
     assert data.mode == MODE_TEXT
     assert data.params.repetition_penalty == 1.1
-    assert data.params.do_sample is False  # fill-in defaults are greedy
+    assert data.params.do_sample is False  # explicit zero temperature is greedy
     assert data.effective_seed == 77
     assert data.stage_payload is payload
     # Req carries the selected-token stream and the text stop tokens
@@ -221,16 +224,16 @@ def test_build_request_do_sample_flag_and_audio_prompt():
 
 
 def test_result_adapter_reconstructs_grid_and_cleans_state():
-    from sglang_omni.models.moss_speech.payload_types import MossSpeechState
     from sglang_omni.models.moss_speech.request_builders import (
-        build_sglang_moss_request,
         make_moss_speech_scheduler_adapters,
     )
     from sglang_omni.proto.request import StagePayload
 
     rb, ra = make_moss_speech_scheduler_adapters(model=None)
     state = _state_fixture()
-    payload = StagePayload(request_id="r3", request=SimpleNamespace(), data=state.to_dict())
+    payload = StagePayload(
+        request_id="r3", request=SimpleNamespace(), data=state.to_dict()
+    )
     data = rb(payload)
     data.output_rows = [(11, 2), (MODALITY_PAD, 5), (IM_END, 7)]
     out = ra(data)

@@ -18,7 +18,7 @@ Model-specific subclass of the COMMON generation builder
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 import torch
 
@@ -33,13 +33,26 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
 
     def __init__(self, context_length: int | None = None) -> None:
         super().__init__()
+        from sglang_omni.models.moss_speech.request_lifecycle import (
+            MossSpeechRequestLifecycle,
+        )
+
+        self.request_lifecycle = MossSpeechRequestLifecycle()
         if context_length is not None:
             self.context_length = int(context_length)
+
+    def pre_infra_setup(self, checkpoint_dir: str) -> None:
+        from sglang_omni.models.moss_speech.hf_config import (
+            ensure_moss_speech_config_registered,
+        )
+
+        ensure_moss_speech_config_registered()
 
     # ------------------------------------------------------------ policy
     def generation_defaults(self, dtype: str = "bfloat16") -> dict[str, Any]:
         return {
             "max_running_requests": 16,
+            "attention_backend": "torch_native",
             "dtype": dtype,
             "disable_cuda_graph": True,
             "enable_torch_compile": False,
@@ -53,13 +66,23 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
         }
 
     def adjust_overrides(self, overrides: dict[str, Any]) -> None:
-        # V1 boundaries are non-negotiable: force them even if an operator
-        # passed conflicting values (fail-closed, no silent downgrade).
-        overrides["disable_cuda_graph"] = True
-        overrides["enable_torch_compile"] = False
-        overrides["disable_radix_cache"] = True
-        overrides["tp_size"] = 1
-        overrides["chunked_prefill_size"] = -1
+        required = {
+            "attention_backend": "torch_native",
+            "trust_remote_code": False,
+            "disable_cuda_graph": True,
+            "enable_torch_compile": False,
+            "disable_radix_cache": True,
+            "tp_size": 1,
+            "chunked_prefill_size": -1,
+        }
+        for key, value in required.items():
+            if key in overrides and overrides[key] != value:
+                raise ValueError(f"MOSS-Speech V1 rejects {key}={overrides[key]!r}")
+            overrides[key] = value
+        if overrides.get("quantization") is not None:
+            raise ValueError("MOSS-Speech V1 does not support quantization")
+        if overrides.get("kv_cache_dtype", "auto") not in ("auto", "bfloat16", "bf16"):
+            raise ValueError("MOSS-Speech V1 requires BF16 KV")
         overrides.setdefault("mem_fraction_static", 0.72)
 
     def customize_server_args(self, server_args: Any) -> None:
@@ -126,4 +149,13 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
             make_moss_speech_scheduler_adapters,
         )
 
-        return make_moss_speech_scheduler_adapters(model=model)
+        self.request_lifecycle.model = model
+        return make_moss_speech_scheduler_adapters(
+            model=model, lifecycle=self.request_lifecycle
+        )
+
+    def make_abort_callback(self) -> Callable[[str], None]:
+        return lambda rid: self.request_lifecycle.release(rid, aborted=True)
+
+    def make_request_finished_callback(self) -> Callable[[str], None]:
+        return self.request_lifecycle.release

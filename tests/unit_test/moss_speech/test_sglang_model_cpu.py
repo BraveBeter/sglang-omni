@@ -8,14 +8,13 @@ ServerArgs stand-in and a vllm._custom_ops stub before sglang resolves its
 module-level platform probes).
 """
 
-import tests.unit_test.moss_speech.sglang_cpu_env  # noqa: F401  (import side effects)
-
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+import tests.unit_test.moss_speech.sglang_cpu_env  # noqa: F401  (import side effects)
 from sglang_omni.models.moss_speech.sglang_model import (
     ARCH_KEY,
     MossSpeechSGLangModel,
@@ -46,7 +45,9 @@ TINY = dict(
 
 
 def make_tiny_model() -> MossSpeechSGLangModel:
-    return MossSpeechSGLangModel(SimpleNamespace(**TINY), init_device=torch.device("cpu"))
+    return MossSpeechSGLangModel(
+        SimpleNamespace(**TINY), init_device=torch.device("cpu")
+    )
 
 
 def tiny_checkpoint_names():
@@ -59,9 +60,17 @@ def tiny_checkpoint_names():
         "audio_lm_head.weight",
     ]
     per_layer = [
-        "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
-        "self_attn.q_norm", "self_attn.k_norm", "mlp.gate_proj", "mlp.up_proj",
-        "mlp.down_proj", "input_layernorm", "post_attention_layernorm",
+        "self_attn.q_proj",
+        "self_attn.k_proj",
+        "self_attn.v_proj",
+        "self_attn.o_proj",
+        "self_attn.q_norm",
+        "self_attn.k_norm",
+        "mlp.gate_proj",
+        "mlp.up_proj",
+        "mlp.down_proj",
+        "input_layernorm",
+        "post_attention_layernorm",
     ]
     for i in range(TINY["num_shared_layers"]):
         names += [f"model.shared_block.layers.{i}.{p}.weight" for p in per_layer]
@@ -108,7 +117,7 @@ def test_tiny_layer_ids_cover_all_attention_slots():
 
 
 def test_manifest_446_all_mapped():
-    names = [l.strip() for l in MANIFEST.read_text().splitlines() if l.strip()]
+    names = [line.strip() for line in MANIFEST.read_text().splitlines() if line.strip()]
     assert len(names) == 446
     m = make_tiny_model()
     params = dict(m.named_parameters())
@@ -120,7 +129,11 @@ def test_manifest_446_all_mapped():
         # the tiny module tree
         parts = target.split(".")
         if parts[0] in ("layers", "text_block", "audio_block") and parts[1].isdigit():
-            depth = TINY["num_shared_layers"] if parts[0] == "layers" else TINY["num_modality_layers"]
+            depth = (
+                TINY["num_shared_layers"]
+                if parts[0] == "layers"
+                else TINY["num_modality_layers"]
+            )
             parts[1] = str(int(parts[1]) % depth)
             target = ".".join(parts)
         assert target in params, f"{name} -> {target} not a module param"
@@ -134,13 +147,19 @@ def test_load_weights_sentinel_routing():
     for idx, name in enumerate(names):
         target, shard = m._map_checkpoint_name(name)
         if shard is None:
-            assert torch.all(params[target] == idx + 1), f"{name} -> {target}: sentinel lost"
+            assert torch.all(
+                params[target] == idx + 1
+            ), f"{name} -> {target}: sentinel lost"
         else:
             start, end = m._shard_row_span(shard)
             rows = params[target][start:end]
-            assert torch.all(rows == idx + 1), f"{name} -> {target}[{shard}]: sentinel lost"
+            assert torch.all(
+                rows == idx + 1
+            ), f"{name} -> {target}[{shard}]: sentinel lost"
     # the staged decode embedding is NOT a checkpoint tensor
-    assert "_decode_input_embedding.weight" not in {n for n, _ in sentinel_weights(m, names)}
+    assert "_decode_input_embedding.weight" not in {
+        n for n, _ in sentinel_weights(m, names)
+    }
 
 
 def test_load_weights_missing_tensor_raises():
@@ -150,13 +169,29 @@ def test_load_weights_missing_tensor_raises():
         m.load_weights(sentinel_weights(m, names))
 
 
-def test_load_weights_unexpected_key_warns_not_crashes(caplog):
+def test_load_weights_unexpected_key_raises():
     m = make_tiny_model()
     good = sentinel_weights(m, tiny_checkpoint_names())
-    bad = [("model.lm_head.weight", torch.zeros(1))]
-    with caplog.at_level("WARNING"):
-        m.load_weights(good + bad)  # must not raise
-    assert any("unexpected checkpoint key" in r.message for r in caplog.records)
+    with pytest.raises(RuntimeError, match="unexpected"):
+        m.load_weights(good + [("model.lm_head.weight", torch.zeros(1))])
+
+
+def test_load_weights_broadcast_shape_is_rejected():
+    m = make_tiny_model()
+    weights = sentinel_weights(m, tiny_checkpoint_names())
+    for i, (name, value) in enumerate(weights):
+        if name.endswith("self_attn.q_proj.weight"):
+            weights[i] = (name, value[:1])
+            break
+    with pytest.raises(RuntimeError, match="shape"):
+        m.load_weights(weights)
+
+
+def test_load_weights_duplicate_source_is_rejected():
+    m = make_tiny_model()
+    weights = sentinel_weights(m, tiny_checkpoint_names())
+    with pytest.raises(RuntimeError, match="duplicate"):
+        m.load_weights(weights + weights[:1])
 
 
 def test_load_weights_shape_mismatch_raises():
@@ -194,7 +229,15 @@ def test_decode_staging_buffer_exists_and_frozen():
 def test_arch_key_matches_hf_architectures():
     import json
 
-    hf_archs = json.load(
-        open("/remote-home1/xrluan/SGLang_experiments/models/MOSS-Speech/config.json")
-    )["architectures"] if Path("/remote-home1/xrluan/SGLang_experiments/models/MOSS-Speech/config.json").exists() else ["MossSpeechForCausalLM"]
+    hf_archs = (
+        json.load(
+            open(
+                "/remote-home1/xrluan/SGLang_experiments/models/MOSS-Speech/config.json"
+            )
+        )["architectures"]
+        if Path(
+            "/remote-home1/xrluan/SGLang_experiments/models/MOSS-Speech/config.json"
+        ).exists()
+        else ["MossSpeechForCausalLM"]
+    )
     assert ARCH_KEY in hf_archs

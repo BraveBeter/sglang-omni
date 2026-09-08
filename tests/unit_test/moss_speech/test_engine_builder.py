@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """T3.2: engine builder policy tests (CPU-only; no infrastructure build)."""
 
-import tests.unit_test.moss_speech.sglang_cpu_env  # noqa: F401  (import side effects)
-
 from types import SimpleNamespace
 
 import pytest
 
+import tests.unit_test.moss_speech.sglang_cpu_env  # noqa: F401  (import side effects)
 from sglang_omni.models.moss_speech.engine_builder import MossSpeechEngineBuilder
 
 
@@ -39,7 +38,9 @@ def test_generation_defaults_lock_v1_policy():
 
 def test_adjust_overrides_fail_closed():
     b = MossSpeechEngineBuilder()
-    overrides = {"enable_torch_compile": True, "tp_size": 4}
+    with pytest.raises(ValueError, match="rejects"):
+        b.adjust_overrides({"enable_torch_compile": True, "tp_size": 4})
+    overrides = {}
     b.adjust_overrides(overrides)
     assert overrides["disable_cuda_graph"] is True
     assert overrides["enable_torch_compile"] is False
@@ -58,12 +59,18 @@ def test_validate_rejects_policy_violations():
     b.validate_before_infrastructure(_server_args())  # clean pass
 
 
-def test_t34_wiring_points_raise_explicit():
+def test_t34_adapters_wired():
+    # make_adapters returns the request/result adapter pair (T3.4); the
+    # runner construction needs a live model worker and is GPU-verified in
+    # the engine parity driver instead.
     b = MossSpeechEngineBuilder()
-    for call in (
-        lambda: b.setup_model(model_worker=None, checkpoint_dir="x", device="cuda", gpu_id=0, server_args=None),
-        lambda: b.make_model_runner(None, None),
-        lambda: b.make_adapters(None),
-    ):
-        with pytest.raises(NotImplementedError, match="T3.4"):
-            call()
+    rb, ra = b.make_adapters(model=None)
+    assert callable(rb) and callable(ra)
+
+
+@pytest.mark.parametrize(
+    "overrides", [{"attention_backend": "flashinfer"}, {"trust_remote_code": True}]
+)
+def test_builder_rejects_unqualified_attention_and_remote_config(overrides):
+    with pytest.raises(ValueError, match="rejects"):
+        MossSpeechEngineBuilder().adjust_overrides(overrides)
