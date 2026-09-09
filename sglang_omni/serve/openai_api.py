@@ -41,6 +41,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from sglang_omni import __version__
 from sglang_omni.admission import QueueFullError
@@ -671,7 +672,7 @@ def _register_chat_completions(app: FastAPI) -> None:
         gen_req = _build_chat_generate_request(req)
         if app.state.chat_request_validator is not None:
             try:
-                app.state.chat_request_validator(req)
+                await run_in_threadpool(app.state.chat_request_validator, req)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
 
