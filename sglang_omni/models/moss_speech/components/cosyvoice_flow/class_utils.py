@@ -19,8 +19,6 @@ UpsampleConformerEncoder are kept; llm/flow/hifigan/cli registries removed.
 # limitations under the License.
 import torch
 
-from .flow import CausalMaskedDiffWithXvec, MaskedDiffWithXvec
-from .hifigan_generator import HiFTGenerator
 from .transformer.activation import Swish
 from .transformer.attention import MultiHeadedAttention, RelPositionMultiHeadedAttention
 from .transformer.embedding import (
@@ -75,20 +73,3 @@ COSYVOICE_ATTENTION_CLASSES = {
     "selfattn": MultiHeadedAttention,
     "rel_selfattn": RelPositionMultiHeadedAttention,
 }
-
-
-def get_model_type(configs):
-    # NOTE CosyVoice2Model inherits CosyVoiceModel
-    if (
-        isinstance(configs["llm"], TransformerLM)
-        and isinstance(configs["flow"], MaskedDiffWithXvec)
-        and isinstance(configs["hift"], HiFTGenerator)
-    ):
-        return CosyVoiceModel
-    if (
-        isinstance(configs["llm"], Qwen2LM)
-        and isinstance(configs["flow"], CausalMaskedDiffWithXvec)
-        and isinstance(configs["hift"], HiFTGenerator)
-    ):
-        return CosyVoice2Model
-    raise TypeError("No valid model type found!")

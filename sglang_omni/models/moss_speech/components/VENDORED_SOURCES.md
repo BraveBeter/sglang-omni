@@ -36,8 +36,8 @@ Preserve the Apache-2.0 / MIT notices with the corresponding vendored sources.
 | `length_regulator.py` | `cosyvoice/flow/length_regulator.py` | none |
 | `hifigan_generator.py`, `hifigan_f0_predictor.py` | `cosyvoice/hifigan/*` | import rewiring |
 | `transformer/*.py` | `cosyvoice/transformer/*` | import rewiring (package-local) |
-| `class_utils.py` | `cosyvoice/utils/class_utils.py` | trimmed to activation/subsample/positional/attention registries used by `UpsampleConformerEncoder`; llm/flow/hifigan/cli registries and imports removed |
-| `utils_common.py` | `cosyvoice/utils/common.py` | kept `set_all_random_seed`, `mask_to_bias`, `get_padding`, `init_weights` only |
+| `class_utils.py` | `cosyvoice/utils/class_utils.py` | trimmed to activation/subsample/positional/attention registries used by `UpsampleConformerEncoder`; llm/flow/hifigan/cli registries, unused `get_model_type` factory, and associated imports removed |
+| `utils_common.py` | `cosyvoice/utils/common.py` | kept `set_all_random_seed`, `mask_to_bias`, `get_padding`, `init_weights` only; unused TensorRT `TrtContextWrapper` removed |
 | `utils_mask.py` | `cosyvoice/utils/mask.py` | none |
 
 ## hf_codec/ ← OpenMOSS-Team/MOSS-Speech-Codec snapshot eeec733e (terms unconfirmed)
