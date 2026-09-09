@@ -108,7 +108,11 @@ class MossSpeechGridProcessor:
             role = turn.get("role")
             if role not in ("user", "assistant", "system"):
                 raise ContractViolation(f"unsupported role {role!r}")
-            segments.append(self._text_segment(f"<|im_start|>{role}\n", self._text_ids(f"<|im_start|>{role}\n")))
+            segments.append(
+                self._text_segment(
+                    f"<|im_start|>{role}\n", self._text_ids(f"<|im_start|>{role}\n")
+                )
+            )
             kind = turn.get("kind", "text")
             if kind == "audio":
                 codes = next(code_iter, None)
@@ -120,13 +124,21 @@ class MossSpeechGridProcessor:
                 if content is None:
                     raise ContractViolation("text turn without content")
                 segments.append(self._text_segment(content, self._text_ids(content)))
-            segments.append(self._text_segment("<|im_end|>\n", self._text_ids("<|im_end|>\n")))
+            segments.append(
+                self._text_segment("<|im_end|>\n", self._text_ids("<|im_end|>\n"))
+            )
 
         if not has_system:
             default = DEFAULT_SYSTEM_PROMPTS[output_modality]
-            segments.append(self._text_segment("<|im_start|>system\n", self._text_ids("<|im_start|>system\n")))
+            segments.append(
+                self._text_segment(
+                    "<|im_start|>system\n", self._text_ids("<|im_start|>system\n")
+                )
+            )
             segments.append(self._text_segment(default, self._text_ids(default)))
-            segments.append(self._text_segment("<|im_end|>\n", self._text_ids("<|im_end|>\n")))
+            segments.append(
+                self._text_segment("<|im_end|>\n", self._text_ids("<|im_end|>\n"))
+            )
 
         prefix = "<|im_start|>assistant\n"
         if output_modality == "audio":
@@ -150,12 +162,17 @@ class MossSpeechGridProcessor:
         grids, masks = [], []
         for s in samples:
             length = s.grid.shape[1]
-            pad = torch.full((1, max_len - length, 2), AUDIO_PAD_TOKEN_ID, dtype=torch.long)
+            pad = torch.full(
+                (1, max_len - length, 2), AUDIO_PAD_TOKEN_ID, dtype=torch.long
+            )
             pad[:, :, 0] = self.pad_token_id
             grids.append(torch.cat([pad, s.grid], dim=1))
             masks.append(
                 torch.cat(
-                    [torch.zeros(1, max_len - length, dtype=torch.long), s.attention_mask],
+                    [
+                        torch.zeros(1, max_len - length, dtype=torch.long),
+                        s.attention_mask,
+                    ],
                     dim=1,
                 )
             )

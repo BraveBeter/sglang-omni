@@ -16,7 +16,9 @@ from sglang_omni.models.moss_speech.components.codec_adapter import (
     CodecAdapterError,
     MossSpeechCodecAdapter,
 )
-from sglang_omni.models.moss_speech.components.hf_codec.modeling import _scoped_global_rng
+from sglang_omni.models.moss_speech.components.hf_codec.modeling import (
+    _scoped_global_rng,
+)
 from sglang_omni.models.moss_speech.components.voice import (
     MEL_PARAMS,
     VoiceConditioning,
@@ -69,7 +71,11 @@ class TestVoiceMel:
     def test_mel_shape_and_finiteness(self) -> None:
         wav = _wav(seconds=1.0)
         mel = compute_voice_mel(wav)
-        assert mel.dim() == 3 and mel.shape[0] == 1 and mel.shape[2] == MEL_PARAMS["num_mels"]
+        assert (
+            mel.dim() == 3
+            and mel.shape[0] == 1
+            and mel.shape[2] == MEL_PARAMS["num_mels"]
+        )
         expected_frames = int(wav.shape[1] / MEL_PARAMS["hop_size"])
         assert abs(int(mel.shape[1]) - expected_frames) <= 1
         assert torch.isfinite(mel).all()
@@ -82,7 +88,9 @@ class TestAdapterConstructionRules:
 
     def test_rejects_empty_component_set(self) -> None:
         with pytest.raises(ValueError):
-            MossSpeechCodecAdapter("/nonexistent", load_encoder=False, load_decoder=False)
+            MossSpeechCodecAdapter(
+                "/nonexistent", load_encoder=False, load_decoder=False
+            )
 
     def test_missing_codec_dir_raises(self) -> None:
         with pytest.raises((FileNotFoundError, RuntimeError, ValueError)):
@@ -158,7 +166,9 @@ class TestVoiceHookRoundTrip:
             def extract(self, wav):  # pragma: no cover
                 raise AssertionError("not used")
 
-        hook = MossSpeechVoiceHook(encode_codes_fn=lambda w: [1], speaker_encoder=_Null())
+        hook = MossSpeechVoiceHook(
+            encode_codes_fn=lambda w: [1], speaker_encoder=_Null()
+        )
         art = self._conditioning()
         art.prompt_feat[0, 0, 0] = 3.5
         stored = hook.store_artifact(art)
@@ -177,6 +187,8 @@ class TestVoiceHookRoundTrip:
             def extract(self, wav):  # pragma: no cover
                 raise AssertionError("not used")
 
-        hook = MossSpeechVoiceHook(encode_codes_fn=lambda w: [1], speaker_encoder=_Null())
+        hook = MossSpeechVoiceHook(
+            encode_codes_fn=lambda w: [1], speaker_encoder=_Null()
+        )
         with pytest.raises(TypeError):
             hook.normalize_input(self._conditioning())

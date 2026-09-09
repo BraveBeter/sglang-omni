@@ -32,4 +32,3 @@ class MossSpeechCodecConfig(PretrainedConfig):
 
 
 __all__ = ["MossSpeechCodecConfig"]
-

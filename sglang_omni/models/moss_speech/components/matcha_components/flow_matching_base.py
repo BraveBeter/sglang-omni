@@ -7,9 +7,11 @@ with fixed-call randn noise); the training loss path and imports on
 conformer/diffusers/lightning were removed. Numerical behavior of the kept
 methods is unchanged.
 """
+
 from abc import ABC
 
 import torch
+
 
 class BASECFM(torch.nn.Module, ABC):
     def __init__(
@@ -52,7 +54,9 @@ class BASECFM(torch.nn.Module, ABC):
         """
         z = torch.randn_like(mu) * temperature
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device)
-        return self.solve_euler(z, t_span=t_span, mu=mu, mask=mask, spks=spks, cond=cond)
+        return self.solve_euler(
+            z, t_span=t_span, mu=mu, mask=mask, spks=spks, cond=cond
+        )
 
     def solve_euler(self, x, t_span, mu, mask, spks, cond):
         """
@@ -85,5 +89,3 @@ class BASECFM(torch.nn.Module, ABC):
                 dt = t_span[step + 1] - t
 
         return sol[-1]
-
-

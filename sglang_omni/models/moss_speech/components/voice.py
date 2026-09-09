@@ -20,8 +20,9 @@ import numpy as np
 import torch
 import torchaudio.compliance.kaldi as kaldi
 
-from .matcha_components.audio import mel_spectrogram
 from sglang_omni.scheduling.reference_encoder import KeyedReferenceEncodeHook
+
+from .matcha_components.audio import mel_spectrogram
 
 # Frozen feature parameters (transcribed from the locked codec flow/config.yaml).
 MEL_PARAMS: Dict[str, Any] = {
@@ -69,7 +70,9 @@ class CampplusSpeakerEncoder:
         import onnxruntime
 
         options = onnxruntime.SessionOptions()
-        options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
+        options.graph_optimization_level = (
+            onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
+        )
         options.intra_op_num_threads = 1
         self._session = onnxruntime.InferenceSession(
             str(model_path), sess_options=options, providers=["CPUExecutionProvider"]
@@ -110,7 +113,9 @@ class MossSpeechVoiceHook(
         self._speaker_encoder = speaker_encoder
         self.model_revision = CODEC_REVISION
         self.encoder_config_hash = hashlib.sha256(
-            json.dumps({"mel": MEL_PARAMS, "xvector": "campplus+fbank80@16k"}, sort_keys=True).encode()
+            json.dumps(
+                {"mel": MEL_PARAMS, "xvector": "campplus+fbank80@16k"}, sort_keys=True
+            ).encode()
         ).hexdigest()[:16]
 
     def normalize_input(self, raw_input: Any) -> _VoiceRefInput:
@@ -123,7 +128,9 @@ class MossSpeechVoiceHook(
             raise TypeError(f"expected 24 kHz float tensor, got {type(wav)!r}")
         if wav.dim() == 1:
             wav = wav.unsqueeze(0)
-        digest = hashlib.blake2b(wav.detach().cpu().numpy().tobytes(), digest_size=16).hexdigest()
+        digest = hashlib.blake2b(
+            wav.detach().cpu().numpy().tobytes(), digest_size=16
+        ).hexdigest()
         return _VoiceRefInput(wav_24k=wav.to(torch.float32), input_key=digest)
 
     def input_key(self, item: _VoiceRefInput) -> str | None:
@@ -158,7 +165,11 @@ class MossSpeechVoiceHook(
 
     def load_artifact(self, stored: Dict[str, Any]) -> VoiceConditioning:
         def _clone(t: torch.Tensor) -> torch.Tensor:
-            return t.to(device="cpu", dtype=torch.float32).clone() if t.dtype.is_floating_point else t.clone()
+            return (
+                t.to(device="cpu", dtype=torch.float32).clone()
+                if t.dtype.is_floating_point
+                else t.clone()
+            )
 
         return VoiceConditioning(
             prompt_token=stored["prompt_token"].to(torch.int32).clone(),

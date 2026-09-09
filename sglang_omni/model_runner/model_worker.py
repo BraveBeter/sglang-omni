@@ -133,8 +133,8 @@ class ModelWorker:
             # + 4 modality). Both 4-layer tails hold KV at every position, so
             # the allocator must see num_shared + 2 * num_modality = 40
             # attention layers (Whisper's doubled-layer precedent).
-            model_config.num_attention_layers = (
-                int(cfg.num_shared_layers) + 2 * int(cfg.num_modality_layers)
+            model_config.num_attention_layers = int(cfg.num_shared_layers) + 2 * int(
+                cfg.num_modality_layers
             )
             return
         if arch == "WhisperForConditionalGeneration":

@@ -48,36 +48,64 @@ def reference_codes():
     if align is None:
         pytest.skip("MOSS_P1_ALIGNMENT_DIR not set")
     export = json.loads((align / "reference" / "reference_export.json").read_text())
-    return {"cn": export["encode"]["single_cn_r0"], "en": export["encode"]["single_en_r0"]}
+    return {
+        "cn": export["encode"]["single_cn_r0"],
+        "en": export["encode"]["single_en_r0"],
+    }
 
 
 def _cases(fixtures: Path):
     return {
         "t2t_short": (
-            "text", SYSTEM_TEXT,
-            [{"role": "user", "kind": "text", "text": "Introduce yourself in one sentence."}],
+            "text",
+            SYSTEM_TEXT,
+            [
+                {
+                    "role": "user",
+                    "kind": "text",
+                    "text": "Introduce yourself in one sentence.",
+                }
+            ],
             [],
         ),
         "t2s_cn": (
-            "audio", SYSTEM_SPEECH,
-            [{"role": "user", "kind": "text", "text": "用中文介绍一下上海的三到四个著名景点。"}],
+            "audio",
+            SYSTEM_SPEECH,
+            [
+                {
+                    "role": "user",
+                    "kind": "text",
+                    "text": "用中文介绍一下上海的三到四个著名景点。",
+                }
+            ],
             [],
         ),
         "s2t_cn": (
-            "text", SYSTEM_TEXT,
+            "text",
+            SYSTEM_TEXT,
             [{"role": "user", "kind": "audio", "text": None}],
             ["cn"],
         ),
         "s2s_cn": (
-            "audio", SYSTEM_SPEECH,
+            "audio",
+            SYSTEM_SPEECH,
             [{"role": "user", "kind": "audio", "text": None}],
             ["cn"],
         ),
         "mixed_multiturn": (
-            "text", SYSTEM_TEXT,
+            "text",
+            SYSTEM_TEXT,
             [
-                {"role": "user", "kind": "text", "text": "My name is Alice and I like hiking."},
-                {"role": "assistant", "kind": "text", "text": "Nice to meet you, Alice! Hiking is a great way to enjoy nature."},
+                {
+                    "role": "user",
+                    "kind": "text",
+                    "text": "My name is Alice and I like hiking.",
+                },
+                {
+                    "role": "assistant",
+                    "kind": "text",
+                    "text": "Nice to meet you, Alice! Hiking is a great way to enjoy nature.",
+                },
                 {"role": "user", "kind": "audio", "text": None},
             ],
             ["cn"],
@@ -97,9 +125,9 @@ def test_golden_grids_match_reference(tokenizer, reference_codes) -> None:
         full_turns = [{"role": "system", "kind": "text", "text": system}] + turns
         codes = [reference_codes[a] for a in audio_assets]
         built = proc.build(full_turns, codes, modality)
-        assert torch.equal(built.grid[0], expected_grid), (
-            f"{case}: grid mismatch (built {tuple(built.grid.shape)} vs expected {tuple(expected_grid.shape)})"
-        )
+        assert torch.equal(
+            built.grid[0], expected_grid
+        ), f"{case}: grid mismatch (built {tuple(built.grid.shape)} vs expected {tuple(expected_grid.shape)})"
         assert torch.equal(built.attention_mask[0], expected_mask), case
 
 
@@ -122,8 +150,15 @@ def test_collate_left_padding_matches_reference_semantics(tokenizer) -> None:
     proc = MossSpeechGridProcessor(tokenizer)
     a = proc.build([{"role": "user", "kind": "text", "text": "short"}], [], "text")
     b = proc.build(
-        [{"role": "user", "kind": "text", "text": "a considerably longer user message for padding"}],
-        [], "text",
+        [
+            {
+                "role": "user",
+                "kind": "text",
+                "text": "a considerably longer user message for padding",
+            }
+        ],
+        [],
+        "text",
     )
     batch = proc.collate([a, b])
     assert batch.grid.shape == (2, max(a.prompt_len, b.prompt_len), 2)
@@ -139,7 +174,9 @@ def test_collate_left_padding_matches_reference_semantics(tokenizer) -> None:
 def test_state_grid_round_trip_wire(tokenizer) -> None:
     """Grid survives the wire codec round trip (cross-process contract)."""
     proc = MossSpeechGridProcessor(tokenizer)
-    built = proc.build([{"role": "user", "kind": "text", "text": "round trip"}], [], "text")
+    built = proc.build(
+        [{"role": "user", "kind": "text", "text": "round trip"}], [], "text"
+    )
     state = MossSpeechState(
         input_grid=built.grid[0].tolist(),
         attention_mask=built.attention_mask[0].tolist(),

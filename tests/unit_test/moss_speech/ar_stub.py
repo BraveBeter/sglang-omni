@@ -8,7 +8,6 @@ routing -> terminal chain can be exercised before the native model exists
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import torch
@@ -36,10 +35,16 @@ def create_ar_stub_executor(
 
     def compute(payload: StagePayload) -> StagePayload:
         data = payload.data
-        state = data if isinstance(data, MossSpeechState) else MossSpeechState.from_dict(data)
+        state = (
+            data
+            if isinstance(data, MossSpeechState)
+            else MossSpeechState.from_dict(data)
+        )
         grid = audio_grid if state.output_modality == "audio" else text_grid
         state.output_grid = grid.tolist()
         # routing-relevant fields are preserved verbatim (voice/effective_seed)
-        return StagePayload(request_id=payload.request_id, request=payload.request, data=state.to_dict())
+        return StagePayload(
+            request_id=payload.request_id, request=payload.request, data=state.to_dict()
+        )
 
     return SimpleScheduler(compute)

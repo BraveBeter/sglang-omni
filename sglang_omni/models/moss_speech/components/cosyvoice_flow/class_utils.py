@@ -2,6 +2,7 @@
 Only the activation/subsample/positional-encoding/attention registries used by
 UpsampleConformerEncoder are kept; llm/flow/hifigan/cli registries removed.
 """
+
 # Copyright [2023-11-28] <sxc19@mails.tsinghua.edu.cn, Xingchen Song>
 #            2024 Alibaba Inc (authors: Xiang Lyu)
 #
@@ -18,27 +19,27 @@ UpsampleConformerEncoder are kept; llm/flow/hifigan/cli registries removed.
 # limitations under the License.
 import torch
 
+from .flow import CausalMaskedDiffWithXvec, MaskedDiffWithXvec
+from .hifigan_generator import HiFTGenerator
 from .transformer.activation import Swish
+from .transformer.attention import MultiHeadedAttention, RelPositionMultiHeadedAttention
+from .transformer.embedding import (
+    EspnetRelPositionalEncoding,
+    LearnablePositionalEncoding,
+    NoPositionalEncoding,
+    PositionalEncoding,
+    RelPositionalEncoding,
+    WhisperPositionalEncoding,
+)
 from .transformer.subsampling import (
-    LinearNoSubsampling,
-    EmbedinigNoSubsampling,
     Conv1dSubsampling2,
     Conv2dSubsampling4,
     Conv2dSubsampling6,
     Conv2dSubsampling8,
+    EmbedinigNoSubsampling,
+    LegacyLinearNoSubsampling,
+    LinearNoSubsampling,
 )
-from .transformer.embedding import (PositionalEncoding,
-                                             RelPositionalEncoding,
-                                             WhisperPositionalEncoding,
-                                             LearnablePositionalEncoding,
-                                             NoPositionalEncoding)
-from .transformer.attention import (MultiHeadedAttention,
-                                             RelPositionMultiHeadedAttention)
-from .transformer.embedding import EspnetRelPositionalEncoding
-from .transformer.subsampling import LegacyLinearNoSubsampling
-from .flow import MaskedDiffWithXvec, CausalMaskedDiffWithXvec
-from .hifigan_generator import HiFTGenerator
-
 
 COSYVOICE_ACTIVATION_CLASSES = {
     "hardtanh": torch.nn.Hardtanh,
@@ -57,7 +58,7 @@ COSYVOICE_SUBSAMPLE_CLASSES = {
     "conv2d": Conv2dSubsampling4,
     "conv2d6": Conv2dSubsampling6,
     "conv2d8": Conv2dSubsampling8,
-    'paraformer_dummy': torch.nn.Identity
+    "paraformer_dummy": torch.nn.Identity,
 }
 
 COSYVOICE_EMB_CLASSES = {
@@ -78,8 +79,16 @@ COSYVOICE_ATTENTION_CLASSES = {
 
 def get_model_type(configs):
     # NOTE CosyVoice2Model inherits CosyVoiceModel
-    if isinstance(configs['llm'], TransformerLM) and isinstance(configs['flow'], MaskedDiffWithXvec) and isinstance(configs['hift'], HiFTGenerator):
+    if (
+        isinstance(configs["llm"], TransformerLM)
+        and isinstance(configs["flow"], MaskedDiffWithXvec)
+        and isinstance(configs["hift"], HiFTGenerator)
+    ):
         return CosyVoiceModel
-    if isinstance(configs['llm'], Qwen2LM) and isinstance(configs['flow'], CausalMaskedDiffWithXvec) and isinstance(configs['hift'], HiFTGenerator):
+    if (
+        isinstance(configs["llm"], Qwen2LM)
+        and isinstance(configs["flow"], CausalMaskedDiffWithXvec)
+        and isinstance(configs["hift"], HiFTGenerator)
+    ):
         return CosyVoice2Model
-    raise TypeError('No valid model type found!')
+    raise TypeError("No valid model type found!")

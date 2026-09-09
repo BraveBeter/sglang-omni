@@ -501,20 +501,10 @@ class MossSpeechSGLangModel(torch.nn.Module):
             self.audio_norm, audio_hidden, lengths, audio_residual
         )
         self._last_head_indices = last_idx
-        # Stash the dual-tail finals for the runner's compute_dual_logits()
-        # (moss_tts blueprint: the engine's standard forward replaces custom
-        # fields on the result object, so the runner recomputes channel
-        # outputs from hidden states immediately after the forward).
+        # Final hidden states are consumed by the heads in this forward.
         self._last_text_hidden = text_final.detach()
         self._last_audio_hidden = audio_final.detach()
-        # Per-forward transport: the runner reads the dual logits off the
-        # forward_batch (one forward == one batch object), never from model
-        # state — a model-level stash gets clobbered by interleaved forwards
-        # (engine warmup / other requests) before post_prefill consumes it.
-        # moss_tts transport: hidden_states rides the engine-preserved
-        # result object (forward_batch is rebuilt between the forward and
-        # post_prefill, and a model-level stash is clobbered by interleaved
-        # decode forwards of other requests). Stacked (2, bs, H).
+        # Preserve the standard engine hidden-state result as well.
         dual_hidden = torch.stack(
             [self._last_text_hidden[last_idx], self._last_audio_hidden[last_idx]], dim=0
         )
@@ -536,7 +526,7 @@ class MossSpeechSGLangModel(torch.nn.Module):
                 # clone: the engine's sampler warps next_token_logits
                 # (same storage as text_logits) IN PLACE inside
                 # forward_batch_generation; slices would see the warped
-                # distribution (the cos -0.33 artifact)
+                # distribution before the model runner consumes it.
                 self._dual_logits_by_rid[(_rid, _mode_key)] = (
                     out.text_logits[_i].clone(),
                     out.audio_logits[_i].clone(),

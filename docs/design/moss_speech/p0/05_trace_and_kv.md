@@ -36,4 +36,3 @@ Decomposition: AR ≈ 17.1 GiB (bf16) + codec stack ≈ 18.6 GiB (whisper encode
 4. Asymmetric channel padding (text→pad during audio; audio→sampled-but-ignored during text) must be reproduced exactly in the model runner hooks; audio logits masking `[16385:]=−inf` is per-step on the audio channel.
 
 > **Correction (2026-09-06, from P1 T1.2 smoke):** the "after model+codec load = 35.73 GiB" figure above is dominated by the **reference AR loaded in fp32** (transformers `AutoModel` without `torch_dtype` in the `.venv-p0` environment), not by the codec. Direct measurement of the codec stack alone: encoder-only 1.31 GiB, decoder-only 0.54 GiB, full codec ≈ 2.4 GiB allocated. For the V1 target topology (native AR bf16 ≈ 17.1 GiB + codec fp32 ≈ 2.4 GiB ≈ **19.5 GiB**), a 24 GB card is provisionally feasible — to be confirmed by T1.4 multi-process placement measurements. The 40-layer KV accounting and all structural claims are unaffected.
-

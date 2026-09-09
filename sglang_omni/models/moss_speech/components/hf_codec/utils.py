@@ -13,9 +13,8 @@ Documented deviations from the source (see components/VENDORED_SOURCES.md):
 
 from __future__ import annotations
 
-from typing import List, Sequence, Tuple, Union
+from typing import List, Tuple
 
-import numpy as np
 import soundfile as _sf
 import torch
 import torchaudio
@@ -98,7 +97,9 @@ def extract_speech_token(model, feature_extractor, utts, batch_size: int = 128):
                         orig_freq=sample_rate, new_freq=16000
                     ).to(device)
                     if hasattr(_resample_buffer[sample_rate], "kernel"):
-                        _resample_buffer[sample_rate].kernel = _resample_buffer[sample_rate].kernel.to(device)
+                        _resample_buffer[sample_rate].kernel = _resample_buffer[
+                            sample_rate
+                        ].kernel.to(device)
                 audio = _resample_buffer[sample_rate](audio)
             audio = audio[0]
             audio = audio.cpu().numpy()
@@ -110,7 +111,10 @@ def extract_speech_token(model, feature_extractor, utts, batch_size: int = 128):
                 time_step += 30
         pooling_kernel_size = model.config.pooling_kernel_size or 1
         stride = (
-            model.conv1.stride[0] * model.conv2.stride[0] * pooling_kernel_size * feature_extractor.hop_length
+            model.conv1.stride[0]
+            * model.conv2.stride[0]
+            * pooling_kernel_size
+            * feature_extractor.hop_length
         )
         all_speech_tokens: List[List[int]] = [[] for _ in range(len(utts))]
         for start in range(0, len(audios), batch_size):
@@ -127,7 +131,9 @@ def extract_speech_token(model, feature_extractor, utts, batch_size: int = 128):
 
             outputs = model.forward(**features)
             speech_tokens = outputs.quantized_token_ids
-            attention_mask = features.attention_mask[:, :: model.conv1.stride[0] * model.conv2.stride[0]]
+            attention_mask = features.attention_mask[
+                :, :: model.conv1.stride[0] * model.conv2.stride[0]
+            ]
             attention_mask = attention_mask[:, :: model.config.pooling_kernel_size]
             assert attention_mask.shape == speech_tokens.shape
             for i in range(len(speech_tokens)):

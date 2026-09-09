@@ -28,7 +28,9 @@ from transformers.utils import logging
 logger = logging.get_logger(__name__)
 
 try:  # transformers < 5
-    from transformers.modeling_rope_utils import rope_config_validation as _rope_config_validation
+    from transformers.modeling_rope_utils import (
+        rope_config_validation as _rope_config_validation,
+    )
 except ImportError:  # transformers >= 5: moved to PreTrainedConfig.validate_rope
 
     def _rope_config_validation(config: PretrainedConfig) -> None:
@@ -46,7 +48,9 @@ def _layer_type_validation(layer_types: list[str]) -> None:
     """
     allowed = {"full_attention", "sliding_attention"}
     if layer_types and any(lt not in allowed for lt in layer_types):
-        raise ValueError(f"unsupported layer types: {sorted(set(layer_types) - allowed)}")
+        raise ValueError(
+            f"unsupported layer types: {sorted(set(layer_types) - allowed)}"
+        )
 
 
 class MossSpeechConfig(PretrainedConfig):

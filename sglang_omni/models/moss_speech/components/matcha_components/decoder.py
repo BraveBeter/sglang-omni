@@ -5,9 +5,6 @@ import torch
 import torch.nn as nn  # pylint: disable=consider-using-from-import
 import torch.nn.functional as F
 from diffusers.models.activations import get_activation
-from einops import pack, rearrange, repeat
-
-from ..matcha_components.transformer import BasicTransformerBlock
 
 
 class SinusoidalPosEmb(torch.nn.Module):
@@ -45,7 +42,9 @@ class Block1D(torch.nn.Module):
 class ResnetBlock1D(torch.nn.Module):
     def __init__(self, dim, dim_out, time_emb_dim, groups=8):
         super().__init__()
-        self.mlp = torch.nn.Sequential(nn.Mish(), torch.nn.Linear(time_emb_dim, dim_out))
+        self.mlp = torch.nn.Sequential(
+            nn.Mish(), torch.nn.Linear(time_emb_dim, dim_out)
+        )
 
         self.block1 = Block1D(dim, dim_out, groups=groups)
         self.block2 = Block1D(dim_out, dim_out, groups=groups)
@@ -130,7 +129,14 @@ class Upsample1D(nn.Module):
             number of output channels. Defaults to `channels`.
     """
 
-    def __init__(self, channels, use_conv=False, use_conv_transpose=True, out_channels=None, name="conv"):
+    def __init__(
+        self,
+        channels,
+        use_conv=False,
+        use_conv_transpose=True,
+        out_channels=None,
+        name="conv",
+    ):
         super().__init__()
         self.channels = channels
         self.out_channels = out_channels or channels
@@ -155,6 +161,3 @@ class Upsample1D(nn.Module):
             outputs = self.conv(outputs)
 
         return outputs
-
-
-

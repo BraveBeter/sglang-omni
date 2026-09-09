@@ -2,7 +2,6 @@
 """Registry assertions: MossSpeechForCausalLM resolves to the native class in
 a fresh interpreter (subprocess), and the 40-layer arch override applies."""
 
-import json
 import subprocess
 import sys
 from pathlib import Path
@@ -35,8 +34,12 @@ def test_registry_resolves_in_fresh_process(tmp_path):
         capture_output=True,
         text=True,
         timeout=600,
-        env={"PATH": "/usr/bin:/bin", "HOME": str(Path.home()), "TMPDIR": "/dev/shm",
-             "PYTHONPATH": str(repo_root)},
+        env={
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(Path.home()),
+            "TMPDIR": "/dev/shm",
+            "PYTHONPATH": str(repo_root),
+        },
     )
     assert "REGISTRY_OK" in proc.stdout, f"stderr tail: {proc.stderr[-800:]}"
     assert proc.returncode == 0

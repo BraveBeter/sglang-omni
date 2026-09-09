@@ -21,10 +21,10 @@ executed on the CPU test paths), and (2) installs the remaining shims:
 
 from __future__ import annotations
 
+import sys
 import types
 from typing import Any
 
-import sys
 
 def _install_vllm_stub() -> None:
     if "vllm._custom_ops" in sys.modules:
@@ -44,6 +44,7 @@ def _install_vllm_stub() -> None:
 
 _install_vllm_stub()
 
+
 class _ServerArgsStandin:
     """Tolerant ServerArgs stand-in: any un-set attribute reads as False
     (bool-flag semantics); the few non-bool fields are declared explicitly."""
@@ -51,7 +52,7 @@ class _ServerArgsStandin:
     speculative_algorithm = "NONE"
     attention_backend = None
     decode_attention_backend = None
-    prefill_attention_backend=None
+    prefill_attention_backend = None
     kntransformers_cfg = None
     page_size = 1
     spec_num_draft_tokens = 0
@@ -83,7 +84,6 @@ def _init_single_process_groups() -> None:
 
     torch_dtype_bf16 = _torch.bfloat16
     import os as _os
-    import random as _random
     import socket as _socket
 
     import torch.distributed as dist
@@ -127,6 +127,7 @@ def install_cpu_shims() -> None:
     import sglang.srt.models.qwen3 as q3
 
     if not getattr(q3.get_server_args, "_moss_cpu_shim", False):
+
         def _fake_server_args() -> Any:
             return SERVER_ARGS_STANDIN
 

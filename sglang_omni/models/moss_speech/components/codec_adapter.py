@@ -21,7 +21,6 @@ import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
-import soundfile as _sf
 import torch
 from transformers import WhisperFeatureExtractor
 
@@ -51,7 +50,9 @@ class MossSpeechCodecAdapter:
         load_decoder: bool = True,
     ) -> None:
         if dtype is not torch.float32:
-            raise NotImplementedError("V1 codec baseline is FP32 only; low-precision is a T1.3 optional experiment")
+            raise NotImplementedError(
+                "V1 codec baseline is FP32 only; low-precision is a T1.3 optional experiment"
+            )
         if not load_encoder and not load_decoder:
             raise ValueError("at least one of load_encoder/load_decoder must be true")
         self._device = torch.device(device)
@@ -73,7 +74,9 @@ class MossSpeechCodecAdapter:
             self._load_decoder()
         # campplus is cheap and needed for voice enrollment on both configs
         # where decode-side access is unavailable (encoder-only deployments).
-        self._speaker_encoder = CampplusSpeakerEncoder(self._codec_dir / "flow" / "campplus.onnx")
+        self._speaker_encoder = CampplusSpeakerEncoder(
+            self._codec_dir / "flow" / "campplus.onnx"
+        )
 
     # ------------------------------------------------------------------ load
     def _validate_codec_dir(self, *, load_encoder: bool, load_decoder: bool) -> None:
@@ -96,14 +99,20 @@ class MossSpeechCodecAdapter:
         config = WhisperVQConfig.from_pretrained(str(self._codec_dir / "config.json"))
         encoder = WhisperVQEncoder(config).to(self._device, self._dtype)
         state = load_file(str(self._codec_dir / "model.safetensors"))
-        stripped = {k[len("encoder."):]: v for k, v in state.items() if k.startswith("encoder.")}
+        stripped = {
+            k[len("encoder.") :]: v
+            for k, v in state.items()
+            if k.startswith("encoder.")
+        }
         missing, unexpected = encoder.load_state_dict(stripped, strict=False)
         real_missing = [k for k in missing if "masked_spec_embed" not in k]
         if real_missing:
             raise RuntimeError(f"encoder load: missing keys {real_missing[:5]}")
         encoder.eval()
         self._encoder = encoder
-        self._feature_extractor = WhisperFeatureExtractor.from_pretrained(str(self._codec_dir))
+        self._feature_extractor = WhisperFeatureExtractor.from_pretrained(
+            str(self._codec_dir)
+        )
 
     def _load_decoder(self) -> None:
         decoder = AudioDecoder(
@@ -162,7 +171,10 @@ class MossSpeechCodecAdapter:
     @torch.no_grad()
     def encode(
         self,
-        inputs: Union[Sequence[Union[str, os.PathLike, Tuple[torch.Tensor, int], torch.Tensor]], torch.Tensor],
+        inputs: Union[
+            Sequence[Union[str, os.PathLike, Tuple[torch.Tensor, int], torch.Tensor]],
+            torch.Tensor,
+        ],
         *,
         sampling_rate: Optional[int] = None,
         batch_size: int = 128,
@@ -177,7 +189,9 @@ class MossSpeechCodecAdapter:
             else:
                 raise ValueError("tensor inputs must be (T,), (C, T) or (B, C, T)")
         items = [self._normalize_audio(item, sampling_rate) for item in inputs]
-        return extract_speech_token(encoder, feature_extractor, items, batch_size=batch_size)
+        return extract_speech_token(
+            encoder, feature_extractor, items, batch_size=batch_size
+        )
 
     # ----------------------------------------------------------------- voice
     @torch.no_grad()
@@ -206,7 +220,9 @@ class MossSpeechCodecAdapter:
         import torchaudio
 
         if sr != SAMPLE_RATE_OUT:
-            audio = torchaudio.transforms.Resample(orig_freq=sr, new_freq=SAMPLE_RATE_OUT)(audio)
+            audio = torchaudio.transforms.Resample(
+                orig_freq=sr, new_freq=SAMPLE_RATE_OUT
+            )(audio)
         hook = MossSpeechVoiceHook(
             encode_codes_fn=lambda w: self.encode([(orig_audio, orig_sr)])[0],
             speaker_encoder=self._speaker_encoder,
@@ -226,7 +242,9 @@ class MossSpeechCodecAdapter:
         decoder = self._require_decoder()
         self._require_open()
         if request_id in self._sessions:
-            raise CodecAdapterError(f"request {request_id!r} already has an active decode session")
+            raise CodecAdapterError(
+                f"request {request_id!r} already has an active decode session"
+            )
         if isinstance(codes, torch.Tensor):
             codes = codes.detach().cpu().reshape(-1).tolist()
         code_list = [int(c) for c in codes]

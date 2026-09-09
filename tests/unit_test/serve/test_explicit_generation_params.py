@@ -14,7 +14,9 @@ from sglang_omni.serve.protocol import ChatCompletionRequest
 
 
 def _req(**kwargs) -> ChatCompletionRequest:
-    return ChatCompletionRequest(model="m", messages=[{"role": "user", "content": "hi"}], **kwargs)
+    return ChatCompletionRequest(
+        model="m", messages=[{"role": "user", "content": "hi"}], **kwargs
+    )
 
 
 def test_max_tokens_alias_is_explicit() -> None:
@@ -22,7 +24,9 @@ def test_max_tokens_alias_is_explicit() -> None:
 
 
 def test_max_completion_tokens_alias_is_explicit() -> None:
-    assert _explicit_generation_params(_req(max_completion_tokens=16)) == ["max_completion_tokens"]
+    assert _explicit_generation_params(_req(max_completion_tokens=16)) == [
+        "max_completion_tokens"
+    ]
 
 
 def test_length_aliases_do_not_collapse_before_marking() -> None:

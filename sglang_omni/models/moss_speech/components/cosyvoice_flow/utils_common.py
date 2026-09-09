@@ -4,17 +4,18 @@ Only set_all_random_seed (kept verbatim: the vendored CausalConditionalCFM
 constructor calls it; the adapter scopes its global side effect) and
 mask_to_bias are retained for the inference closure.
 """
+
 import random
 
 import numpy as np
 import torch
+
 
 def set_all_random_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-
 
 
 def mask_to_bias(mask: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
@@ -24,26 +25,31 @@ def mask_to_bias(mask: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     # attention mask bias
     # NOTE(Mddct): torch.finfo jit issues
     #     chunk_masks = (1.0 - chunk_masks) * torch.finfo(dtype).min
-    mask = (1.0 - mask) * -1.0e+10
+    mask = (1.0 - mask) * -1.0e10
     return mask
 
 
 class TrtContextWrapper:
-    def __init__(self, trt_engine, trt_concurrent=1, device='cuda:0'):
+    def __init__(self, trt_engine, trt_concurrent=1, device="cuda:0"):
         self.trt_context_pool = queue.Queue(maxsize=trt_concurrent)
         self.trt_engine = trt_engine
         for _ in range(trt_concurrent):
             trt_context = trt_engine.create_execution_context()
             trt_stream = torch.cuda.stream(torch.cuda.Stream(device))
-            assert trt_context is not None, 'failed to create trt context, maybe not enough CUDA memory, try reduce current trt concurrent {}'.format(trt_concurrent)
+            assert (
+                trt_context is not None
+            ), "failed to create trt context, maybe not enough CUDA memory, try reduce current trt concurrent {}".format(
+                trt_concurrent
+            )
             self.trt_context_pool.put([trt_context, trt_stream])
-        assert self.trt_context_pool.empty() is False, 'no avaialbe estimator context'
+        assert self.trt_context_pool.empty() is False, "no avaialbe estimator context"
 
     def acquire_estimator(self):
         return self.trt_context_pool.get(), self.trt_engine
 
     def release_estimator(self, context, stream):
         self.trt_context_pool.put([context, stream])
+
 
 def get_padding(kernel_size, dilation=1):
     return int((kernel_size * dilation - dilation) / 2)

@@ -62,15 +62,22 @@ async def main() -> None:
     runner = MultiProcessPipelineRunner(config)
     await runner.start(timeout=120.0)
     try:
-        gen = _build_chat_generate_request(ChatCompletionRequest(
-            model="m", messages=[{"role": "user", "content": "hello probe"}]
-        ))
+        gen = _build_chat_generate_request(
+            ChatCompletionRequest(
+                model="m", messages=[{"role": "user", "content": "hello probe"}]
+            )
+        )
         result = await asyncio.wait_for(
-            runner.coordinator.submit("probe-1", OmniRequest(inputs=gen.to_dict())), timeout=60
+            runner.coordinator.submit("probe-1", OmniRequest(inputs=gen.to_dict())),
+            timeout=60,
         )
         data = result.data if hasattr(result, "data") else result
         print("PROBE RESULT:", data if isinstance(data, dict) else type(data))
-        print("PROBE OK" if isinstance(data, dict) and data.get("probe") == "done" else "PROBE UNEXPECTED")
+        print(
+            "PROBE OK"
+            if isinstance(data, dict) and data.get("probe") == "done"
+            else "PROBE UNEXPECTED"
+        )
     finally:
         await runner.stop()
 
