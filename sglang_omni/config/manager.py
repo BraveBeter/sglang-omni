@@ -17,7 +17,9 @@ def resolve_config_cls_for_model_path(model_path: str):
     """Resolve a PipelineConfig class from HF config metadata."""
     hf_config = None
     try:
-        hf_config = AutoConfig.from_pretrained(model_path)
+        # Discovery only needs metadata; custom config classes use the raw
+        # architecture fallback below instead of prompting or executing code.
+        hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=False)
     except (OSError, ValueError, KeyError):
         hf_config = None
 
