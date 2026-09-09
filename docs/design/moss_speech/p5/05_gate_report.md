@@ -78,7 +78,7 @@ output directories; drivers refuse to overwrite existing experiment directories.
 
 ```bash
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
-export HF_HOME=/remote-home1/xrluan/.cache/huggingface
+# Optional: set HF_HOME to your prepared Hugging Face cache.
 export TMPDIR=/dev/shm OMP_NUM_THREADS=1
 PYTHONPATH="$PWD/repos/MOSS-Speech:$PWD/repos/MOSS-Speech/Matcha-TTS:$PWD/sglang-omni/scripts/moss_speech/p0:$PWD/sglang-omni" \
   .venv-p0/bin/python sglang-omni/scripts/moss_speech/p5/reference.py \

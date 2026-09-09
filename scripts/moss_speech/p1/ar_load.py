@@ -20,12 +20,15 @@ from pathlib import Path
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-os.environ.setdefault("HF_HOME", "/remote-home1/xrluan/.cache/huggingface")
 
 _HERE = Path(__file__).resolve()
 sys.path.insert(0, str(_HERE.parents[1] / "p0"))
-sys.path.insert(0, "/remote-home1/xrluan/SGLang_experiments/repos/MOSS-Speech")
-sys.path.insert(0, "/remote-home1/xrluan/SGLang_experiments/repos/MOSS-Speech/Matcha-TTS")
+# Optional locked reference checkout; otherwise use the caller's PYTHONPATH.
+_reference_root = os.environ.get("MOSS_SPEECH_REFERENCE_ROOT")
+if _reference_root:
+    _reference_path = Path(_reference_root).expanduser().resolve(strict=True)
+    sys.path.insert(0, str(_reference_path))
+    sys.path.insert(0, str(_reference_path / "Matcha-TTS"))
 import run_reference as rr  # noqa: E402
 
 rr._install_torchaudio_load_shim()
@@ -52,7 +55,10 @@ def main() -> None:
 
     tok = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     model = AutoModel.from_pretrained(
-        args.model_path, trust_remote_code=True, torch_dtype=torch.bfloat16, device_map="cuda"
+        args.model_path,
+        trust_remote_code=True,
+        torch_dtype=torch.bfloat16,
+        device_map="cuda",
     ).eval()
     stats = {
         "load_alloc_gib": round(torch.cuda.memory_allocated() / 2**30, 2),
@@ -61,7 +67,12 @@ def main() -> None:
         "busy_fraction": None,
         "n_generate_iters": 0,
     }
-    atexit.register(lambda: (Path(args.out).write_text(json.dumps(stats, indent=1)), print(json.dumps(stats))))
+    atexit.register(
+        lambda: (
+            Path(args.out).write_text(json.dumps(stats, indent=1)),
+            print(json.dumps(stats)),
+        )
+    )
 
     ids = tok(
         "<|im_start|>user\nIntroduce yourself in one sentence.<|im_end|>\n<|im_start|>assistant\n",
@@ -72,8 +83,17 @@ def main() -> None:
     grid[:, :, 0] = ids
     grid[:, :, 1] = 512  # audio_pad on the ignored channel
     attn = torch.ones(1, L, dtype=torch.long, device="cuda")
-    gen_cfg = GenerationConfig(do_sample=False, repetition_penalty=1.1, max_new_tokens=64, min_new_tokens=0, use_cache=True)
-    stoppers = [MIMOStopper(tok.pad_token_id), MIMOStopper(tok.convert_tokens_to_ids("<|im_end|>"))]
+    gen_cfg = GenerationConfig(
+        do_sample=False,
+        repetition_penalty=1.1,
+        max_new_tokens=64,
+        min_new_tokens=0,
+        use_cache=True,
+    )
+    stoppers = [
+        MIMOStopper(tok.pad_token_id),
+        MIMOStopper(tok.convert_tokens_to_ids("<|im_end|>")),
+    ]
 
     busy = 0.0
     t_start = time.time()
@@ -81,8 +101,11 @@ def main() -> None:
         torch.manual_seed(0)
         t0 = time.perf_counter()
         out = model.generate(
-            input_ids=grid, attention_mask=attn, generation_config=gen_cfg,
-            stopping_criteria=stoppers, streamer=rr._NoopStreamer(),
+            input_ids=grid,
+            attention_mask=attn,
+            generation_config=gen_cfg,
+            stopping_criteria=stoppers,
+            streamer=rr._NoopStreamer(),
         )
         busy += time.perf_counter() - t0
         stats["n_generate_iters"] += 1

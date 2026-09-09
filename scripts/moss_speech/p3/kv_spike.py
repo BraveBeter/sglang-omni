@@ -32,13 +32,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-os.environ.setdefault("HF_HOME", "/remote-home1/xrluan/.cache/huggingface")
 
 import torch  # noqa: E402
 
@@ -52,7 +50,12 @@ def gpu_mem() -> Dict[str, float]:
         "allocated_gib": round(torch.cuda.memory_allocated() / 2**30, 3),
         "reserved_gib": round(torch.cuda.memory_reserved() / 2**30, 3),
         "avail_gib": round(
-            (torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_reserved()) / 2**30, 3
+            (
+                torch.cuda.get_device_properties(0).total_memory
+                - torch.cuda.memory_reserved()
+            )
+            / 2**30,
+            3,
         ),
     }
 
@@ -75,9 +78,7 @@ def write_req_slots(runner, req_idx: int, slots: torch.Tensor) -> None:
     leaving it untouched means the backend reads uninitialized slots."""
     slots_dev = slots.to(runner.device, dtype=torch.int64).flatten()
     # canonical index form (radix_cache.py precedent): req_to_token[i, 0:L]
-    runner.req_to_token_pool.write(
-        (req_idx, slice(0, slots_dev.shape[0])), slots_dev
-    )
+    runner.req_to_token_pool.write((req_idx, slice(0, slots_dev.shape[0])), slots_dev)
 
 
 def make_forward_batch(runner, *, mode, seq_lens, out_cache_loc, input_ids, positions):
@@ -88,7 +89,9 @@ def make_forward_batch(runner, *, mode, seq_lens, out_cache_loc, input_ids, posi
     fb.forward_mode = mode
     fb.batch_size = len(seq_lens)
     fb.input_ids = input_ids.to(runner.device, dtype=torch.int64)
-    fb.req_pool_indices = torch.zeros(len(seq_lens), dtype=torch.int64, device=runner.device)
+    fb.req_pool_indices = torch.zeros(
+        len(seq_lens), dtype=torch.int64, device=runner.device
+    )
     fb.seq_lens = torch.tensor(seq_lens, dtype=torch.int64, device=runner.device)
     fb.seq_lens_cpu = torch.tensor(seq_lens, dtype=torch.int64)
     fb.seq_lens_sum = int(sum(seq_lens))
@@ -114,7 +117,10 @@ def run_forward(runner, model, fb, input_embeds):
     """init metadata + forward under an explicit ForwardContext (mirrors
     ModelRunner.forward: the global context carries the attn backend that
     RadixAttention resolves at call time)."""
-    from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
+    from sglang.srt.model_executor.forward_context import (
+        ForwardContext,
+        forward_context,
+    )
 
     assert runner.attn_backend is not None
     with forward_context(ForwardContext(attn_backend=runner.attn_backend)):
@@ -141,27 +147,47 @@ def native_probe_logits(runner, model, alloc, prefix: torch.Tensor, cached: bool
         slots = alloc(Lp)
         write_req_slots(runner, 0, slots)
         fb = make_forward_batch(
-            runner, mode=ForwardMode.EXTEND, seq_lens=[Lp], out_cache_loc=slots,
-            input_ids=torch.zeros(Lp), positions=torch.arange(Lp),
+            runner,
+            mode=ForwardMode.EXTEND,
+            seq_lens=[Lp],
+            out_cache_loc=slots,
+            input_ids=torch.zeros(Lp),
+            positions=torch.arange(Lp),
         )
         out = run_forward(runner, model, fb, build_input_embeds(model, prefix))
-        return out.text_logits[0].float().cpu(), out.audio_logits[0].float().cpu(), slots
+        return (
+            out.text_logits[0].float().cpu(),
+            out.audio_logits[0].float().cpu(),
+            slots,
+        )
     slots = alloc(Lp - 1)
     write_req_slots(runner, 0, slots)
     fb = make_forward_batch(
-        runner, mode=ForwardMode.EXTEND, seq_lens=[Lp - 1], out_cache_loc=slots,
-        input_ids=torch.zeros(Lp - 1), positions=torch.arange(Lp - 1),
+        runner,
+        mode=ForwardMode.EXTEND,
+        seq_lens=[Lp - 1],
+        out_cache_loc=slots,
+        input_ids=torch.zeros(Lp - 1),
+        positions=torch.arange(Lp - 1),
     )
     run_forward(runner, model, fb, build_input_embeds(model, prefix[:-1]))
     last_slot = alloc(1)
     all_slots = torch.cat([slots, last_slot.to(slots.device)])
     write_req_slots(runner, 0, all_slots)
     fb2 = make_forward_batch(
-        runner, mode=ForwardMode.DECODE, seq_lens=[Lp], out_cache_loc=last_slot,
-        input_ids=torch.zeros(1), positions=torch.tensor([Lp - 1]),
+        runner,
+        mode=ForwardMode.DECODE,
+        seq_lens=[Lp],
+        out_cache_loc=last_slot,
+        input_ids=torch.zeros(1),
+        positions=torch.tensor([Lp - 1]),
     )
     out = run_forward(runner, model, fb2, build_input_embeds(model, prefix[-1:]))
-    return out.text_logits[0].float().cpu(), out.audio_logits[0].float().cpu(), all_slots
+    return (
+        out.text_logits[0].float().cpu(),
+        out.audio_logits[0].float().cpu(),
+        all_slots,
+    )
 
 
 def compare(native: torch.Tensor, ref: torch.Tensor) -> Dict[str, Any]:
@@ -180,7 +206,9 @@ def compare(native: torch.Tensor, ref: torch.Tensor) -> Dict[str, Any]:
     if d.numel():
         over = d.abs() > (1.0 + 0.02 * ref[n_fin & r_fin].abs())
         stats["over_bound_frac"] = float(over.float().mean())
-        stats["pass"] = bool(pattern_ok and stats["max_abs"] <= 4.5 and stats["over_bound_frac"] <= 1e-4)
+        stats["pass"] = bool(
+            pattern_ok and stats["max_abs"] <= 4.5 and stats["over_bound_frac"] <= 1e-4
+        )
     else:
         stats["pass"] = pattern_ok
     return stats
@@ -194,11 +222,15 @@ def main() -> None:
     parser.add_argument("--mem-fraction", type=float, default=0.72)
     args = parser.parse_args()
 
-    report: Dict[str, Any] = {"env": {"torch": torch.__version__, "gpu": torch.cuda.get_device_name(0)}}
+    report: Dict[str, Any] = {
+        "env": {"torch": torch.__version__, "gpu": torch.cuda.get_device_name(0)}
+    }
     pre = gpu_mem()
 
     from sglang_omni.models.moss_speech.engine_builder import MossSpeechEngineBuilder
-    from sglang_omni.models.moss_speech.hf_config import MossSpeechConfig  # noqa: F401 (AutoConfig registration)
+    from sglang_omni.models.moss_speech.hf_config import (  # noqa: F401 (AutoConfig registration)
+        MossSpeechConfig,
+    )
     from sglang_omni.scheduling import bootstrap as scheduling_bootstrap
     from sglang_omni.scheduling.sglang_backend.server_args_builder import (
         build_sglang_server_args,
@@ -213,8 +245,10 @@ def main() -> None:
     )
     builder.validate_before_infrastructure(server_args)
 
-    (_want_graph, infra) = scheduling_bootstrap.create_sglang_infrastructure_defer_cuda_graph(
-        server_args, 0, model_arch_override="MossSpeechForCausalLM"
+    (_want_graph, infra) = (
+        scheduling_bootstrap.create_sglang_infrastructure_defer_cuda_graph(
+            server_args, 0, model_arch_override="MossSpeechForCausalLM"
+        )
     )
     (model_worker, tree_cache, req_pool, kv_allocator, _pm, _dm, model_config) = infra
     runner = model_worker.model_runner
@@ -231,8 +265,11 @@ def main() -> None:
     report["layers"] = {
         "hf_num_hidden_layers": int(model_config.num_hidden_layers),
         "num_attention_layers": int(model_config.num_attention_layers),
-        "layer_info": {"start": int(li.start_layer), "end": int(li.end_layer),
-                        "num_effective": int(li.num_effective_layers)},
+        "layer_info": {
+            "start": int(li.start_layer),
+            "end": int(li.end_layer),
+            "num_effective": int(li.num_effective_layers),
+        },
         "model_layer_ids": model.attention_layer_ids(),
     }
     assert int(model_config.num_hidden_layers) == 36
@@ -255,7 +292,13 @@ def main() -> None:
     kv = pool if hasattr(pool, "k_buffer") else pool.token_to_kv_pool
     layer_num = int(getattr(kv, "layer_num", len(kv.k_buffer)))
     k0 = kv.k_buffer[0]
-    per_token_bytes = layer_num * 2 * int(k0.shape[-2]) * int(k0.shape[-1]) * torch.tensor([], dtype=k0.dtype).element_size()
+    per_token_bytes = (
+        layer_num
+        * 2
+        * int(k0.shape[-2])
+        * int(k0.shape[-1])
+        * torch.tensor([], dtype=k0.dtype).element_size()
+    )
     report["kv_pool"] = {
         "class": type(kv).__name__,
         "layer_num": layer_num,
@@ -276,7 +319,10 @@ def main() -> None:
     orig32 = kv.k_buffer[32][probe_slot].clone()
     orig36 = kv.k_buffer[36][probe_slot].clone()
     kv.k_buffer[32][probe_slot] = sent
-    no_alias = bool(torch.equal(kv.k_buffer[36][probe_slot], orig36)) and kv.k_buffer[32].data_ptr() != kv.k_buffer[36].data_ptr()
+    no_alias = (
+        bool(torch.equal(kv.k_buffer[36][probe_slot], orig36))
+        and kv.k_buffer[32].data_ptr() != kv.k_buffer[36].data_ptr()
+    )
     kv.k_buffer[32][probe_slot] = orig32
     report["kv_pool"]["tail_no_alias"] = no_alias
     assert no_alias
@@ -294,16 +340,23 @@ def main() -> None:
         entry: Dict[str, Any] = {"prefix_len": int(prefix.shape[0])}
         ref_fresh_t, ref_fresh_a = blob["fresh"]
         ref_cached_t, ref_cached_a = blob["cached"]
-        nt_f, na_f, slots_f = native_probe_logits(runner, model, alloc, prefix, cached=False)
+        nt_f, na_f, slots_f = native_probe_logits(
+            runner, model, alloc, prefix, cached=False
+        )
         entry["fresh_vs_ref"] = {
-            "text": compare(nt_f, ref_fresh_t), "audio": compare(na_f, ref_fresh_a),
+            "text": compare(nt_f, ref_fresh_t),
+            "audio": compare(na_f, ref_fresh_a),
         }
-        nt_c, na_c, slots_c = native_probe_logits(runner, model, alloc, prefix, cached=True)
+        nt_c, na_c, slots_c = native_probe_logits(
+            runner, model, alloc, prefix, cached=True
+        )
         entry["cached_vs_ref"] = {
-            "text": compare(nt_c, ref_cached_t), "audio": compare(na_c, ref_cached_a),
+            "text": compare(nt_c, ref_cached_t),
+            "audio": compare(na_c, ref_cached_a),
         }
         entry["cached_vs_fresh_native"] = {
-            "text": compare(nt_c, nt_f), "audio": compare(na_c, na_f),
+            "text": compare(nt_c, nt_f),
+            "audio": compare(na_c, na_f),
         }
         entry["argmax"] = {
             "fresh_text": [int(nt_f.argmax()), int(ref_fresh_t.argmax())],
@@ -322,7 +375,9 @@ def main() -> None:
     prefix = blob["prefix"][0]
     text_rows = prefix[:, 0] != MODALITY_PAD
     audio_positions = (~text_rows).nonzero().flatten()
-    base_t, base_a, p_slots = native_probe_logits(runner, model, alloc, prefix, cached=True)
+    base_t, base_a, p_slots = native_probe_logits(
+        runner, model, alloc, prefix, cached=True
+    )
     audio_slot_ids = p_slots[audio_positions.to(p_slots.device)]
 
     # Replay ONLY the final decode step against the already-written KV
@@ -332,9 +387,12 @@ def main() -> None:
 
     def replay_last_step():
         fb2 = make_forward_batch(
-            runner, mode=ForwardMode.DECODE, seq_lens=[prefix.shape[0]],
+            runner,
+            mode=ForwardMode.DECODE,
+            seq_lens=[prefix.shape[0]],
             out_cache_loc=p_slots[-1:].to(runner.device),
-            input_ids=torch.zeros(1), positions=torch.tensor([prefix.shape[0] - 1]),
+            input_ids=torch.zeros(1),
+            positions=torch.tensor([prefix.shape[0] - 1]),
         )
         out = run_forward(runner, model, fb2, build_input_embeds(model, prefix[-1:]))
         return out.text_logits[0].float().cpu(), out.audio_logits[0].float().cpu()
@@ -379,14 +437,18 @@ def main() -> None:
     kv_allocator.free(p_slots.to(torch.int64))
 
     # ---- 6: slot release/reuse ---------------------------------------------
-    blob = torch.load(Path(args.probes_dir) / "probe_t2t_short_text_sosp_8.pt", map_location="cpu")
+    blob = torch.load(
+        Path(args.probes_dir) / "probe_t2t_short_text_sosp_8.pt", map_location="cpu"
+    )
     prefix = blob["prefix"][0]
     t1, a1, s1 = native_probe_logits(runner, model, alloc, prefix, cached=False)
     kv_allocator.free(s1.to(torch.int64))
     t2, a2, s2 = native_probe_logits(runner, model, alloc, prefix, cached=False)
     kv_allocator.free(s2.to(torch.int64))
     report["slot_reuse"] = {
-        "second_alloc_overlaps_freed": bool(len(set(s1.tolist()) & set(s2.tolist())) > 0),
+        "second_alloc_overlaps_freed": bool(
+            len(set(s1.tolist()) & set(s2.tolist())) > 0
+        ),
         "text_bit_equal": bool(torch.equal(t1, t2)),
         "audio_bit_equal": bool(torch.equal(a1, a2)),
         "pass": bool(torch.equal(t1, t2) and torch.equal(a1, a2)),
@@ -408,16 +470,29 @@ def main() -> None:
     report["teardown"] = {"distributed_destroyed": destroyed, "post_mem": gpu_mem()}
 
     ok = (
-        all(v["pass"] for p in probes_report.values() for k in ("fresh_vs_ref", "cached_vs_ref") for v in p[k].values())
+        all(
+            v["pass"]
+            for p in probes_report.values()
+            for k in ("fresh_vs_ref", "cached_vs_ref")
+            for v in p[k].values()
+        )
         and report["perturbation"]["pass"]
         and report["slot_reuse"]["pass"]
     )
     report["pass"] = bool(ok)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(report, indent=1))
-    print(json.dumps({"pass": report["pass"], "kv": report["kv_pool"],
-                      "perturbation": report["perturbation"],
-                      "slot_reuse": report["slot_reuse"]}, indent=1))
+    print(
+        json.dumps(
+            {
+                "pass": report["pass"],
+                "kv": report["kv_pool"],
+                "perturbation": report["perturbation"],
+                "slot_reuse": report["slot_reuse"],
+            },
+            indent=1,
+        )
+    )
     print("KV SPIKE DONE", flush=True)
 
 

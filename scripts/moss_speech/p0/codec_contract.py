@@ -18,12 +18,10 @@ from typing import Any, Dict
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-os.environ.setdefault("HF_HOME", "/remote-home1/xrluan/.cache/huggingface")
-
-import torch  # noqa: E402
-from transformers import AutoModel  # noqa: E402
 
 import run_reference as rr  # noqa: E402
+import torch  # noqa: E402
+from transformers import AutoModel  # noqa: E402
 
 
 def wav_meta(wav: torch.Tensor, sr: int) -> Dict[str, Any]:
@@ -47,7 +45,11 @@ def main() -> None:
     args = parser.parse_args()
 
     rr._install_torchaudio_load_shim()
-    codec = AutoModel.from_pretrained(args.codec_path, trust_remote_code=True).to("cuda").eval()
+    codec = (
+        AutoModel.from_pretrained(args.codec_path, trust_remote_code=True)
+        .to("cuda")
+        .eval()
+    )
     res: Dict[str, Any] = {}
 
     assets = Path(args.assets_dir)
@@ -57,7 +59,11 @@ def main() -> None:
 
     info_cn = sf.info(cn)
     res["input_assets"] = {
-        "prompt-cn.wav": {"sr": info_cn.samplerate, "channels": info_cn.channels, "dur_s": round(info_cn.duration, 2)},
+        "prompt-cn.wav": {
+            "sr": info_cn.samplerate,
+            "channels": info_cn.channels,
+            "dur_s": round(info_cn.duration, 2),
+        },
     }
 
     # --- encoder ------------------------------------------------------------
@@ -83,20 +89,32 @@ def main() -> None:
 
     # --- decoder ------------------------------------------------------------
     torch.manual_seed(0)
-    out_cn = codec.decode(torch.tensor([codes_cn[:200]]).reshape(1, 1, -1), prompt_speech=cn)
+    out_cn = codec.decode(
+        torch.tensor([codes_cn[:200]]).reshape(1, 1, -1), prompt_speech=cn
+    )
     wav_cn, meta1 = out_cn["syn_wav_list"][0], None
     meta1 = wav_meta(wav_cn, 24000)
     torch.manual_seed(0)
-    out_cn2 = codec.decode(torch.tensor([codes_cn[:200]]).reshape(1, 1, -1), prompt_speech=cn)
+    out_cn2 = codec.decode(
+        torch.tensor([codes_cn[:200]]).reshape(1, 1, -1), prompt_speech=cn
+    )
     meta2 = wav_meta(out_cn2["syn_wav_list"][0], 24000)
     torch.manual_seed(0)
-    out_en = codec.decode(torch.tensor([codes_cn[:200]]).reshape(1, 1, -1), prompt_speech=en)
+    out_en = codec.decode(
+        torch.tensor([codes_cn[:200]]).reshape(1, 1, -1), prompt_speech=en
+    )
     meta3 = wav_meta(out_en["syn_wav_list"][0], 24000)
 
     res["decoder"] = {
         "decode_200codes_with_cn_prompt": meta1,
-        "decode_same_seed_rerun": {"blake2b": meta2["blake2b"], "deterministic": meta1["blake2b"] == meta2["blake2b"]},
-        "decode_same_codes_en_prompt": {"blake2b": meta3["blake2b"], "differs_from_cn_prompt": meta3["blake2b"] != meta1["blake2b"]},
+        "decode_same_seed_rerun": {
+            "blake2b": meta2["blake2b"],
+            "deterministic": meta1["blake2b"] == meta2["blake2b"],
+        },
+        "decode_same_codes_en_prompt": {
+            "blake2b": meta3["blake2b"],
+            "differs_from_cn_prompt": meta3["blake2b"] != meta1["blake2b"],
+        },
         "implied_hop_ms": round(meta1["duration_s"] / 200 * 1000, 2),
         "output_mono": wav_cn.ndim == 1 or wav_cn.shape[0] == 1,
         "output_sr": 24000,
@@ -105,7 +123,11 @@ def main() -> None:
     # --- streaming API surface ----------------------------------------------
     dec = codec.audio_decoder
     res["streaming_api"] = {
-        "methods": [n for n in ("offline_inference", "stream_inference", "streaming_inference") if hasattr(dec, n)],
+        "methods": [
+            n
+            for n in ("offline_inference", "stream_inference", "streaming_inference")
+            if hasattr(dec, n)
+        ],
         "signatures": {
             n: str(inspect.signature(getattr(dec, n)))[:400]
             for n in ("stream_inference", "streaming_inference")
@@ -115,7 +137,9 @@ def main() -> None:
             "sample_rate": dec.scratch_configs.get("sample_rate"),
             "keys": list(dec.scratch_configs.keys())[:12],
         },
-        "flow_files": sorted(p.name for p in (Path(args.codec_path) / "flow").glob("*.pt")),
+        "flow_files": sorted(
+            p.name for p in (Path(args.codec_path) / "flow").glob("*.pt")
+        ),
     }
 
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)

@@ -40,21 +40,21 @@ import argparse
 import hashlib
 import json
 import os
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-os.environ.setdefault("HF_HOME", "/remote-home1/xrluan/.cache/huggingface")
-
-import torch  # noqa: E402
-from transformers import AutoModel, AutoProcessor, GenerationConfig  # noqa: E402
 
 import run_reference as rr  # noqa: E402
+import torch  # noqa: E402
+from transformers import AutoModel, AutoProcessor, GenerationConfig  # noqa: E402
 from utils.interface import MIMOStopper  # noqa: E402
 
-STOP_IDS = (151643, 151645)  # (<|endoftext|>, im_end); overwritten in main() from tokenizer
+STOP_IDS = (
+    151643,
+    151645,
+)  # (<|endoftext|>, im_end); overwritten in main() from tokenizer
 
 MODALITY_PAD = 151667
 SOSP = 151646
@@ -78,7 +78,9 @@ def env_fingerprint(model_path: str, seed: int) -> Dict[str, Any]:
 
     def sh(cmd: List[str]) -> str:
         try:
-            return subprocess.run(cmd, capture_output=True, text=True, timeout=60).stdout.strip()
+            return subprocess.run(
+                cmd, capture_output=True, text=True, timeout=60
+            ).stdout.strip()
         except Exception as exc:  # noqa: BLE001
             return f"<failed: {exc}>"
 
@@ -94,7 +96,9 @@ def env_fingerprint(model_path: str, seed: int) -> Dict[str, Any]:
         "model_path": model_path,
         "model_sha256_4shards": "see _manifest.json",
         "seed": seed,
-        "commit": sh(["git", "-C", str(Path(__file__).resolve().parents[4]), "rev-parse", "HEAD"]),
+        "commit": sh(
+            ["git", "-C", str(Path(__file__).resolve().parents[4]), "rev-parse", "HEAD"]
+        ),
         "hostname": os.uname().nodename,
     }
 
@@ -138,8 +142,16 @@ class RawLogitsCapture:
         model.forward = self._orig  # type: ignore[method-assign]
 
 
-def greedy_generate(model, inputs, max_new_tokens: int, seed: int, rep: float, min_new: int,
-                    pad_id: int, im_end_id: int):
+def greedy_generate(
+    model,
+    inputs,
+    max_new_tokens: int,
+    seed: int,
+    rep: float,
+    min_new: int,
+    pad_id: int,
+    im_end_id: int,
+):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     cap = RawLogitsCapture(model)
@@ -197,8 +209,11 @@ def export_case_steps(
     keep_steps: int,
 ) -> Dict[str, Any]:
     n = grid.shape[0]
-    print(f"[debug] {case_dir.name}: grid_rows={n} raw={len(raw_steps)} "
-          f"masked={len(masked_steps)} scored={len(scored_steps)}", flush=True)
+    print(
+        f"[debug] {case_dir.name}: grid_rows={n} raw={len(raw_steps)} "
+        f"masked={len(masked_steps)} scored={len(scored_steps)}",
+        flush=True,
+    )
     assert len(raw_steps) == len(masked_steps) == len(scored_steps) == n
     neigh = set(transition_neighborhoods(grid))
     keep_idx = sorted(set(range(min(keep_steps, n))) | neigh)
@@ -219,28 +234,52 @@ def export_case_steps(
 
 
 def run_case(
-    engine, model, out_dir: Path, case_id: str, task: str, conversation, seed: int,
-    keep_steps: int, max_new: int, full_capture: bool = False,
+    engine,
+    model,
+    out_dir: Path,
+    case_id: str,
+    task: str,
+    conversation,
+    seed: int,
+    keep_steps: int,
+    max_new: int,
+    full_capture: bool = False,
 ) -> Dict[str, Any]:
     modality = rr._task_output_modality(task)
-    full_conv = [{"role": "system", "content": rr.system_prompt_for(task)}] + conversation
+    full_conv = [
+        {"role": "system", "content": rr.system_prompt_for(task)}
+    ] + conversation
     inputs = engine.processor([full_conv], [modality])
     canon = {
         "input_ids": inputs["input_ids"][0].cpu().tolist(),
         "attention_mask": inputs["attention_mask"][0].cpu().tolist(),
     }
-    out, raw_steps = greedy_generate(model, inputs, max_new, seed, rep=1.1, min_new=0,
-                                          pad_id=STOP_IDS[0], im_end_id=STOP_IDS[1])
+    out, raw_steps = greedy_generate(
+        model,
+        inputs,
+        max_new,
+        seed,
+        rep=1.1,
+        min_new=0,
+        pad_id=STOP_IDS[0],
+        im_end_id=STOP_IDS[1],
+    )
     grid = out["sequences"][0].cpu()
-    masked_steps = [(t[0][0].float().cpu(), t[1][0].float().cpu()) for t in out["logits"]]
-    scored_steps = [(t[0][0].float().cpu(), t[1][0].float().cpu()) for t in out["scores"]]
+    masked_steps = [
+        (t[0][0].float().cpu(), t[1][0].float().cpu()) for t in out["logits"]
+    ]
+    scored_steps = [
+        (t[0][0].float().cpu(), t[1][0].float().cpu()) for t in out["scores"]
+    ]
 
     case_dir = out_dir / case_id
     case_dir.mkdir(parents=True, exist_ok=True)
     (case_dir / "canonical_input.json").write_text(json.dumps(canon))
     torch.save(grid, case_dir / "tokens_grid.pt")
     keep = keep_steps if not full_capture else 10**9
-    steps_meta = export_case_steps(case_dir, grid, raw_steps, masked_steps, scored_steps, keep)
+    steps_meta = export_case_steps(
+        case_dir, grid, raw_steps, masked_steps, scored_steps, keep
+    )
 
     meta: Dict[str, Any] = {
         "case_id": case_id,
@@ -262,7 +301,9 @@ def run_case(
 
 
 @torch.no_grad()
-def teacher_forced_logits(model, prefix: torch.Tensor, cached: bool) -> Tuple[torch.Tensor, torch.Tensor]:
+def teacher_forced_logits(
+    model, prefix: torch.Tensor, cached: bool
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """Last-position dual-head raw logits over a (1, L, 2) prefix.
 
     cached=False: single full-prefix forward (use_cache=False).
@@ -299,7 +340,9 @@ def teacher_forced_logits(model, prefix: torch.Tensor, cached: bool) -> Tuple[to
     return la[0][:, -1, :].float().cpu(), la[1][:, -1, :].float().cpu()
 
 
-def make_probe(model, prompt_grid: torch.Tensor, gen_grid: torch.Tensor, k: int, mode: str) -> torch.Tensor:
+def make_probe(
+    model, prompt_grid: torch.Tensor, gen_grid: torch.Tensor, k: int, mode: str
+) -> torch.Tensor:
     """Build teacher-forced prefixes at generation step k.
 
     mode 'text_sosp': replace row k text token with sosp -> next step audio.
@@ -319,15 +362,23 @@ def make_probe(model, prompt_grid: torch.Tensor, gen_grid: torch.Tensor, k: int,
     return torch.cat([prompt_grid.unsqueeze(0), g[: k + 1].unsqueeze(0)], dim=1)
 
 
-def finite_stats(delta: torch.Tensor, ref: torch.Tensor, atol: float, rtol: float) -> Dict[str, Any]:
+def finite_stats(
+    delta: torch.Tensor, ref: torch.Tensor, atol: float, rtol: float
+) -> Dict[str, Any]:
     finite = torch.isfinite(delta)
     return {
         "n_finite": int(finite.sum()),
         "n_total": int(delta.numel()),
         "max_abs": float(delta[finite].abs().max()) if finite.any() else None,
-        "p999_abs": float(torch.quantile(delta[finite].abs().float(), 0.999)) if finite.any() else None,
+        "p999_abs": (
+            float(torch.quantile(delta[finite].abs().float(), 0.999))
+            if finite.any()
+            else None
+        ),
         "mean_abs": float(delta[finite].abs().float().mean()) if finite.any() else None,
-        "n_over_bound": int((delta[finite].abs() > atol + rtol * ref[finite].abs()).sum()),
+        "n_over_bound": int(
+            (delta[finite].abs() > atol + rtol * ref[finite].abs()).sum()
+        ),
     }
 
 
@@ -349,7 +400,9 @@ def main() -> None:
 
     # record shard SHAs once (weights unchanged since P0; re-verified)
     shard_shas = {
-        f"shard_{i + 1}": sha256_file(Path(args.model_path) / f"model-{i + 1:05d}-of-00004.safetensors")
+        f"shard_{i + 1}": sha256_file(
+            Path(args.model_path) / f"model-{i + 1:05d}-of-00004.safetensors"
+        )
         for i in range(4)
     }
     p0_shas = Path("artifacts/p0/weights_sha256.txt")
@@ -362,7 +415,8 @@ def main() -> None:
         mismatch = {
             k: (v, p0.get(f"model-{int(k.split('_')[1]):05d}-of-00004.safetensors"))
             for k, v in shard_shas.items()
-            if p0.get(f"model-{int(k.split('_')[1]):05d}-of-00004.safetensors") not in (None, v)
+            if p0.get(f"model-{int(k.split('_')[1]):05d}-of-00004.safetensors")
+            not in (None, v)
         }
         manifest["weights_match_p0"] = not mismatch
         manifest["weights_mismatch"] = mismatch
@@ -379,13 +433,25 @@ def main() -> None:
     attn_impl = getattr(model.config, "_attn_implementation", None)
     manifest["attn_implementation"] = attn_impl
     manifest["param_dtypes"] = sorted({str(p.dtype) for p in model.parameters()})
-    manifest["kv_cache_dtype_class"] = str(type(model.model.shared_block.layers[0].self_attn).__name__)
+    manifest["kv_cache_dtype_class"] = str(
+        type(model.model.shared_block.layers[0].self_attn).__name__
+    )
 
     assets = Path(args.assets_dir)
     cn = str(assets / "prompt-cn.wav")
     cases = [
-        ("t2t_short", "text_instruct_text_response", [rr.user_text_turn("Introduce yourself in one sentence.")], None),
-        ("t2s_cn", "text_instruct_speech_response", [rr.user_text_turn("用中文介绍一下上海的三到四个著名景点。")], cn),
+        (
+            "t2t_short",
+            "text_instruct_text_response",
+            [rr.user_text_turn("Introduce yourself in one sentence.")],
+            None,
+        ),
+        (
+            "t2s_cn",
+            "text_instruct_speech_response",
+            [rr.user_text_turn("用中文介绍一下上海的三到四个著名景点。")],
+            cn,
+        ),
         ("s2t_cn", "speech_instruct_text_response", [rr.user_audio_turn(cn)], None),
         ("s2s_cn", "speech_instruct_speech_response", [rr.user_audio_turn(cn)], cn),
         (
@@ -393,7 +459,9 @@ def main() -> None:
             "speech_instruct_text_response",
             [
                 rr.user_text_turn("My name is Alice and I like hiking."),
-                rr.assistant_text_turn("Nice to meet you, Alice! Hiking is a great way to enjoy nature."),
+                rr.assistant_text_turn(
+                    "Nice to meet you, Alice! Hiking is a great way to enjoy nature."
+                ),
                 rr.user_audio_turn(cn),
             ],
             None,
@@ -404,10 +472,24 @@ def main() -> None:
     prompts: Dict[str, torch.Tensor] = {}
     for cid, task, conv, _prompt in cases:
         print(f"[bf16-baseline] {cid}", flush=True)
-        m = run_case(engine, model, out_dir, cid, task, conv, args.seed, args.keep_steps, args.max_new_tokens)
+        m = run_case(
+            engine,
+            model,
+            out_dir,
+            cid,
+            task,
+            conv,
+            args.seed,
+            args.keep_steps,
+            args.max_new_tokens,
+        )
         summary.append(m)
         grids[cid] = torch.load(out_dir / cid / "tokens_grid.pt")
-        prompts[cid] = torch.tensor(json.loads((out_dir / cid / "canonical_input.json").read_text())["input_ids"])
+        prompts[cid] = torch.tensor(
+            json.loads((out_dir / cid / "canonical_input.json").read_text())[
+                "input_ids"
+            ]
+        )
 
     # cross-check canonical inputs against P0 (processor determinism)
     p0_fixtures = Path("sglang-omni/tests/fixtures/moss_speech")
@@ -443,8 +525,14 @@ def main() -> None:
             "cached_audio_argmax": int(cache_a.argmax()),
         }
         probes[f"{cid}:{mode}:{k}"] = probe
-        torch.save({"prefix": prefix.cpu(), "fresh": (fresh_t, fresh_a), "cached": (cache_t, cache_a)},
-                   out_dir / f"probe_{cid}_{mode}_{k}.pt")
+        torch.save(
+            {
+                "prefix": prefix.cpu(),
+                "fresh": (fresh_t, fresh_a),
+                "cached": (cache_t, cache_a),
+            },
+            out_dir / f"probe_{cid}_{mode}_{k}.pt",
+        )
     (out_dir / "transition_probes.json").write_text(json.dumps(probes, indent=1))
 
     # ---- natural full-transition search (sosp -> audio -> eosp -> text -> im_end) ----
@@ -464,49 +552,108 @@ def main() -> None:
         conv = [rr.user_text_turn(text)]
         try:
             inputs = engine.processor(
-                [{"role": "system", "content": rr.system_prompt_for("text_instruct_speech_response")}, *conv],
+                [
+                    {
+                        "role": "system",
+                        "content": rr.system_prompt_for(
+                            "text_instruct_speech_response"
+                        ),
+                    },
+                    *conv,
+                ],
                 ["audio"],
             )
-            out, raw_steps = greedy_generate(model, inputs, mx, args.seed, rep=1.1, min_new=0,
-                                          pad_id=STOP_IDS[0], im_end_id=STOP_IDS[1])
+            out, raw_steps = greedy_generate(
+                model,
+                inputs,
+                mx,
+                args.seed,
+                rep=1.1,
+                min_new=0,
+                pad_id=STOP_IDS[0],
+                im_end_id=STOP_IDS[1],
+            )
             grid = out["sequences"][0].cpu()
             text_ch = grid[:, 0].tolist()
             audio_ch = grid[:, 1].tolist()
             has_audio = any(t == MODALITY_PAD for t in text_ch)
             has_eosp = EOSP in audio_ch
             back_to_text = has_eosp and any(
-                text_ch[j] not in (MODALITY_PAD,) for j in range(audio_ch.index(EOSP) + 1, len(text_ch))
+                text_ch[j] not in (MODALITY_PAD,)
+                for j in range(audio_ch.index(EOSP) + 1, len(text_ch))
             )
             stopped_im_end = int(text_ch[-1]) == IM_END
             ok = has_audio and has_eosp and back_to_text and stopped_im_end
             attempts.append(
-                {"i": i, "text": text, "steps": len(text_ch), "has_audio": has_audio,
-                 "has_eosp": has_eosp, "back_to_text": back_to_text, "stopped_im_end": stopped_im_end,
-                 "accepted": ok}
+                {
+                    "i": i,
+                    "text": text,
+                    "steps": len(text_ch),
+                    "has_audio": has_audio,
+                    "has_eosp": has_eosp,
+                    "back_to_text": back_to_text,
+                    "stopped_im_end": stopped_im_end,
+                    "accepted": ok,
+                }
             )
             if ok:
                 found = (i, text)
                 cid = "t2s_short_trans"
                 case_dir = nat_dir / cid
                 case_dir.mkdir(parents=True, exist_ok=True)
-                (case_dir / "canonical_input.json").write_text(json.dumps(
-                    {"input_ids": inputs["input_ids"][0].cpu().tolist(),
-                     "attention_mask": inputs["attention_mask"][0].cpu().tolist()}))
+                (case_dir / "canonical_input.json").write_text(
+                    json.dumps(
+                        {
+                            "input_ids": inputs["input_ids"][0].cpu().tolist(),
+                            "attention_mask": inputs["attention_mask"][0]
+                            .cpu()
+                            .tolist(),
+                        }
+                    )
+                )
                 torch.save(grid, case_dir / "tokens_grid.pt")
-                masked_steps = [(t[0][0].float().cpu(), t[1][0].float().cpu()) for t in out["logits"]]
-                scored_steps = [(t[0][0].float().cpu(), t[1][0].float().cpu()) for t in out["scores"]]
-                sm = export_case_steps(case_dir, grid, raw_steps, masked_steps, scored_steps, 10**9)
-                (case_dir / "meta.json").write_text(json.dumps(
-                    {"case_id": cid, "task": "text_instruct_speech_response", "seed": args.seed,
-                     "conversation": conv, "compute_dtype": "bf16", **sm}, ensure_ascii=False, indent=1))
+                masked_steps = [
+                    (t[0][0].float().cpu(), t[1][0].float().cpu())
+                    for t in out["logits"]
+                ]
+                scored_steps = [
+                    (t[0][0].float().cpu(), t[1][0].float().cpu())
+                    for t in out["scores"]
+                ]
+                sm = export_case_steps(
+                    case_dir, grid, raw_steps, masked_steps, scored_steps, 10**9
+                )
+                (case_dir / "meta.json").write_text(
+                    json.dumps(
+                        {
+                            "case_id": cid,
+                            "task": "text_instruct_speech_response",
+                            "seed": args.seed,
+                            "conversation": conv,
+                            "compute_dtype": "bf16",
+                            **sm,
+                        },
+                        ensure_ascii=False,
+                        indent=1,
+                    )
+                )
         except Exception as exc:  # noqa: BLE001
             attempts.append({"i": i, "text": text, "error": repr(exc)})
     manifest["natural_transition_attempts"] = attempts
     manifest["natural_transition_found"] = found
 
     # ---- determinism: rerun t2t_short under bf16 ----
-    m1 = run_case(engine, model, out_dir / "_rerun", "t2t_short_rerun", cases[0][1], cases[0][2],
-                  args.seed, args.keep_steps, args.max_new_tokens)
+    m1 = run_case(
+        engine,
+        model,
+        out_dir / "_rerun",
+        "t2t_short_rerun",
+        cases[0][1],
+        cases[0][2],
+        args.seed,
+        args.keep_steps,
+        args.max_new_tokens,
+    )
     g1 = torch.load(out_dir / "t2t_short" / "tokens_grid.pt")
     g2 = torch.load(out_dir / "_rerun" / "t2t_short_rerun" / "tokens_grid.pt")
     s1 = torch.load(out_dir / "t2t_short" / "step_0000.pt")
@@ -524,18 +671,33 @@ def main() -> None:
     del model
     torch.cuda.empty_cache()
     engine.model = load_model(args.model_path, torch.float32)
-    m_fp32 = run_case(engine, engine.model, out_dir / "_fp32", "t2t_short_fp32", cases[0][1], cases[0][2],
-                      args.seed, args.keep_steps, args.max_new_tokens)
+    m_fp32 = run_case(
+        engine,
+        engine.model,
+        out_dir / "_fp32",
+        "t2t_short_fp32",
+        cases[0][1],
+        cases[0][2],
+        args.seed,
+        args.keep_steps,
+        args.max_new_tokens,
+    )
     g32 = torch.load(out_dir / "_fp32" / "t2t_short_fp32" / "tokens_grid.pt")
     bf_grid = torch.load(out_dir / "t2t_short" / "tokens_grid.pt")
     gap = {"tokens_equal": bool(torch.equal(g32, bf_grid))}
     step_stats = []
     n = min(bf_grid.shape[0], g32.shape[0])
     for k in range(n):
-        f32 = torch.load(out_dir / "_fp32" / "t2t_short_fp32" / f"step_{k:04d}.pt") if (
-            out_dir / "_fp32" / "t2t_short_fp32" / f"step_{k:04d}.pt").exists() else None
-        bf16s = torch.load(out_dir / "t2t_short" / f"step_{k:04d}.pt") if (
-            out_dir / "t2t_short" / f"step_{k:04d}.pt").exists() else None
+        f32 = (
+            torch.load(out_dir / "_fp32" / "t2t_short_fp32" / f"step_{k:04d}.pt")
+            if (out_dir / "_fp32" / "t2t_short_fp32" / f"step_{k:04d}.pt").exists()
+            else None
+        )
+        bf16s = (
+            torch.load(out_dir / "t2t_short" / f"step_{k:04d}.pt")
+            if (out_dir / "t2t_short" / f"step_{k:04d}.pt").exists()
+            else None
+        )
         if f32 is None or bf16s is None:
             continue
         st = finite_stats(bf16s["raw"] - f32["raw"], f32["raw"], 0.0, 0.0)
@@ -545,13 +707,18 @@ def main() -> None:
         gap["per_step_max_abs_max"] = max(s["max_abs"] for s in step_stats)
         gap["per_step_p999_max"] = max(s["p999_abs"] for s in step_stats)
         gap["n_over_combined_atol_rtol_examples"] = [
-            {"k": s["k"], "max_abs": s["max_abs"], "p999": s["p999_abs"]} for s in step_stats[:5]
+            {"k": s["k"], "max_abs": s["max_abs"], "p999": s["p999_abs"]}
+            for s in step_stats[:5]
         ]
     (out_dir / "_fp32_gap.json").write_text(json.dumps(gap, indent=1))
     manifest["fp32_gap"] = gap
 
-    (out_dir / "_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1))
-    (out_dir / "_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1))
+    (out_dir / "_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=1)
+    )
+    (out_dir / "_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=1)
+    )
     print(json.dumps({"determinism": det, "fp32_gap": gap, "natural": found}, indent=1))
     print("REFERENCE BASELINE DONE", flush=True)
 

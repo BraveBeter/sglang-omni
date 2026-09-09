@@ -13,23 +13,25 @@ import hashlib
 import json
 import os
 import random
-import sys
 from pathlib import Path
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-os.environ.setdefault("HF_HOME", "/remote-home1/xrluan/.cache/huggingface")
 
 import numpy as np
 import torch
 
-from sglang_omni.models.moss_speech.components.codec_adapter import MossSpeechCodecAdapter
+from sglang_omni.models.moss_speech.components.codec_adapter import (
+    MossSpeechCodecAdapter,
+)
 
 SOSP, EOSP = 151646, 16384
 
 
 def blake2b(t: torch.Tensor) -> str:
-    return hashlib.blake2b(t.detach().cpu().contiguous().numpy().tobytes(), digest_size=16).hexdigest()
+    return hashlib.blake2b(
+        t.detach().cpu().contiguous().numpy().tobytes(), digest_size=16
+    ).hexdigest()
 
 
 def rng_snapshot() -> dict:
@@ -80,8 +82,13 @@ def main() -> None:
     cn, en = f"{args.assets}/prompt-cn.wav", f"{args.assets}/prompt-en.wav"
     adapter = MossSpeechCodecAdapter(args.codec_path)
 
-    result: dict = {"env": {"torch": torch.__version__, "transformers": __import__("transformers").__version__,
-                            "gpu": torch.cuda.get_device_name(0)}}
+    result: dict = {
+        "env": {
+            "torch": torch.__version__,
+            "transformers": __import__("transformers").__version__,
+            "gpu": torch.cuda.get_device_name(0),
+        }
+    }
 
     # ---------------- encode manifest (path / tuple / tensor forms) --------
     enc: dict = {}
@@ -105,7 +112,9 @@ def main() -> None:
         }
     enc["tuple_cn"] = adapter.encode([(t_cn, sr_cn)])[0]
     enc["tuple_en"] = adapter.encode([(t_en, sr_en)])[0]
-    enc["tensor16k_cn"] = adapter.encode([t_cn[0].cuda()])[0]  # (T,) 44.1k treated per contract? NO — see note
+    enc["tensor16k_cn"] = adapter.encode([t_cn[0].cuda()])[
+        0
+    ]  # (T,) 44.1k treated per contract? NO — see note
     result["encode"] = enc
 
     # ---------------- voices ------------------------------------------------
@@ -127,11 +136,17 @@ def main() -> None:
     cases = {
         "t2s_cn": extract_codes_from_grid(torch.load(fx / "t2s_cn" / "tokens_grid.pt")),
         "s2s_cn": extract_codes_from_grid(torch.load(fx / "s2s_cn" / "tokens_grid.pt")),
-        "mixed": extract_codes_from_grid(torch.load(Path("artifacts/p0/runs_reference_greedy/mixed_t2_s2s/tokens.pt"))[0]),
+        "mixed": extract_codes_from_grid(
+            torch.load(
+                Path("artifacts/p0/runs_reference_greedy/mixed_t2_s2s/tokens.pt")
+            )[0]
+        ),
         "single": [100],
         "long500": None,
     }
-    cases["long500"] = (cases["mixed"] * ((500 // max(len(cases["mixed"]), 1)) + 1))[:500]
+    cases["long500"] = (cases["mixed"] * ((500 // max(len(cases["mixed"]), 1)) + 1))[
+        :500
+    ]
     result["codes_meta"] = {k: len(v) for k, v in cases.items()}
 
     dec: dict = {}
@@ -144,16 +159,24 @@ def main() -> None:
                 if (case, vname, seed) == ("mixed", "cn", 0):
                     before = rng_snapshot()
                 try:
-                    sr, wav = adapter.decode(codes, voices[vname], request_id=f"{case}-{vname}-s{seed}")
+                    sr, wav = adapter.decode(
+                        codes, voices[vname], request_id=f"{case}-{vname}-s{seed}"
+                    )
                     dec[f"{case}_{vname}_s{seed}"] = {
-                        "n": int(wav.shape[-1]), "blake2b": blake2b(wav),
-                        "finite": bool(torch.isfinite(wav).all()), "sr": sr,
+                        "n": int(wav.shape[-1]),
+                        "blake2b": blake2b(wav),
+                        "finite": bool(torch.isfinite(wav).all()),
+                        "sr": sr,
                     }
                     torch.save(wav, out / f"wav_{case}_{vname}_s{seed}.pt")
                 except Exception as e:
-                    dec[f"{case}_{vname}_s{seed}"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
+                    dec[f"{case}_{vname}_s{seed}"] = {
+                        "error": f"{type(e).__name__}: {str(e)[:120]}"
+                    }
                 if (case, vname, seed) == ("mixed", "cn", 0):
-                    rng_reports["decode_rng_unchanged"] = rng_equal(before, rng_snapshot())
+                    rng_reports["decode_rng_unchanged"] = rng_equal(
+                        before, rng_snapshot()
+                    )
     result["decode"] = dec
     enc_before = rng_snapshot()
     _ = adapter.encode([cn])
@@ -215,7 +238,23 @@ def main() -> None:
 
     adapter.close()
     (out / "adapter_export.json").write_text(json.dumps(result, indent=1))
-    print(json.dumps({k: v for k, v in result.items() if k in ("codes_meta", "isolation", "edges", "rng_unchanged_by_encode_and_voice", "decode_rng_unchanged")}, indent=1))
+    print(
+        json.dumps(
+            {
+                k: v
+                for k, v in result.items()
+                if k
+                in (
+                    "codes_meta",
+                    "isolation",
+                    "edges",
+                    "rng_unchanged_by_encode_and_voice",
+                    "decode_rng_unchanged",
+                )
+            },
+            indent=1,
+        )
+    )
     print("ADAPTER EXPORT DONE")
 
 

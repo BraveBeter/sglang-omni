@@ -9,7 +9,7 @@ checkpoint revisions, 512/512 request budgets and offline environment apply.
 
 The reference environment is `.venv-p0`; the native environment is `.venv-omni`.
 Set `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, `OMP_NUM_THREADS=1`,
-`HF_HOME=/remote-home1/xrluan/.cache/huggingface`, and `TMPDIR=/dev/shm`.
+`TMPDIR=/dev/shm`; optionally set `HF_HOME` to your prepared cache.
 Only the reference needs the locked MOSS-Speech and Matcha checkouts on PYTHONPATH.
 
 ```bash

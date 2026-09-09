@@ -12,15 +12,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-os.environ.setdefault("HF_HOME", "/remote-home1/xrluan/.cache/huggingface")
 
 import torch  # noqa: E402
 
-from sglang_omni.models.moss_speech.components.codec_adapter import MossSpeechCodecAdapter  # noqa: E402
+from sglang_omni.models.moss_speech.components.codec_adapter import (  # noqa: E402
+    MossSpeechCodecAdapter,
+)
 
 
 def _vram() -> dict:
@@ -33,7 +33,9 @@ def _vram() -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--codec-path", required=True)
-    parser.add_argument("--voice-wav", required=True, help="24k-capable reference wav (any sr)")
+    parser.add_argument(
+        "--voice-wav", required=True, help="24k-capable reference wav (any sr)"
+    )
     parser.add_argument("--json-out", default=None)
     args = parser.parse_args()
 
@@ -42,7 +44,9 @@ def main() -> None:
     # --- encoder-only ------------------------------------------------------
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
-    enc_adapter = MossSpeechCodecAdapter(args.codec_path, load_encoder=True, load_decoder=False)
+    enc_adapter = MossSpeechCodecAdapter(
+        args.codec_path, load_encoder=True, load_decoder=False
+    )
     assert enc_adapter.encoder_loaded and not enc_adapter.decoder_loaded
     assert enc_adapter._decoder is None, "encoder-only must not construct AudioDecoder"
     out["encoder_only"] = _vram()
@@ -68,7 +72,9 @@ def main() -> None:
 
     # --- decoder-only ------------------------------------------------------
     torch.cuda.reset_peak_memory_stats()
-    dec_adapter = MossSpeechCodecAdapter(args.codec_path, load_encoder=False, load_decoder=True)
+    dec_adapter = MossSpeechCodecAdapter(
+        args.codec_path, load_encoder=False, load_decoder=True
+    )
     assert dec_adapter.decoder_loaded and not dec_adapter.encoder_loaded
     assert dec_adapter._encoder is None, "decoder-only must not construct WhisperVQ"
     out["decoder_only"] = _vram()
@@ -108,7 +114,9 @@ def main() -> None:
             fh.write(text + "\n")
     # hard gates from the P0 contract
     assert 200 <= out["encoder_only"]["n_codes"] <= 4000
-    assert out["encoder_only"]["code_min"] >= 0 and out["encoder_only"]["code_max"] < 16384
+    assert (
+        out["encoder_only"]["code_min"] >= 0 and out["encoder_only"]["code_max"] < 16384
+    )
     assert out["encoder_only"]["voice_deterministic"]
     assert out["full"]["decode"]["sr"] == 24000
     assert out["full"]["decode"]["finite"]

@@ -19,7 +19,6 @@ import sys
 # Offline discipline must be set before the first transformers import.
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-os.environ.setdefault("HF_HOME", "/remote-home1/xrluan/.cache/huggingface")
 
 BANNED_PREFIXES = (
     "lightning",
@@ -33,14 +32,15 @@ BANNED_PREFIXES = (
     "conformer",
     "gradio",
     "cosyvoice",  # reference repo package must not leak via sys.path
-    "matcha",     # reference repo package must not leak via sys.path
+    "matcha",  # reference repo package must not leak via sys.path
 )
 
 
 def audit() -> dict:
     import sglang_omni.models.moss_speech.components.hf_codec as hf_codec_pkg
-
-    from sglang_omni.models.moss_speech.components.codec_adapter import MossSpeechCodecAdapter
+    from sglang_omni.models.moss_speech.components.codec_adapter import (
+        MossSpeechCodecAdapter,
+    )
     from sglang_omni.models.moss_speech.components.voice import (
         CampplusSpeakerEncoder,
         MossSpeechVoiceHook,
@@ -52,7 +52,11 @@ def audit() -> dict:
     return {
         "hf_codec_package": hf_codec_pkg.__name__,
         "adapter": MossSpeechCodecAdapter.__name__,
-        "voice_symbols": [VoiceConditioning.__name__, MossSpeechVoiceHook.__name__, CampplusSpeakerEncoder.__name__],
+        "voice_symbols": [
+            VoiceConditioning.__name__,
+            MossSpeechVoiceHook.__name__,
+            CampplusSpeakerEncoder.__name__,
+        ],
         "banned_violations": violations,
         "module_count": len(sys.modules),
     }

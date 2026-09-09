@@ -1,5 +1,14 @@
 # Phase 3 验收与交接（2026-09-08）
 
+> Historical evidence: `scripts/p*.sbatch` names below identify workspace-local
+> cluster wrappers used for the recorded jobs; they are not files delivered in
+> Git and are not runnable reproduction instructions for a fresh checkout.
+> Use the current [cookbook](../../../cookbook/moss_speech.md) for serving and
+> [P5 reproduction](../p5/05_gate_report.md) / [P6 reproduction](../p6/02_reproduction.md)
+> for the delivered Python and shell entry points. Historical receipts remain
+> bound to their original commits and dependency versions.
+
+
 P3 的 T3.1–T3.8 已完成，G1–G4 通过。采用冻结 parity v1/E1；未放宽阈值、未豁免平局、未替换 reference expected。机器可读摘要为 `sglang-omni/docs/design/moss_speech/p3/gate_summary.json`，包含原始报告路径与 SHA256。P4 未开始。实现提交：`af4f076`（数值/状态/loader）、`cfca840`（正式接管与验收驱动）；设计/报告随后独立归档。
 
 ## 验收结果

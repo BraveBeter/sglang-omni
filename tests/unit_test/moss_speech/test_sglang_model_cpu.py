@@ -228,16 +228,12 @@ def test_decode_staging_buffer_exists_and_frozen():
 
 def test_arch_key_matches_hf_architectures():
     import json
+    import os
 
-    hf_archs = (
-        json.load(
-            open(
-                "/remote-home1/xrluan/SGLang_experiments/models/MOSS-Speech/config.json"
-            )
-        )["architectures"]
-        if Path(
-            "/remote-home1/xrluan/SGLang_experiments/models/MOSS-Speech/config.json"
-        ).exists()
-        else ["MossSpeechForCausalLM"]
-    )
+    model_dir = os.environ.get("MOSS_SPEECH_MODEL_DIR")
+    if not model_dir:
+        pytest.skip("Set MOSS_SPEECH_MODEL_DIR for the checkpoint architecture check")
+    hf_archs = json.loads((Path(model_dir) / "config.json").read_text())[
+        "architectures"
+    ]
     assert ARCH_KEY in hf_archs

@@ -26,13 +26,11 @@ from typing import Any, Dict, List, Optional
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-os.environ.setdefault("HF_HOME", "/remote-home1/xrluan/.cache/huggingface")
 
+import run_reference as rr  # noqa: E402
 import soundfile as sf  # noqa: E402
 import torch  # noqa: E402
 from transformers import GenerationConfig  # noqa: E402
-
-import run_reference as rr  # noqa: E402
 from utils.interface import MIMOStopper  # noqa: E402
 
 MODALITY_PAD = 151667
@@ -66,7 +64,9 @@ def export_case(
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     modality = rr._task_output_modality(task)
-    full_conv = [{"role": "system", "content": rr.system_prompt_for(task)}] + conversation
+    full_conv = [
+        {"role": "system", "content": rr.system_prompt_for(task)}
+    ] + conversation
     inputs = engine.processor([full_conv], [modality])
     canon = {
         "input_ids": inputs["input_ids"][0].cpu().tolist(),  # (L, 2)
@@ -79,7 +79,16 @@ def export_case(
         input_ids=inputs["input_ids"].to(engine.device),
         attention_mask=inputs["attention_mask"].to(engine.device),
         generation_config=GenerationConfig(
-            **{k: getattr(gen_cfg, k) for k in ("do_sample", "repetition_penalty", "max_new_tokens", "min_new_tokens", "use_cache")}
+            **{
+                k: getattr(gen_cfg, k)
+                for k in (
+                    "do_sample",
+                    "repetition_penalty",
+                    "max_new_tokens",
+                    "min_new_tokens",
+                    "use_cache",
+                )
+            }
         ),
         # NOTE: the remote generate() reads these from **kwargs, not from the
         # generation config; passing them inside the config takes the tensor
@@ -111,7 +120,10 @@ def export_case(
     kept = []
     for st in logits_steps[:keep_steps]:
         kept.append(torch.cat([st[0][0], st[1][0]]).float().cpu())
-    torch.save(torch.stack(kept) if kept else torch.zeros(0), case_dir / "logits_first_steps.pt")
+    torch.save(
+        torch.stack(kept) if kept else torch.zeros(0),
+        case_dir / "logits_first_steps.pt",
+    )
     meta["logits_kept_steps"] = len(kept)
     meta["text_vocab"] = int(logits_steps[0][0].shape[-1]) if logits_steps else None
     meta["audio_vocab"] = int(logits_steps[0][1].shape[-1]) if logits_steps else None
@@ -120,10 +132,14 @@ def export_case(
     meta["audio_codes_extracted"] = extract_audio_codes(grid)[:20] + ["..."]
 
     # decode output (text or audio)
-    audio, text = rr.decode_tokens(engine, grid.unsqueeze(0), task, decoder_audio_prompt, seed)
+    audio, text = rr.decode_tokens(
+        engine, grid.unsqueeze(0), task, decoder_audio_prompt, seed
+    )
     if audio is not None:
         sr, wav = audio
-        sf.write(case_dir / "audio.wav", wav.numpy() if hasattr(wav, "numpy") else wav, sr)
+        sf.write(
+            case_dir / "audio.wav", wav.numpy() if hasattr(wav, "numpy") else wav, sr
+        )
         meta["audio_meta"] = rr.audio_meta(audio)
         meta["audio_codes_full_len"] = len(extract_audio_codes(grid))
     if text is not None:
@@ -136,7 +152,11 @@ def export_case(
         c = turn.get("content")
         if isinstance(c, dict) and c.get("path"):
             codes = engine.processor.audio_codec.encode([c["path"]])[0]
-            in_codes[f"turn{i}"] = {"path": c["path"], "n_codes": len(codes), "first10": codes[:10]}
+            in_codes[f"turn{i}"] = {
+                "path": c["path"],
+                "n_codes": len(codes),
+                "first10": codes[:10],
+            }
     meta["input_audio_codes"] = in_codes
 
     (case_dir / "canonical_input.json").write_text(json.dumps(canon))
@@ -157,22 +177,50 @@ def main() -> None:
     rr._install_torchaudio_load_shim()
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "_env.json").write_text(json.dumps(rr.env_fingerprint(argparse.Namespace(
-        model_path=args.model_path, codec_path=args.codec_path, seed=args.seed, sampling="greedy",
-        temperature=0.6, top_p=0.95, top_k=20, repetition_penalty=1.1,
-        max_new_tokens=args.max_new_tokens, min_new_tokens=0)), indent=1))
+    (out_dir / "_env.json").write_text(
+        json.dumps(
+            rr.env_fingerprint(
+                argparse.Namespace(
+                    model_path=args.model_path,
+                    codec_path=args.codec_path,
+                    seed=args.seed,
+                    sampling="greedy",
+                    temperature=0.6,
+                    top_p=0.95,
+                    top_k=20,
+                    repetition_penalty=1.1,
+                    max_new_tokens=args.max_new_tokens,
+                    min_new_tokens=0,
+                )
+            ),
+            indent=1,
+        )
+    )
 
     engine = rr.Inference(args.model_path, codec_path=args.codec_path, device="cuda")
     gen_cfg = GenerationConfig(
-        do_sample=False, repetition_penalty=1.1,
-        max_new_tokens=args.max_new_tokens, min_new_tokens=0, use_cache=True,
+        do_sample=False,
+        repetition_penalty=1.1,
+        max_new_tokens=args.max_new_tokens,
+        min_new_tokens=0,
+        use_cache=True,
     )
     assets = Path(args.assets_dir)
     cn = str(assets / "prompt-cn.wav")
 
     cases = [
-        ("t2t_short", "text_instruct_text_response", [rr.user_text_turn("Introduce yourself in one sentence.")], None),
-        ("t2s_cn", "text_instruct_speech_response", [rr.user_text_turn("用中文介绍一下上海的三到四个著名景点。")], cn),
+        (
+            "t2t_short",
+            "text_instruct_text_response",
+            [rr.user_text_turn("Introduce yourself in one sentence.")],
+            None,
+        ),
+        (
+            "t2s_cn",
+            "text_instruct_speech_response",
+            [rr.user_text_turn("用中文介绍一下上海的三到四个著名景点。")],
+            cn,
+        ),
         ("s2t_cn", "speech_instruct_text_response", [rr.user_audio_turn(cn)], None),
         ("s2s_cn", "speech_instruct_speech_response", [rr.user_audio_turn(cn)], cn),
         # Self-contained mixed multi-turn fixture: fixed literal assistant turn,
@@ -182,7 +230,9 @@ def main() -> None:
             "speech_instruct_text_response",
             [
                 rr.user_text_turn("My name is Alice and I like hiking."),
-                rr.assistant_text_turn("Nice to meet you, Alice! Hiking is a great way to enjoy nature."),
+                rr.assistant_text_turn(
+                    "Nice to meet you, Alice! Hiking is a great way to enjoy nature."
+                ),
                 rr.user_audio_turn(cn),
             ],
             None,
@@ -191,12 +241,24 @@ def main() -> None:
     summary = []
     for cid, task, conv, prompt in cases:
         print(f"[fixture] {cid}", flush=True)
-        summary.append(export_case(engine, out_dir, cid, task, conv, prompt, gen_cfg, args.seed))
+        summary.append(
+            export_case(engine, out_dir, cid, task, conv, prompt, gen_cfg, args.seed)
+        )
 
     # determinism gate on t2t_short
     m1 = summary[0]
-    torch.manual_seed(args.seed); torch.cuda.manual_seed_all(args.seed)
-    g2 = export_case(engine, out_dir / "_rerun", "t2t_short_rerun", cases[0][1], cases[0][2], None, gen_cfg, args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    g2 = export_case(
+        engine,
+        out_dir / "_rerun",
+        "t2t_short_rerun",
+        cases[0][1],
+        cases[0][2],
+        None,
+        gen_cfg,
+        args.seed,
+    )
     tok1 = torch.load(out_dir / "t2t_short" / "tokens_grid.pt")
     tok2 = torch.load(out_dir / "_rerun" / "t2t_short_rerun" / "tokens_grid.pt")
     l1 = torch.load(out_dir / "t2t_short" / "logits_first_steps.pt")
@@ -211,11 +273,14 @@ def main() -> None:
     det = {
         "tokens_equal": bool(torch.equal(tok1, tok2)),
         "logits_max_abs_diff_sanitized": max_diff,
-        "pass": bool(torch.equal(tok1, tok2)) and (max_diff < 1e-3 if max_diff == max_diff else False),
+        "pass": bool(torch.equal(tok1, tok2))
+        and (max_diff < 1e-3 if max_diff == max_diff else False),
     }
     (out_dir / "_determinism.json").write_text(json.dumps(det, indent=1))
     summary.append({"determinism": det})
-    (out_dir / "_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1))
+    (out_dir / "_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=1)
+    )
     print(json.dumps(det, indent=1))
     print("FIXTURES DONE", flush=True)
 

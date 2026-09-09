@@ -27,11 +27,9 @@ from typing import Any, Dict, List
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-os.environ.setdefault("HF_HOME", "/remote-home1/xrluan/.cache/huggingface")
-
-import torch  # noqa: E402
 
 import run_reference as rr  # noqa: E402  (same dir)
+import torch  # noqa: E402
 
 
 def main() -> None:
@@ -73,8 +71,22 @@ def main() -> None:
 
     orig_sample = lm._generate_next_tokens_with_scores
 
-    def traced_next(logits_all, input_ids, realprocessor, do_samples, generation_config, generating_length):
-        toks, scores, raw = orig_sample(logits_all, input_ids, realprocessor, do_samples, generation_config, generating_length)
+    def traced_next(
+        logits_all,
+        input_ids,
+        realprocessor,
+        do_samples,
+        generation_config,
+        generating_length,
+    ):
+        toks, scores, raw = orig_sample(
+            logits_all,
+            input_ids,
+            realprocessor,
+            do_samples,
+            generation_config,
+            generating_length,
+        )
         trace.append(
             {
                 "event": "sample",
@@ -93,7 +105,9 @@ def main() -> None:
         trace.append(
             {
                 "event": "pad",
-                "step_modality": current_modality.detach().cpu().tolist(),  # 0 text / 1 audio
+                "step_modality": current_modality.detach()
+                .cpu()
+                .tolist(),  # 0 text / 1 audio
                 "post_pad": res.detach().cpu().tolist(),
             }
         )
@@ -107,7 +121,9 @@ def main() -> None:
         argparse.Namespace(sampling="greedy", max_new_tokens=200, min_new_tokens=0)
     )
     torch.cuda.reset_peak_memory_stats()
-    token_ids, in_len = rr.generate_once(engine, "text_instruct_speech_response", conv, gen_cfg, seed=0)
+    token_ids, in_len = rr.generate_once(
+        engine, "text_instruct_speech_response", conv, gen_cfg, seed=0
+    )
     ar_peak_gib = torch.cuda.max_memory_allocated() / 2**30
 
     # --- KV cache inspection (captured inside traced forward) ---------------
@@ -126,7 +142,9 @@ def main() -> None:
     fwd_mods = [t["modalities"] for t in trace[:20] if t["event"] == "forward"]
     both_tails_every_fwd = all(set(m) == {"text", "audio"} for m in fwd_mods)
     out["claims"]["C1_both_tails_every_forward"] = both_tails_every_fwd
-    out["claims"]["C4_tail_calls_equal_no_shortcut"] = tail_calls.get("text") == tail_calls.get("audio") and tail_calls["text"] > 0
+    out["claims"]["C4_tail_calls_equal_no_shortcut"] = (
+        tail_calls.get("text") == tail_calls.get("audio") and tail_calls["text"] > 0
+    )
     out["claims"]["tail_call_counts"] = dict(tail_calls)
 
     pad_events = [t for t in trace if t["event"] == "pad"]
@@ -135,7 +153,9 @@ def main() -> None:
     audio_steps = [i for i, t in enumerate(pad_events) if t["step_modality"] == [1]]
     text_steps = [i for i, t in enumerate(pad_events) if t["step_modality"] == [0]]
     # post_pad for B=1 is [[tok_text, tok_audio]]
-    text_padded_on_audio = all(pad_events[i]["post_pad"][0][0] == 151667 for i in audio_steps)
+    text_padded_on_audio = all(
+        pad_events[i]["post_pad"][0][0] == 151667 for i in audio_steps
+    )
     # sample events align 1:1 with pad events (same decode step order)
     audio_value_every_step = all(
         len(s["raw_sampled"][0]) == 2 for s in sample_events[:n_steps]
@@ -156,7 +176,9 @@ def main() -> None:
     resumed_text_after_eosp = False
     if eosp_positions:
         e = eosp_positions[0]
-        tail_tokens = text_ch[e + 1 : (im_end_positions[0] + 1) if im_end_positions else None]
+        tail_tokens = text_ch[
+            e + 1 : (im_end_positions[0] + 1) if im_end_positions else None
+        ]
         # tokens after eosp that are real text (not modality_pad) before im_end
         resumed_text_after_eosp = any(t not in (151667, 151645) for t in tail_tokens)
     lens = {k: v["seq_len"] for k, v in caches.items()}
@@ -181,9 +203,16 @@ def main() -> None:
 
     # --- codec decode VRAM -------------------------------------------------
     torch.cuda.reset_peak_memory_stats()
-    audio, _ = rr.decode_tokens(engine, token_ids, "text_instruct_speech_response",
-                                str(Path(args.assets_dir) / "prompt-cn.wav"), seed=0)
-    out["vram"]["codec_decode_peak_gib"] = round(torch.cuda.max_memory_allocated() / 2**30, 2)
+    audio, _ = rr.decode_tokens(
+        engine,
+        token_ids,
+        "text_instruct_speech_response",
+        str(Path(args.assets_dir) / "prompt-cn.wav"),
+        seed=0,
+    )
+    out["vram"]["codec_decode_peak_gib"] = round(
+        torch.cuda.max_memory_allocated() / 2**30, 2
+    )
     out["vram"]["total_reserved_gib"] = round(torch.cuda.memory_reserved() / 2**30, 2)
 
     # --- dump trace (first 400 events) --------------------------------------

@@ -2,22 +2,29 @@
 """T3.3 diagnostic (reference side, .venv-p0): export per-stage hidden states
 for one t2t prompt from the HF bf16 model for layer-by-layer bisecting."""
 from __future__ import annotations
-import json, os
+
+import json
+import os
 from pathlib import Path
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-os.environ.setdefault("HF_HOME", "/remote-home1/xrluan/.cache/huggingface")
 
 import torch
 from transformers import AutoModel
 
+
 def main() -> None:
     model = AutoModel.from_pretrained(
-        "models/MOSS-Speech", trust_remote_code=True, torch_dtype=torch.bfloat16,
-        device_map="cuda")
+        "models/MOSS-Speech",
+        trust_remote_code=True,
+        torch_dtype=torch.bfloat16,
+        device_map="cuda",
+    )
     model.eval()
-    canon = json.loads(Path("artifacts/p3/reference/t2t_short/canonical_input.json").read_text())
+    canon = json.loads(
+        Path("artifacts/p3/reference/t2t_short/canonical_input.json").read_text()
+    )
     ids = torch.tensor(canon["input_ids"])[None].cuda()  # (1, L, 2)
     L = ids.shape[1]
 
@@ -32,12 +39,19 @@ def main() -> None:
                 t = out[0] if isinstance(out, tuple) else out
                 if torch.is_tensor(t):
                     caps.setdefault(name, []).append(t.detach().float().cpu())
+
         return hook
 
-    hooks = [model.model.shared_block.layers[i].register_forward_hook(mk(f"shared_{i}"))
-             for i in (0, 1, 31)]
-    hooks.append(model.model.text_block.layers[3].register_forward_hook(mk("text_last")))
-    hooks.append(model.model.audio_block.layers[3].register_forward_hook(mk("audio_last")))
+    hooks = [
+        model.model.shared_block.layers[i].register_forward_hook(mk(f"shared_{i}"))
+        for i in (0, 1, 31)
+    ]
+    hooks.append(
+        model.model.text_block.layers[3].register_forward_hook(mk("text_last"))
+    )
+    hooks.append(
+        model.model.audio_block.layers[3].register_forward_hook(mk("audio_last"))
+    )
 
     with torch.no_grad():
         # embeddings: call the packed-embed path directly
@@ -75,6 +89,7 @@ def main() -> None:
         if torch.is_tensor(v):
             print(k, tuple(v.shape), "norm", float(v.float().norm()))
     print("REF HIDDEN EXPORTED")
+
 
 if __name__ == "__main__":
     main()

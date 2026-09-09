@@ -1,5 +1,14 @@
 # MOSS-Speech non-streaming chat deployment
 
+> Historical evidence: `scripts/p*.sbatch` names below identify workspace-local
+> cluster wrappers used for the recorded jobs; they are not files delivered in
+> Git and are not runnable reproduction instructions for a fresh checkout.
+> Use the current [cookbook](../../../cookbook/moss_speech.md) for serving and
+> [P5 reproduction](../p5/05_gate_report.md) / [P6 reproduction](../p6/02_reproduction.md)
+> for the delivered Python and shell entry points. Historical receipts remain
+> bound to their original commits and dependency versions.
+
+
 Run commands from the workspace root. The model and codec directories must be
 materialized locally. Use the checked-in A800 configuration; it uses native
 SGLang AR (BF16), FP32 codec, TP=1, torch_native attention and eager execution.
@@ -7,15 +16,18 @@ All inference runs inside a Slurm GPU allocation.
 
 ```bash
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
-export HF_HOME=/remote-home1/xrluan/.cache/huggingface
+# Optional: set HF_HOME to your prepared Hugging Face cache.
 export TMPDIR=/dev/shm OMP_NUM_THREADS=1
-.venv-omni/bin/python -m sglang_omni.cli serve \
+sglang-omni serve \
   --config sglang-omni/examples/configs/moss_speech.yaml \
+  --model-path models/MOSS-Speech \
+  --codec-path models/MOSS-Speech-Codec \
+  --voice-wav repos/MOSS-Speech/assets/prompt-cn.wav \
   --host 127.0.0.1 --port 8000
 ```
 
-The YAML includes local checkpoint and default-voice paths; change those paths
-for a different workspace. `/health` indicates readiness. Stop with SIGTERM or
+The preset does not bundle weights or a default voice. Supply the three asset
+paths explicitly as above, using your local checkpoint, codec and voice WAV. `/health` indicates readiness. Stop with SIGTERM or
 Ctrl-C so the launcher shuts down its stage processes.
 
 ## Request and response

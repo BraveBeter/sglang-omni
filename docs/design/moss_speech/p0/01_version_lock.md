@@ -1,6 +1,6 @@
 # P0-01 Version Lock Record
 
-Date: 2026-09-04 (Asia/Shanghai). All artifacts live under `/remote-home1/xrluan/SGLang_experiments/`.
+Date: 2026-09-04 (Asia/Shanghai). Artifact paths are relative to the workspace root.
 
 ## 1. Locked sources
 
@@ -53,9 +53,9 @@ Key facts discovered during locking:
 
 ## 4. Offline materialization
 
-- HF cache: `/remote-home1/xrluan/.cache/huggingface` (`HF_HOME`), downloaded via `HF_ENDPOINT=https://hf-mirror.com` (direct huggingface.co unreachable from login node; GitHub reachable via SSH).
+- HF cache: the operator-provided `HF_HOME` cache, downloaded via `HF_ENDPOINT=https://hf-mirror.com` (direct huggingface.co unreachable from login node; GitHub reachable via SSH).
 - `models/` dirs are dereferenced copies (no symlinks) for offline compute nodes.
-- Compute-node runs must set `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, `HF_HOME=/remote-home1/xrluan/.cache/huggingface`.
+- Compute-node runs must set `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`; optionally set `HF_HOME` to your prepared cache.
 
 ## 5. Reproduction commands
 

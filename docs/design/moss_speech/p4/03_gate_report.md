@@ -1,5 +1,14 @@
 # P4 gate report
 
+> Historical evidence: `scripts/p*.sbatch` names below identify workspace-local
+> cluster wrappers used for the recorded jobs; they are not files delivered in
+> Git and are not runnable reproduction instructions for a fresh checkout.
+> Use the current [cookbook](../../../cookbook/moss_speech.md) for serving and
+> [P5 reproduction](../p5/05_gate_report.md) / [P6 reproduction](../p6/02_reproduction.md)
+> for the delivered Python and shell entry points. Historical receipts remain
+> bound to their original commits and dependency versions.
+
+
 Date: 2026-09-08. **P4 G1–G4 all passed; T4.1–T4.6 complete.**
 P5 has not started. Source commits: shared HTTP `6b22b8d`, MOSS serving and
 validation drivers `9dae728`. P3 remains published at `dc2c517`; parity v1/E1

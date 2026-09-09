@@ -1,5 +1,14 @@
 # P4 HTTP contract and framework-gap RFC
 
+> Historical evidence: `scripts/p*.sbatch` names below identify workspace-local
+> cluster wrappers used for the recorded jobs; they are not files delivered in
+> Git and are not runnable reproduction instructions for a fresh checkout.
+> Use the current [cookbook](../../../cookbook/moss_speech.md) for serving and
+> [P5 reproduction](../p5/05_gate_report.md) / [P6 reproduction](../p6/02_reproduction.md)
+> for the delivered Python and shell entry points. Historical receipts remain
+> bound to their original commits and dependency versions.
+
+
 P3 is published at dc2c517. P4 starts with the approved Tasks.md T4.1–T4.6.
 
 ## Verified framework gaps and minimal extensions

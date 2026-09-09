@@ -1,0 +1,30 @@
+{
+  "source_commit": "3bb5ba4653b043d559c215120a54cb852ce9228e",
+  "assets": [
+    {
+      "path": "tests/fixtures/moss_speech/mixed_multiturn/logits_first16.pt",
+      "bytes": 10765914,
+      "sha256": "c48846a79d209d9a3e2b1cfa607c97db4e378a751660479790e30e27d4cf2eda"
+    },
+    {
+      "path": "tests/fixtures/moss_speech/s2s_cn/logits_first16.pt",
+      "bytes": 10765914,
+      "sha256": "17cd1b6694ce999815c3e5d876433b5548b69cbb52875c530682af7cc0cfd604"
+    },
+    {
+      "path": "tests/fixtures/moss_speech/s2t_cn/logits_first16.pt",
+      "bytes": 10765914,
+      "sha256": "4a3949e8ca73c2f4c82932f4032711a7b08c08f41ec8ffc0e60219a9bdf98eca"
+    },
+    {
+      "path": "tests/fixtures/moss_speech/t2s_cn/logits_first16.pt",
+      "bytes": 10765914,
+      "sha256": "09522289febe76fa97b8a4f580e1fa9b5e1f4946bd26dc5f7702c090ba95ee96"
+    },
+    {
+      "path": "tests/fixtures/moss_speech/t2t_short/logits_first16.pt",
+      "bytes": 10765914,
+      "sha256": "10e87f439e9a3fb031c5b24884d6f5f9f83ad344a6f85a615c148bf596d96be9"
+    }
+  ]
+}

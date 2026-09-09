@@ -22,25 +22,23 @@ import argparse
 import hashlib
 import json
 import os
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Offline discipline (AGENT.md section 2).
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-os.environ.setdefault("HF_HOME", "/remote-home1/xrluan/.cache/huggingface")
 
 import soundfile as sf  # noqa: E402
 import torch  # noqa: E402
 from transformers import GenerationConfig  # noqa: E402
+from transformers.generation.streamers import BaseStreamer  # noqa: E402
 
 # utils.interface lives in the locked GitHub clone; sys.path is set by the
 # launcher (PYTHONPATH includes repos/MOSS-Speech and Matcha-TTS).
 from utils.interface import Inference, MIMOStopper  # noqa: E402
-from transformers.generation.streamers import BaseStreamer  # noqa: E402
 
 
 class _NoopStreamer(BaseStreamer):
@@ -75,10 +73,11 @@ def _install_torchaudio_load_shim() -> None:
 
     _ta.load = _load
 
-SYSTEM_PROMPT_SPEECH = (
-    "You are a helpful voice assistant. Answer the user's questions with spoken responses."
+
+SYSTEM_PROMPT_SPEECH = "You are a helpful voice assistant. Answer the user's questions with spoken responses."
+SYSTEM_PROMPT_TEXT = (
+    "You are a helpful assistant. Answer the user's questions with text."
 )
-SYSTEM_PROMPT_TEXT = "You are a helpful assistant. Answer the user's questions with text."
 
 
 @dataclass
@@ -106,7 +105,11 @@ def _task_output_modality(task: str) -> str:
 
 
 def system_prompt_for(task: str) -> str:
-    return SYSTEM_PROMPT_SPEECH if _task_output_modality(task) == "audio" else SYSTEM_PROMPT_TEXT
+    return (
+        SYSTEM_PROMPT_SPEECH
+        if _task_output_modality(task) == "audio"
+        else SYSTEM_PROMPT_TEXT
+    )
 
 
 def build_generation_config(args: argparse.Namespace) -> GenerationConfig:
@@ -143,7 +146,9 @@ def generate_once(
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
     output_modalities = [_task_output_modality(task)]
-    full_conversation: List[Dict[str, Any]] = ([{"role": "system", "content": system_prompt_for(task)}])
+    full_conversation: List[Dict[str, Any]] = [
+        {"role": "system", "content": system_prompt_for(task)}
+    ]
     full_conversation.extend(conversation)
     inputs = engine.processor([full_conversation], output_modalities)
     in_len = int(inputs["input_ids"].shape[-1])
@@ -255,7 +260,9 @@ def run_case(
     t0 = time.time()
     token_ids, in_len = generate_once(engine, task, conversation, gen_cfg, args.seed)
     gen_wall = time.time() - t0
-    gen_peak = torch.cuda.max_memory_allocated() / 2**30 if torch.cuda.is_available() else 0.0
+    gen_peak = (
+        torch.cuda.max_memory_allocated() / 2**30 if torch.cuda.is_available() else 0.0
+    )
 
     # Deterministic decode with the locked voice prompt (audio) or text decode.
     audio_meta_dict: Optional[Dict[str, Any]] = None
@@ -264,9 +271,15 @@ def run_case(
     if modality == "audio":
         torch.cuda.reset_peak_memory_stats()
         t1 = time.time()
-        audio, _ = decode_tokens(engine, token_ids, task, decoder_audio_prompt, args.seed)
+        audio, _ = decode_tokens(
+            engine, token_ids, task, decoder_audio_prompt, args.seed
+        )
         dec_wall = time.time() - t1
-        dec_peak = torch.cuda.max_memory_allocated() / 2**30 if torch.cuda.is_available() else 0.0
+        dec_peak = (
+            torch.cuda.max_memory_allocated() / 2**30
+            if torch.cuda.is_available()
+            else 0.0
+        )
         if audio is not None:
             sr, wav = audio
             audio_meta_dict = audio_meta(audio)
@@ -274,7 +287,11 @@ def run_case(
             audio_meta_dict["decode_peak_vram_gib"] = round(dec_peak, 2)
             case_dir = out_dir / case_id
             case_dir.mkdir(parents=True, exist_ok=True)
-            sf.write(case_dir / "audio.wav", wav.numpy() if hasattr(wav, "numpy") else wav, sr)
+            sf.write(
+                case_dir / "audio.wav",
+                wav.numpy() if hasattr(wav, "numpy") else wav,
+                sr,
+            )
             audio_out_path = str(case_dir / "audio.wav")
     else:
         _, text = decode_tokens(engine, token_ids, task, None, args.seed)
@@ -284,10 +301,13 @@ def run_case(
     if args.check_determinism:
         token_ids2, _ = generate_once(engine, task, conversation, gen_cfg, args.seed)
         det_ok = bool(
-            token_ids.shape == token_ids2.shape and torch.equal(token_ids.cpu(), token_ids2.cpu())
+            token_ids.shape == token_ids2.shape
+            and torch.equal(token_ids.cpu(), token_ids2.cpu())
         )
 
-    n_new_steps = int(token_ids.shape[1]) if token_ids is not None else None  # grid is (B, L, 2); generate(output_only=True) strips prompt
+    n_new_steps = (
+        int(token_ids.shape[1]) if token_ids is not None else None
+    )  # grid is (B, L, 2); generate(output_only=True) strips prompt
     res = CaseResult(
         case_id=case_id,
         task=task,
@@ -325,7 +345,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-path", default="models/MOSS-Speech")
     parser.add_argument("--codec-path", default="models/MOSS-Speech-Codec")
-    parser.add_argument("--assets-dir", required=True, help="locked GitHub clone assets dir")
+    parser.add_argument(
+        "--assets-dir", required=True, help="locked GitHub clone assets dir"
+    )
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--sampling", choices=["greedy", "default"], default="greedy")
     parser.add_argument("--seed", type=int, default=0)
@@ -359,43 +381,109 @@ def main() -> None:
         "as workers moved to cities, and new social classes emerged around industrial capital."
     )
     cases: List[Tuple[str, str, List[Dict[str, Any]], Optional[str]]] = [
-        ("t2t_short", "text_instruct_text_response", [user_text_turn("Introduce yourself in one sentence.")], None),
+        (
+            "t2t_short",
+            "text_instruct_text_response",
+            [user_text_turn("Introduce yourself in one sentence.")],
+            None,
+        ),
         ("t2t_long", "text_instruct_text_response", [user_text_turn(long_text)], None),
-        ("t2s_cn", "text_instruct_speech_response", [user_text_turn("用中文介绍一下上海的三到四个著名景点。")], prompt_cn),
-        ("t2s_en", "text_instruct_speech_response", [user_text_turn("Say something encouraging to a student before an exam.")], prompt_en),
+        (
+            "t2s_cn",
+            "text_instruct_speech_response",
+            [user_text_turn("用中文介绍一下上海的三到四个著名景点。")],
+            prompt_cn,
+        ),
+        (
+            "t2s_en",
+            "text_instruct_speech_response",
+            [user_text_turn("Say something encouraging to a student before an exam.")],
+            prompt_en,
+        ),
         ("s2t_cn", "speech_instruct_text_response", [user_audio_turn(prompt_cn)], None),
         ("s2t_en", "speech_instruct_text_response", [user_audio_turn(prompt_en)], None),
-        ("s2s_cn", "speech_instruct_speech_response", [user_audio_turn(prompt_cn)], prompt_cn),
-        ("s2s_en", "speech_instruct_speech_response", [user_audio_turn(prompt_en)], prompt_en),
+        (
+            "s2s_cn",
+            "speech_instruct_speech_response",
+            [user_audio_turn(prompt_cn)],
+            prompt_cn,
+        ),
+        (
+            "s2s_en",
+            "speech_instruct_speech_response",
+            [user_audio_turn(prompt_en)],
+            prompt_en,
+        ),
     ]
 
     summary: List[Dict[str, Any]] = []
     for case_id, task, conv, dec_prompt in cases:
         print(f"[case] {case_id} ({task})", flush=True)
         res = run_case(engine, out_dir, case_id, task, conv, args, dec_prompt)
-        summary.append({"case_id": res.case_id, "task": res.task, "wall_s": res.wall_s,
-                        "n_new_steps": res.n_steps, "det_ok": res.determinism_repeat_ok,
-                        "audio": res.audio_meta, "text": (res.text or "")[:80]})
+        summary.append(
+            {
+                "case_id": res.case_id,
+                "task": res.task,
+                "wall_s": res.wall_s,
+                "n_new_steps": res.n_steps,
+                "det_ok": res.determinism_repeat_ok,
+                "audio": res.audio_meta,
+                "text": (res.text or "")[:80],
+            }
+        )
         print(f"  -> {summary[-1]}", flush=True)
 
     if not args.skip_mixed:
         # Mixed multi-turn: text Q/A, then audio user turn -> audio A, then
         # audio user turn -> text A (exercises text-after-audio continuation
         # across turns and per-turn processor dispatch).
-        conv: List[Dict[str, Any]] = [user_text_turn("My name is Alice and I like hiking.")]
-        r1 = run_case(engine, out_dir, "mixed_t1_text", "text_instruct_text_response", conv, args, None)
+        conv: List[Dict[str, Any]] = [
+            user_text_turn("My name is Alice and I like hiking.")
+        ]
+        r1 = run_case(
+            engine,
+            out_dir,
+            "mixed_t1_text",
+            "text_instruct_text_response",
+            conv,
+            args,
+            None,
+        )
         assert r1.text, "mixed turn 1 must produce text"
         conv.append(assistant_text_turn(r1.text))
         conv.append(user_audio_turn(prompt_en))
-        r2 = run_case(engine, out_dir, "mixed_t2_s2s", "speech_instruct_speech_response", conv, args, prompt_en)
+        r2 = run_case(
+            engine,
+            out_dir,
+            "mixed_t2_s2s",
+            "speech_instruct_speech_response",
+            conv,
+            args,
+            prompt_en,
+        )
         if r2.audio_path:
             conv.append(assistant_audio_turn(r2.audio_path))
         conv.append(user_audio_turn(prompt_cn))
-        r3 = run_case(engine, out_dir, "mixed_t3_s2t", "speech_instruct_text_response", conv, args, None)
-        summary.append({"case_id": "mixed", "turns": ["t1_text", "t2_s2s", "t3_s2t"],
-                        "t3_text": (r3.text or "")[:120]})
+        r3 = run_case(
+            engine,
+            out_dir,
+            "mixed_t3_s2t",
+            "speech_instruct_text_response",
+            conv,
+            args,
+            None,
+        )
+        summary.append(
+            {
+                "case_id": "mixed",
+                "turns": ["t1_text", "t2_s2s", "t3_s2t"],
+                "t3_text": (r3.text or "")[:120],
+            }
+        )
 
-    (out_dir / "_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1))
+    (out_dir / "_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=1)
+    )
     print("ALL CASES DONE", flush=True)
 
 

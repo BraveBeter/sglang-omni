@@ -20,15 +20,15 @@ from pathlib import Path
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-os.environ.setdefault("HF_HOME", "/remote-home1/xrluan/.cache/huggingface")
 
 import numpy as np
-import soundfile as sf
 import torch
 import torchaudio
 from transformers import AutoModel
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "p0"))  # run_reference shim
+sys.path.insert(
+    0, str(Path(__file__).resolve().parents[1] / "p0")
+)  # run_reference shim
 import run_reference as rr  # noqa: E402
 
 rr._install_torchaudio_load_shim()
@@ -37,7 +37,9 @@ SOSP, EOSP = 151646, 16384
 
 
 def blake2b(t: torch.Tensor) -> str:
-    return hashlib.blake2b(t.detach().cpu().contiguous().numpy().tobytes(), digest_size=16).hexdigest()
+    return hashlib.blake2b(
+        t.detach().cpu().contiguous().numpy().tobytes(), digest_size=16
+    ).hexdigest()
 
 
 def rng_snapshot() -> dict:
@@ -86,10 +88,19 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     cn, en = f"{args.assets}/prompt-cn.wav", f"{args.assets}/prompt-en.wav"
-    codec = AutoModel.from_pretrained(args.codec_path, trust_remote_code=True).to("cuda").eval()
+    codec = (
+        AutoModel.from_pretrained(args.codec_path, trust_remote_code=True)
+        .to("cuda")
+        .eval()
+    )
 
-    result: dict = {"env": {"torch": torch.__version__, "transformers": __import__("transformers").__version__,
-                            "gpu": torch.cuda.get_device_name(0)}}
+    result: dict = {
+        "env": {
+            "torch": torch.__version__,
+            "transformers": __import__("transformers").__version__,
+            "gpu": torch.cuda.get_device_name(0),
+        }
+    }
 
     # ---------------- encode manifest ----------------
     enc: dict = {}
@@ -122,11 +133,17 @@ def main() -> None:
     cases = {
         "t2s_cn": extract_codes_from_grid(torch.load(fx / "t2s_cn" / "tokens_grid.pt")),
         "s2s_cn": extract_codes_from_grid(torch.load(fx / "s2s_cn" / "tokens_grid.pt")),
-        "mixed": extract_codes_from_grid(torch.load(Path("artifacts/p0/runs_reference_greedy/mixed_t2_s2s/tokens.pt"))[0]),
+        "mixed": extract_codes_from_grid(
+            torch.load(
+                Path("artifacts/p0/runs_reference_greedy/mixed_t2_s2s/tokens.pt")
+            )[0]
+        ),
         "single": [100],
         "long500": None,
     }
-    cases["long500"] = (cases["mixed"] * ((500 // max(len(cases["mixed"]), 1)) + 1))[:500]
+    cases["long500"] = (cases["mixed"] * ((500 // max(len(cases["mixed"]), 1)) + 1))[
+        :500
+    ]
     result["codes_meta"] = {k: len(v) for k, v in cases.items()}
 
     dec: dict = {}
@@ -139,30 +156,41 @@ def main() -> None:
                 if (case, vname, seed) == ("mixed", "cn", 0):
                     rng_before_after["before"] = rng_snapshot()
                 try:
-                    r = codec.decode(torch.tensor([codes]).reshape(1, 1, -1), prompt_speech=vpath)
+                    r = codec.decode(
+                        torch.tensor([codes]).reshape(1, 1, -1), prompt_speech=vpath
+                    )
                     wav = r["syn_wav_list"][0].detach().cpu()
                     dec[f"{case}_{vname}_s{seed}"] = {
-                        "n": int(wav.shape[-1]), "blake2b": blake2b(wav),
+                        "n": int(wav.shape[-1]),
+                        "blake2b": blake2b(wav),
                         "finite": bool(torch.isfinite(wav).all()),
                     }
                     torch.save(wav, out / f"wav_{case}_{vname}_s{seed}.pt")
                 except Exception as e:
-                    dec[f"{case}_{vname}_s{seed}"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
+                    dec[f"{case}_{vname}_s{seed}"] = {
+                        "error": f"{type(e).__name__}: {str(e)[:120]}"
+                    }
                 if (case, vname, seed) == ("mixed", "cn", 0):
                     rng_before_after["after"] = rng_snapshot()
     result["decode"] = dec
-    result["rng_unchanged_by_reference_decode"] = rng_equal(rng_before_after["before"], rng_before_after["after"])
+    result["rng_unchanged_by_reference_decode"] = rng_equal(
+        rng_before_after["before"], rng_before_after["after"]
+    )
 
     # ---------------- conditioning (reference internals) ----------------
     cond: dict = {}
     for vname, vpath in (("cn", cn), ("en", en)):
         prompt_wav, orig_sr = torchaudio.load(vpath)
         if orig_sr != 24000:
-            prompt_wav = torchaudio.transforms.Resample(orig_freq=orig_sr, new_freq=24000)(prompt_wav)
+            prompt_wav = torchaudio.transforms.Resample(
+                orig_freq=orig_sr, new_freq=24000
+            )(prompt_wav)
         speech_feat, _ = codec._extract_speech_feat(prompt_wav)
         speech_token = torch.tensor(codec.encode([vpath])[0]).unsqueeze(0)
         token_len = min(int(speech_feat.shape[1] / 4), speech_token.shape[1])
-        prompt_16k = torchaudio.transforms.Resample(orig_freq=24000, new_freq=16000)(prompt_wav)
+        prompt_16k = torchaudio.transforms.Resample(orig_freq=24000, new_freq=16000)(
+            prompt_wav
+        )
         emb = codec._extract_spk_embedding(prompt_16k)
         cond[vname] = {
             "token_len": token_len,
@@ -179,20 +207,41 @@ def main() -> None:
     try:
         r = codec.decode(torch.zeros(1, 1, 0, dtype=torch.long), prompt_speech=cn)
         wav = r["syn_wav_list"][0]
-        edges["empty_codes"] = {"n": int(wav.shape[-1]), "blake2b": blake2b(wav.detach().cpu())}
+        edges["empty_codes"] = {
+            "n": int(wav.shape[-1]),
+            "blake2b": blake2b(wav.detach().cpu()),
+        }
     except Exception as e:
         edges["empty_codes"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
     try:
         r = codec.decode(torch.tensor([[[20000]]]), prompt_speech=cn)
         wav = r["syn_wav_list"][0]
-        edges["code_20000"] = {"n": int(wav.shape[-1]), "blake2b": blake2b(wav.detach().cpu())}
+        edges["code_20000"] = {
+            "n": int(wav.shape[-1]),
+            "blake2b": blake2b(wav.detach().cpu()),
+        }
     except Exception as e:
         edges["code_20000"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
     result["edges"] = edges
 
     (out / "reference_export.json").write_text(json.dumps(result, indent=1))
     torch.save(cases, out / "cases_codes.pt")
-    print(json.dumps({k: (v if k != "encode" else {kk: len(vv) if isinstance(vv, list) else "..." for kk, vv in v.items()}) for k, v in result.items()}, indent=1)[:1200])
+    print(
+        json.dumps(
+            {
+                k: (
+                    v
+                    if k != "encode"
+                    else {
+                        kk: len(vv) if isinstance(vv, list) else "..."
+                        for kk, vv in v.items()
+                    }
+                )
+                for k, v in result.items()
+            },
+            indent=1,
+        )[:1200]
+    )
     print("REFERENCE EXPORT DONE")
 
 

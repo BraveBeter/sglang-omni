@@ -34,8 +34,9 @@ Blocker resolution (per review B2/B3): both were closed inside T0.3 — matcha v
 
 ```bash
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
-export HF_HOME=/remote-home1/xrluan/.cache/huggingface
-export PYTHONPATH=/remote-home1/xrluan/SGLang_experiments/repos/MOSS-Speech:/remote-home1/xrluan/SGLang_experiments/repos/MOSS-Speech/Matcha-TTS
+# Optional: set HF_HOME to your prepared Hugging Face cache.
+export MOSS_SPEECH_REFERENCE_ROOT="$PWD/repos/MOSS-Speech"
+export PYTHONPATH="$MOSS_SPEECH_REFERENCE_ROOT:$MOSS_SPEECH_REFERENCE_ROOT/Matcha-TTS"
 .venv-p0/bin/python <driver> --model-path models/MOSS-Speech --codec-path models/MOSS-Speech-Codec ...
 ```
 

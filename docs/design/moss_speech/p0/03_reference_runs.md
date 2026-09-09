@@ -1,5 +1,14 @@
 # P0-03 Reference Four-Mode Runs (T0.4)
 
+> Historical evidence: `scripts/p*.sbatch` names below identify workspace-local
+> cluster wrappers used for the recorded jobs; they are not files delivered in
+> Git and are not runnable reproduction instructions for a fresh checkout.
+> Use the current [cookbook](../../../cookbook/moss_speech.md) for serving and
+> [P5 reproduction](../p5/05_gate_report.md) / [P6 reproduction](../p6/02_reproduction.md)
+> for the delivered Python and shell entry points. Historical receipts remain
+> bound to their original commits and dependency versions.
+
+
 Date: 2026-09-04. Node: slurmd-6 (A800-SXM4-80GB). Driver: `sglang-omni/scripts/moss_speech/p0/run_reference.py` (sbatch log `artifacts/p0/sbatch_ref_3627.log`, outputs `artifacts/p0/runs_reference_greedy/`).
 
 ## Configuration

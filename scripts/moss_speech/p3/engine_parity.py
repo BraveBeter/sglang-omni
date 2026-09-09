@@ -13,22 +13,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict
 
-import os
-
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-os.environ.setdefault("HF_HOME", "/remote-home1/xrluan/.cache/huggingface")
-
-import torch  # noqa: E402
 
 import faulthandler  # noqa: E402
 import logging  # noqa: E402
+
+import torch  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 faulthandler.dump_traceback_later(420, exit=True)  # hang diagnosis
@@ -64,7 +62,9 @@ def submit_case(scheduler, case_dir: Path, modality: str) -> str:
         request=SimpleNamespace(request_id=rid),
         data=build_state(case_dir, modality),
     )
-    scheduler.inbox.put(IncomingMessage(request_id=rid, type="new_request", data=payload))
+    scheduler.inbox.put(
+        IncomingMessage(request_id=rid, type="new_request", data=payload)
+    )
     return rid
 
 
@@ -80,6 +80,7 @@ def run_case(scheduler, case_dir: Path, modality: str, timeout_s: float):
             continue
         if out.type == "error":
             import traceback as _tbe
+
             err = out.data
             print(f"[drv-error] {rid}: {err!r}", flush=True)
             if isinstance(err, BaseException) and err.__traceback__ is not None:
@@ -108,7 +109,9 @@ def main() -> None:
     overrides["mem_fraction_static"] = args.mem_fraction
     t0 = time.time()
     print("[boot] building engine (common bootstrap)", flush=True)
-    scheduler = builder.build(args.model_path, gpu_id=0, server_args_overrides=overrides)
+    scheduler = builder.build(
+        args.model_path, gpu_id=0, server_args_overrides=overrides
+    )
     boot_s = time.time() - t0
     print(f"[boot] done in {boot_s:.1f}s", flush=True)
     # pre-queue both requests, then run the event loop on a worker thread
@@ -124,7 +127,11 @@ def main() -> None:
         pass
     else:
         for case, modality in cases:
-            case_dir = Path(args.ref_dir) / ("natural_transition/t2s_short_trans" if case == "t2s_short_trans" else case)
+            case_dir = Path(args.ref_dir) / (
+                "natural_transition/t2s_short_trans"
+                if case == "t2s_short_trans"
+                else case
+            )
             rids[case] = submit_case(scheduler, case_dir, modality)
             print(f"[case] {case} queued", flush=True)
 
@@ -144,8 +151,13 @@ def main() -> None:
 
     scheduler._emit_request_error = _emit_with_tb
 
-    for _name in ("run_batch", "_process_batch_result", "_handle_batch_failure",
-                  "_admit_or_defer_built_request", "_resolve_pending_async"):
+    for _name in (
+        "run_batch",
+        "_process_batch_result",
+        "_handle_batch_failure",
+        "_admit_or_defer_built_request",
+        "_resolve_pending_async",
+    ):
         _orig = getattr(scheduler, _name, None)
         if _orig is None:
             continue
@@ -158,6 +170,7 @@ def main() -> None:
                     print(f"[scheduler:{name}] raised:", flush=True)
                     _tb.print_exc()
                     raise
+
             return inner
 
         setattr(scheduler, _name, _wrap())
@@ -169,29 +182,48 @@ def main() -> None:
     results = {}
     for case, modality in cases:
         print(f"[case] {case} awaiting", flush=True)
-        case_dir = Path(args.ref_dir) / ("natural_transition/t2s_short_trans" if case == "t2s_short_trans" else case)
+        case_dir = Path(args.ref_dir) / (
+            "natural_transition/t2s_short_trans" if case == "t2s_short_trans" else case
+        )
         ref_grid = torch.load(case_dir / "tokens_grid.pt")
         t1 = time.time()
         try:
             data = run_case(scheduler, case_dir, modality, args.timeout)
             inner = getattr(data, "data", data)  # result is a StagePayload
-            grid = inner.get("output_grid") if isinstance(inner, dict) else getattr(inner, "output_grid", None)
-            print("[result] finish_reason:", inner.get("finish_reason") if isinstance(inner, dict) else getattr(inner, "finish_reason", None), flush=True)
+            grid = (
+                inner.get("output_grid")
+                if isinstance(inner, dict)
+                else getattr(inner, "output_grid", None)
+            )
+            print(
+                "[result] finish_reason:",
+                (
+                    inner.get("finish_reason")
+                    if isinstance(inner, dict)
+                    else getattr(inner, "finish_reason", None)
+                ),
+                flush=True,
+            )
             gen = [list(map(int, r)) for r in grid]
             print("[result] first rows:", gen[:3], flush=True)
             n = min(len(gen), len(ref_grid))
             equal_rows = sum(1 for i in range(n) if gen[i] == ref_grid[i].tolist())
-            first_diff = next((i for i in range(n) if gen[i] != ref_grid[i].tolist()), None)
+            first_diff = next(
+                (i for i in range(n) if gen[i] != ref_grid[i].tolist()), None
+            )
             Path("artifacts/p3").mkdir(exist_ok=True)
             torch.save(torch.tensor(gen), f"artifacts/p3/gen_{case}.pt")
             results[case] = {
-                "gen_len": len(gen), "ref_len": len(ref_grid),
-                "equal_rows": equal_rows, "first_diff": first_diff,
+                "gen_len": len(gen),
+                "ref_len": len(ref_grid),
+                "equal_rows": equal_rows,
+                "first_diff": first_diff,
                 "bitwise_equal": bool(len(gen) == len(ref_grid) and first_diff is None),
                 "gen_seconds": round(time.time() - t1, 1),
             }
         except Exception as exc:  # noqa: BLE001
             import traceback as _tb2
+
             print(f"[case-error] {case}: {exc!r}", flush=True)
             _tb2.print_exception(type(exc), exc, exc.__traceback__)
             ctx = exc.__context__

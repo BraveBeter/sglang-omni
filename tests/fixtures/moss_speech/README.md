@@ -29,3 +29,22 @@ Cases: `t2t_short`, `t2s_cn`, `s2s_cn`, `s2t_cn`, `mixed_multiturn` (fixed-liter
 
 - P3 native greedy targets are the separate explicit-BF16 `artifacts/p3/reference/` grids, not these P0 FP32 grids. Missing long-case captures are supplemented in `artifacts/p3/reference_complete_3838/`, with original grid and capture hashes unchanged. P0 files are preserved for processor/codec and historical regression.
 - Final native validation: `sglang-omni/docs/design/moss_speech/p3/03_gate_report.md`. No native result is used to replace a reference expected value.
+
+## Archived large captures
+
+The five unused `logits_first16.pt` captures (53,829,570 bytes) are no longer
+in the current tree. Their immutable source commit, paths, sizes and SHA256
+are listed in `sglang-omni/tests/fixtures/moss_speech/archived_logits.json`.
+They remain available in Git history; this cleanup does not rewrite history
+or claim to shrink existing clones. From the workspace root, restore one with:
+
+```bash
+git -C sglang-omni show 3bb5ba4:tests/fixtures/moss_speech/t2t_short/logits_first16.pt > /tmp/logits_first16.pt
+sha256sum /tmp/logits_first16.pt
+```
+
+Check the hash against the manifest before using the file. Fetch the manifest's
+source commit first if your clone is shallow. These FP32 P0 captures are
+historical diagnostics, not the current BF16 parity target. The two small WAVs
+remain as codec regression outputs (1,528,408 bytes total), alongside token grids
+and canonical inputs. They do not require an external asset service.

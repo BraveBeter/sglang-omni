@@ -28,11 +28,12 @@ from pathlib import Path
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-os.environ.setdefault("HF_HOME", "/remote-home1/xrluan/.cache/huggingface")
 
 import torch
 
-from sglang_omni.models.moss_speech.components.codec_adapter import MossSpeechCodecAdapter
+from sglang_omni.models.moss_speech.components.codec_adapter import (
+    MossSpeechCodecAdapter,
+)
 
 
 def cuda_time_ms(fn):
@@ -70,7 +71,9 @@ def main() -> None:
             codes = adapter.encode(manifest, batch_size=bs)
             equal = all(a == b for a, b in zip(codes, base_codes))
             if not equal:
-                enc_rows.append({"bs": bs, "status": "STOPPED: per-code inequality vs bs=1"})
+                enc_rows.append(
+                    {"bs": bs, "status": "STOPPED: per-code inequality vs bs=1"}
+                )
                 break
             # warmup x1 then timed rounds
             for _ in range(1):
@@ -81,13 +84,22 @@ def main() -> None:
                 _, dev = cuda_time_ms(lambda: adapter.encode(manifest, batch_size=bs))
                 walls.append((time.perf_counter() - t0) * 1000)
                 devs.append(dev)
-            enc_rows.append({
-                "bs": bs, "equal_to_bs1": equal,
-                "wall_ms_p50": round(statistics.median(walls), 1),
-                "wall_ms_p95": round(sorted(walls)[int(0.95 * len(walls)) - 1], 1) if len(walls) > 1 else round(walls[0], 1),
-                "device_ms_p50": round(statistics.median(devs), 1),
-                "per_item_ms_p50": round(statistics.median(walls) / len(manifest), 2),
-            })
+            enc_rows.append(
+                {
+                    "bs": bs,
+                    "equal_to_bs1": equal,
+                    "wall_ms_p50": round(statistics.median(walls), 1),
+                    "wall_ms_p95": (
+                        round(sorted(walls)[int(0.95 * len(walls)) - 1], 1)
+                        if len(walls) > 1
+                        else round(walls[0], 1)
+                    ),
+                    "device_ms_p50": round(statistics.median(devs), 1),
+                    "per_item_ms_p50": round(
+                        statistics.median(walls) / len(manifest), 2
+                    ),
+                }
+            )
         except torch.cuda.OutOfMemoryError:
             enc_rows.append({"bs": bs, "status": "OOM"})
             break
@@ -106,8 +118,9 @@ def main() -> None:
     voice = None  # decoder-only has no encoder; use a precomputed voice file
     # precompute voice with a temporary encoder-included adapter is wasteful;
     # instead reuse the full adapter for voice once, then close encoder side.
-    full_tmp = MossSpeechCodecAdapter(args.codec_path, load_encoder=True, load_decoder=False)
-    import shutil, tempfile
+    full_tmp = MossSpeechCodecAdapter(
+        args.codec_path, load_encoder=True, load_decoder=False
+    )
 
     # voice from the long asset (default voice = prompt-cn semantics)
     voice = full_tmp.encode_voice_ref(long_)
@@ -117,9 +130,10 @@ def main() -> None:
     dec_rows = []
     for n_arrival in (1, 2, 4, 8):
         for n_codes in (100, 200, 500):
-            codes = ([100] * n_codes)
+            codes = [100] * n_codes
             # warmup
-            torch.manual_seed(0); torch.cuda.manual_seed_all(0)
+            torch.manual_seed(0)
+            torch.cuda.manual_seed_all(0)
             dec.decode(codes, voice, request_id="warm")
             walls = []
             for r in range(args.rounds):
@@ -146,11 +160,16 @@ def main() -> None:
                 for t in ts:
                     t.join()
                 # walls across threads: single decode lock serializes them
-            dec_rows.append({
-                "arrival_threads": n_arrival, "n_codes": n_codes,
-                "decode_ms_p50": round(statistics.median(walls), 1),
-                "decode_ms_p95": round(sorted(walls)[int(0.95 * len(walls)) - 1], 1),
-            })
+            dec_rows.append(
+                {
+                    "arrival_threads": n_arrival,
+                    "n_codes": n_codes,
+                    "decode_ms_p50": round(statistics.median(walls), 1),
+                    "decode_ms_p95": round(
+                        sorted(walls)[int(0.95 * len(walls)) - 1], 1
+                    ),
+                }
+            )
     res["decoder_serial"] = dec_rows
     res["decoder_vram"] = {
         "allocated_gib": round(torch.cuda.memory_allocated() / 2**30, 2),
@@ -160,9 +179,12 @@ def main() -> None:
     # growth check: repeat decode/cleanup cycles, allocated must not grow
     a0 = torch.cuda.memory_allocated()
     for i in range(50):
-        torch.manual_seed(0); torch.cuda.manual_seed_all(0)
+        torch.manual_seed(0)
+        torch.cuda.manual_seed_all(0)
         dec.decode([100] * 200, voice, request_id=f"growth-{i}")
-    res["decode_repeat_growth_mib"] = round((torch.cuda.memory_allocated() - a0) / 2**20, 2)
+    res["decode_repeat_growth_mib"] = round(
+        (torch.cuda.memory_allocated() - a0) / 2**20, 2
+    )
     dec.close()
 
     (out_dir / "bench_codec.json").write_text(json.dumps(res, indent=1))
