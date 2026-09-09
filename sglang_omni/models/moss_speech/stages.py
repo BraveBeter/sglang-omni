@@ -37,11 +37,9 @@ from sglang_omni.models.moss_speech.payload_types import (
 )
 from sglang_omni.models.moss_speech.request_builders import (
     RequestValidationError,
-    cleanup_preprocessing_state,
     cleanup_vocoder_state,
     normalize_and_validate,
     pop_decoded_audio,
-    remember_prepared,
     remember_vocoder_session,
 )
 from sglang_omni.proto.request import StagePayload
@@ -144,12 +142,11 @@ def create_preprocessing_executor(
             state.voice_token_ids = voice.prompt_token[0].to(torch.int32).tolist()
             state.voice_feat = voice.prompt_feat[0].tolist()
             state.voice_embedding = voice.embedding[0].tolist()
-        remember_prepared(payload.request_id, state)
         return StagePayload(
             request_id=payload.request_id, request=payload.request, data=state.to_dict()
         )
 
-    return SimpleScheduler(compute, abort_callback=cleanup_preprocessing_state)
+    return SimpleScheduler(compute)
 
 
 # -------------------------------------------------------------------- native AR
@@ -237,7 +234,7 @@ def create_text_decode_executor(model_path: str) -> SimpleScheduler:
         text = tokenizer.decode(text_channel.tolist(), skip_special_tokens=True)
         # reference processor decode replacements (P0 contract §4)
         text = text.replace("<|empty|>", ".").replace("<|end_empty|>", ":")
-        state.generated_text = text
+        state.generated_text = text.rstrip("\ufffd")
         return StagePayload(
             request_id=payload.request_id,
             request=payload.request,

@@ -325,7 +325,15 @@ def normalize_and_validate(
                             f"message {i} contains multiple input_audio parts",
                             reason="invalid_request",
                         )
-                    audio_part = part.get("input_audio") or {}
+                    audio_part = part.get("input_audio", {})
+                    if not isinstance(audio_part, dict):
+                        raise RequestValidationError(
+                            f"message {i} input_audio must be an object"
+                        )
+                    if not isinstance(audio_part.get("data", ""), str):
+                        raise RequestValidationError(
+                            f"message {i} input_audio.data must be a string"
+                        )
                 elif ptype in (
                     "image_url",
                     "image",
@@ -357,7 +365,7 @@ def normalize_and_validate(
         if audio_part is not None:
             turns.append({"role": role, "kind": "audio", "text": None})
             audio_turns.append(len(turns) - 1)
-            inline_audio_sources.append(str(audio_part.get("data", "")))
+            inline_audio_sources.append(audio_part.get("data", ""))
         else:
             turns.append({"role": role, "kind": "text", "text": "".join(text_parts)})
 
@@ -521,21 +529,6 @@ def resolve_output_terminal(request_id: str, output: Any) -> str:
 # ------------------------------------------------------------------ cleanup
 # Per-stage owner registries (contract: idempotent, stage-scoped; the shared
 # default voice cache is never released by request cleanup).
-_PREPARED_LOCK = threading.Lock()
-_PREPARED_REQUESTS: "dict[str, MossSpeechState]" = {}
-
-
-def remember_prepared(request_id: str, state: MossSpeechState) -> None:
-    with _PREPARED_LOCK:
-        _PREPARED_REQUESTS[request_id] = state
-
-
-def cleanup_preprocessing_state(request_id: str) -> None:
-    """Idempotent abort cleanup for the preprocessing owner scope."""
-    with _PREPARED_LOCK:
-        _PREPARED_REQUESTS.pop(request_id, None)
-
-
 _VOCODER_SESSIONS_LOCK = threading.Lock()
 _VOCODER_SESSIONS: "dict[str, bool]" = {}
 

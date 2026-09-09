@@ -79,7 +79,9 @@ def _scoped_global_rng():
                 torch.cuda.set_rng_state(state, dev)
 
 
-def _build_flow_decoder(token_frame_rate: float = 12.5, chunk_size: int = 5, token_mel_ratio: int = 4):
+def _build_flow_decoder(
+    token_frame_rate: float = 12.5, chunk_size: int = 5, token_mel_ratio: int = 4
+):
     """Explicit construction of the flow/HiFT stack.
 
     Parameter values are transcribed 1:1 from ``flow/config.yaml`` of the
@@ -172,11 +174,12 @@ def _build_hift():
 
 
 def fade_in_out(fade_in_mel, fade_out_mel, window):
-    fade_in_mel[..., : fade_in_mel.shape[-1] // 2] = fade_in_mel[
-        ..., : fade_in_mel.shape[-1] // 2
-    ] * window[: fade_in_mel.shape[-1] // 2] + fade_out_mel[
-        ..., -(fade_in_mel.shape[-1] // 2) :
-    ] * window[-(fade_in_mel.shape[-1] // 2) :]
+    fade_in_mel[..., : fade_in_mel.shape[-1] // 2] = (
+        fade_in_mel[..., : fade_in_mel.shape[-1] // 2]
+        * window[: fade_in_mel.shape[-1] // 2]
+        + fade_out_mel[..., -(fade_in_mel.shape[-1] // 2) :]
+        * window[-(fade_in_mel.shape[-1] // 2) :]
+    )
     return fade_in_mel
 
 
@@ -197,9 +200,13 @@ class AudioDecoder(nn.Module):
         # (kept verbatim for rand_noise parity); the caller's state is restored.
         with _scoped_global_rng():
             self.flow = _build_flow_decoder()
-            self.flow.load_state_dict(torch.load(flow_ckpt_path, map_location=self.device), strict=False)
+            self.flow.load_state_dict(
+                torch.load(flow_ckpt_path, map_location=self.device), strict=False
+            )
             self.hift = _build_hift()
-            self.hift.load_state_dict(torch.load(hift_ckpt_path, map_location=self.device))
+            self.hift.load_state_dict(
+                torch.load(hift_ckpt_path, map_location=self.device)
+            )
         self.sample_rate = 24000
         self.feat_extractor = lambda x: mel_spectrogram(
             x,
@@ -220,15 +227,21 @@ class AudioDecoder(nn.Module):
         self.token_min_hop_len = 2 * self.flow.input_frame_rate
         self.token_max_hop_len = 4 * self.flow.input_frame_rate
         self.token_overlap_len = 3.5
-        self.mel_overlap_len = int(self.token_overlap_len / self.flow.input_frame_rate * 24000 / (480 * 2))
+        self.mel_overlap_len = int(
+            self.token_overlap_len / self.flow.input_frame_rate * 24000 / (480 * 2)
+        )
         self.mel_window = np.hamming(2 * self.mel_overlap_len)
         self.mel_cache_len = 1
         self.source_cache_len = int(self.mel_cache_len * 480)
         session_options = onnxruntime.SessionOptions()
-        session_options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
+        session_options.graph_optimization_level = (
+            onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
+        )
         session_options.intra_op_num_threads = 1
         self.campplus_session = onnxruntime.InferenceSession(
-            str(campplus_model), sess_opts=session_options, providers=["CPUExecutionProvider"]
+            str(campplus_model),
+            sess_opts=session_options,
+            providers=["CPUExecutionProvider"],
         )
         self.speech_window = np.hamming(2 * self.source_cache_len)
 
@@ -241,17 +254,27 @@ class AudioDecoder(nn.Module):
         embedding: Optional[torch.Tensor] = None,
         finalize: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        prompt_token = prompt_token if prompt_token is not None else torch.zeros(1, 0, dtype=torch.int32)
+        prompt_token = (
+            prompt_token
+            if prompt_token is not None
+            else torch.zeros(1, 0, dtype=torch.int32)
+        )
         prompt_feat = prompt_feat if prompt_feat is not None else torch.zeros(1, 0, 80)
         embedding = embedding if embedding is not None else torch.zeros(1, 192)
 
         tts_mel = self.flow.inference(
             token=token.to(self.device),
-            token_len=torch.tensor([token.shape[1]], dtype=torch.int32, device=self.device),
+            token_len=torch.tensor(
+                [token.shape[1]], dtype=torch.int32, device=self.device
+            ),
             prompt_token=prompt_token.to(self.device),
-            prompt_token_len=torch.tensor([prompt_token.shape[1]], dtype=torch.int32, device=self.device),
+            prompt_token_len=torch.tensor(
+                [prompt_token.shape[1]], dtype=torch.int32, device=self.device
+            ),
             prompt_feat=prompt_feat.to(self.device),
-            prompt_feat_len=torch.tensor([prompt_feat.shape[1]], dtype=torch.int32, device=self.device),
+            prompt_feat_len=torch.tensor(
+                [prompt_feat.shape[1]], dtype=torch.int32, device=self.device
+            ),
             embedding=embedding.to(self.device),
             streaming=False,
             finalize=finalize,
@@ -272,7 +295,9 @@ class AudioDecoder(nn.Module):
         if not finalize:
             self.mel_overlap_dict[uuid] = tts_mel[:, :, -self.mel_overlap_len :]
             tts_mel = tts_mel[:, :, : -self.mel_overlap_len]
-            tts_speech, tts_source = self.hift.inference(speech_feat=tts_mel, cache_source=hift_cache_source)
+            tts_speech, tts_source = self.hift.inference(
+                speech_feat=tts_mel, cache_source=hift_cache_source
+            )
             self.hift_cache_dict[uuid] = {
                 "mel": tts_mel[:, :, -self.mel_cache_len :],
                 "source": tts_source[:, :, -self.source_cache_len :],
@@ -280,7 +305,9 @@ class AudioDecoder(nn.Module):
             }
             tts_speech = tts_speech[:, : -self.source_cache_len]
         else:
-            tts_speech, tts_source = self.hift.inference(speech_feat=tts_mel, cache_source=hift_cache_source)
+            tts_speech, tts_source = self.hift.inference(
+                speech_feat=tts_mel, cache_source=hift_cache_source
+            )
             del self.hift_cache_dict[uuid]
             del self.mel_overlap_dict[uuid]
         return tts_speech, tts_mel
@@ -323,7 +350,9 @@ class MossSpeechCodec(PreTrainedModel):
                 new_state_dict[k[len("encoder.") :]] = v
         self.whisper_vqmodel.load_state_dict(new_state_dict, strict=False)
 
-        self.feature_extractor = WhisperFeatureExtractor.from_pretrained(str(encoder_feature_extractor_path))
+        self.feature_extractor = WhisperFeatureExtractor.from_pretrained(
+            str(encoder_feature_extractor_path)
+        )
 
         # Flow / HiFT decoder stack
         self.flow_path = str(flow_path)
@@ -352,24 +381,43 @@ class MossSpeechCodec(PreTrainedModel):
             if inputs.dim() != 3:
                 raise ValueError("`inputs` must be (B, C, T) when passing a tensor.")
             sr = sampling_rate or self.sample_rate
-            items: List[Tuple[torch.Tensor, int]] = [(inputs[i].squeeze(0).cpu(), sr) for i in range(inputs.size(0))]
+            items: List[Tuple[torch.Tensor, int]] = [
+                (inputs[i].squeeze(0).cpu(), sr) for i in range(inputs.size(0))
+            ]
         else:
             items = list(inputs)
-        return extract_speech_token(self.whisper_vqmodel, self.feature_extractor, items, batch_size=batch_size)
+        return extract_speech_token(
+            self.whisper_vqmodel, self.feature_extractor, items, batch_size=batch_size
+        )
 
-    def _extract_speech_feat(self, speech: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        speech_feat = self.audio_decoder.feat_extractor(speech).squeeze(dim=0).transpose(0, 1)
+    def _extract_speech_feat(
+        self, speech: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        speech_feat = (
+            self.audio_decoder.feat_extractor(speech).squeeze(dim=0).transpose(0, 1)
+        )
         speech_feat = speech_feat.unsqueeze(dim=0)
         speech_feat_len = torch.tensor([speech_feat.shape[1]], dtype=torch.int32)
         return speech_feat, speech_feat_len
 
     def _extract_spk_embedding(self, speech_16k: torch.Tensor) -> torch.Tensor:
-        feat = kaldi.fbank(speech_16k, num_mel_bins=80, dither=0, sample_frequency=16000)
+        feat = kaldi.fbank(
+            speech_16k, num_mel_bins=80, dither=0, sample_frequency=16000
+        )
         feat = feat - feat.mean(dim=0, keepdim=True)
-        embedding = self.audio_decoder.campplus_session.run(
-            None,
-            {self.audio_decoder.campplus_session.get_inputs()[0].name: feat.unsqueeze(0).cpu().numpy()},
-        )[0].flatten().tolist()
+        embedding = (
+            self.audio_decoder.campplus_session.run(
+                None,
+                {
+                    self.audio_decoder.campplus_session.get_inputs()[0]
+                    .name: feat.unsqueeze(0)
+                    .cpu()
+                    .numpy()
+                },
+            )[0]
+            .flatten()
+            .tolist()
+        )
         return torch.tensor([embedding])
 
     def compute_voice_conditioning(self, prompt_wav_24k: torch.Tensor) -> dict:
@@ -381,11 +429,15 @@ class MossSpeechCodec(PreTrainedModel):
         if prompt_wav_24k.dim() == 1:
             prompt_wav_24k = prompt_wav_24k.unsqueeze(0)
         speech_feat, speech_feat_len = self._extract_speech_feat(prompt_wav_24k)
-        speech_token = torch.tensor(self.encode([prompt_wav_24k])[0]).unsqueeze(0)
+        speech_token = torch.tensor(
+            self.encode([(prompt_wav_24k, 24000)])[0]
+        ).unsqueeze(0)
         token_len = min(int(speech_feat.shape[1] / 4), speech_token.shape[1])
         speech_feat, speech_feat_len[:] = speech_feat[:, : 4 * token_len], 4 * token_len
         speech_token = speech_token[:, :token_len]
-        prompt_16k = torchaudio.transforms.Resample(orig_freq=24000, new_freq=16000)(prompt_wav_24k)
+        prompt_16k = torchaudio.transforms.Resample(orig_freq=24000, new_freq=16000)(
+            prompt_wav_24k
+        )
         embedding = self._extract_spk_embedding(prompt_16k)
         return {
             "prompt_token": speech_token.int(),
@@ -437,21 +489,30 @@ class MossSpeechCodec(PreTrainedModel):
         """Reference-compatible file-path decode (delegates to conditioning path)."""
         if isinstance(audio_codes, torch.Tensor):
             if audio_codes.dim() == 3 and audio_codes.size(1) == 1:
-                codes_list: List[List[int]] = [audio_codes[i, 0].detach().cpu().tolist() for i in range(audio_codes.size(0))]
+                codes_list: List[List[int]] = [
+                    audio_codes[i, 0].detach().cpu().tolist()
+                    for i in range(audio_codes.size(0))
+                ]
             elif audio_codes.dim() == 2:
                 codes_list = [row.detach().cpu().tolist() for row in audio_codes]
             else:
-                raise ValueError("`audio_codes` must be (B, 1, T) or (B, T) when passing a tensor.")
+                raise ValueError(
+                    "`audio_codes` must be (B, 1, T) or (B, T) when passing a tensor."
+                )
         else:
             codes_list = [list(c) for c in audio_codes]
 
         if prompt_speech is None or not os.path.exists(str(prompt_speech)):
-            raise ValueError("`prompt_speech` path is required for decoding and must exist.")
+            raise ValueError(
+                "`prompt_speech` path is required for decoding and must exist."
+            )
 
         prompt_wav, orig_sr = _load_audio(str(prompt_speech))
         target_sr = self.audio_decoder.sample_rate
         if orig_sr != target_sr:
-            prompt_wav = torchaudio.transforms.Resample(orig_freq=orig_sr, new_freq=target_sr)(prompt_wav)
+            prompt_wav = torchaudio.transforms.Resample(
+                orig_freq=orig_sr, new_freq=target_sr
+            )(prompt_wav)
 
         conditioning = self.compute_voice_conditioning(prompt_wav)
         if not use_prompt_speech:
@@ -459,7 +520,9 @@ class MossSpeechCodec(PreTrainedModel):
             conditioning["prompt_feat"] = torch.zeros(1, 0, 80)
         if not use_spk_embedding:
             conditioning["embedding"] = torch.zeros(1, 192)
-        return self.decode_from_conditioning(codes_list, conditioning, finalize=finalize)
+        return self.decode_from_conditioning(
+            codes_list, conditioning, finalize=finalize
+        )
 
     @classmethod
     def from_pretrained(

@@ -323,14 +323,7 @@ def test_route_fn_selects_exactly_one_terminal() -> None:
 
 # -------------------------------------------------------------------- cleanup
 def test_cleanup_idempotent_and_stage_scoped() -> None:
-    rb.remember_prepared("p1", MossSpeechState())
     rb.remember_vocoder_session("p1")
-    rb.cleanup_preprocessing_state("p1")
-    rb.cleanup_preprocessing_state("p1")  # idempotent
-    assert "p1" not in rb._PREPARED_REQUESTS
-    assert (
-        "p1" in rb._VOCODER_SESSIONS
-    )  # preprocessing cleanup does not touch vocoder scope
     rb.cleanup_vocoder_state("p1")
     rb.cleanup_vocoder_state("p1")
     assert "p1" not in rb._VOCODER_SESSIONS

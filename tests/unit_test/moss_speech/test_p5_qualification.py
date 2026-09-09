@@ -133,3 +133,83 @@ def test_24gb_probe_sets_engine_budget_not_only_placement(
         for s in data["stages"]
         if s["name"] != "text_decode"
     )
+
+
+def test_versioned_text_profile_keeps_hf_output_separate():
+    from scripts.moss_speech.p5.quality import comparison_text, reference_text_fields
+
+    tokenizer = type(
+        "Tokenizer",
+        (),
+        {
+            "decode": lambda self, ids, **k: "".join(
+                {1: "hello", 2: " world", 3: "\ufffd", 151645: ""}[i] for i in ids
+            )
+        },
+    )()
+    for grid, expected, upstream in [
+        ([[1, 0]], "hello", ""),
+        ([[1, 0], [2, 0]], "hello world", "hello"),
+        ([[1, 0], [151645, 0]], "hello", "hello"),
+        ([[1, 0], [3, 0]], "hello", "hello"),
+    ]:
+        fields = reference_text_fields(tokenizer, grid, audio_output=False)
+        assert fields["text"] == upstream
+        assert comparison_text(fields) == expected
+        row = dict(
+            id="length",
+            input_grid=[[10, 512]],
+            grid=grid,
+            finish_reason="length",
+            **fields,
+        )
+        native = dict(row, text=expected)
+        native.pop("service_text")
+        assert validate_pairs([row], [native], ["length"])["pass"]
+        wrong_grid = dict(native, grid=[[99, 0]])
+        result = validate_pairs([row], [wrong_grid], ["length"])
+        assert not result["pass"] and not result["grid_cases"]["length"]
+    legacy = dict(
+        id="a", input_grid=[[10, 0]], grid=[[1, 0]], text="", finish_reason="length"
+    )
+    # No silent migration of frozen unversioned references.
+    assert not validate_pairs([legacy], [dict(legacy, text="hello")], ["a"])["pass"]
+    assert not validate_pairs(
+        [legacy], [dict(legacy, text_decode_profile="unknown")], ["a"]
+    )["pass"]
+    with pytest.raises(ValueError, match="profile"):
+        comparison_text(dict(text="x", text_decode_profile="unknown"))
+
+
+@pytest.mark.parametrize(
+    "ids,expected",
+    [
+        ([1], "hello"),
+        ([1, 2], "hello world"),
+        ([1, 151645], "hello"),
+        ([1, 3], "hello"),
+    ],
+)
+def test_terminal_text_preserves_complete_generated_prefix(monkeypatch, ids, expected):
+    from types import SimpleNamespace
+
+    from sglang_omni.models.moss_speech import stages
+    from sglang_omni.models.moss_speech.payload_types import MossSpeechState
+    from sglang_omni.proto.request import StagePayload
+
+    tokenizer = SimpleNamespace(
+        decode=lambda ids, **k: "".join(
+            {1: "hello", 2: " world", 3: "\ufffd", 151645: ""}[i] for i in ids
+        )
+    )
+    monkeypatch.setattr(stages, "_load_tokenizer", lambda _: tokenizer)
+    payload = StagePayload(
+        request_id="length",
+        request=SimpleNamespace(),
+        data=MossSpeechState(
+            output_modality="text",
+            output_grid=[[i, 512] for i in ids],
+            finish_reason="length",
+        ).to_dict(),
+    )
+    assert stages.create_text_decode_executor(".")._fn(payload).data["text"] == expected

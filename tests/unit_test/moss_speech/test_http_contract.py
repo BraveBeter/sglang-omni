@@ -254,3 +254,43 @@ def test_formal_kv_pool_matches_deployment_budget() -> None:
     overrides = ar.factory_args["server_args_overrides"]
     assert overrides["max_total_tokens"] == 4 * 1024
     assert overrides["max_running_requests"] == 4
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "audio",
+    [
+        "malformed",
+        [1],
+        [],
+        1,
+        0,
+        False,
+        None,
+        {"data": 42},
+        {"data": None},
+        {"data": []},
+    ],
+)
+def test_malformed_nested_audio_returns_400(stream, audio):
+    from sglang_omni.models.moss_speech.config import MossSpeechStreamingPipelineConfig
+
+    app = create_app(
+        SimpleNamespace(),
+        chat_request_validator=MossSpeechStreamingPipelineConfig.validate_chat_request,
+    )
+    with TestClient(app, raise_server_exceptions=False) as http:
+        response = http.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_audio", "input_audio": audio}],
+                    }
+                ],
+                "stream": stream,
+            },
+        )
+    assert response.status_code == 400, response.text
+    assert "input_audio" in response.json()["detail"]

@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import soundfile as sf
 import torch
-from quality import build_cases, error_counts, sha256, validate_pairs
+from quality import build_cases, comparison_text, error_counts, sha256, validate_pairs
 
 
 def acoustic_stats(path: Path) -> dict[str, Any]:
@@ -92,7 +92,7 @@ def main() -> None:
                 for name, result in (("reference", ref[rid]), ("native", nat[rid])):
                     if result.get("error"):
                         raise RuntimeError(result["error"])
-                    text = result["text"]
+                    text = comparison_text(result)
                     row[name] = dict(
                         finish_reason=result["finish_reason"], seconds=result["seconds"]
                     )

@@ -20,7 +20,12 @@ import torch
 import uvicorn
 
 from scripts.moss_speech.p4.validate_http import events
-from scripts.moss_speech.p5.quality import build_cases, sha256
+from scripts.moss_speech.p5.quality import (
+    TEXT_DECODE_PROFILE,
+    build_cases,
+    comparison_text,
+    sha256,
+)
 
 
 def digest(data: bytes) -> str:
@@ -209,6 +214,7 @@ async def run(args: Any, report: dict) -> None:
                         input_grid=state["input_grid"],
                         grid=state["output_grid"],
                         text=text,
+                        text_decode_profile=TEXT_DECODE_PROFILE,
                         finish_reason=finish[-1] if finish else None,
                         done_count=done,
                         finish_count=len(finish),
@@ -216,8 +222,9 @@ async def run(args: Any, report: dict) -> None:
                     )
                     row["matches_reference"] = all(
                         row[k] == expected[k]
-                        for k in ("input_grid", "grid", "text", "finish_reason")
+                        for k in ("input_grid", "grid", "finish_reason")
                     )
+                    row["matches_reference"] &= text == comparison_text(expected)
                     row["wire_complete"] = (
                         done == len(finish) == 1
                         and row["usage"] is not None

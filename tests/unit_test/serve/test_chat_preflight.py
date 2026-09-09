@@ -39,7 +39,10 @@ async def test_preflight_keeps_loop_responsive_before_admission():
             )
         )
         try:
+            deadline = asyncio.get_running_loop().time() + 5
             while not entered.is_set():
+                assert not task.done(), "request ended before preflight"
+                assert asyncio.get_running_loop().time() < deadline
                 await asyncio.sleep(0.001)
             # This coroutine can only release the validator if the loop is free.
             released.set()

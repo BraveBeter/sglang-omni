@@ -17,7 +17,74 @@ from typing import Any
 import httpx
 import psutil
 
-from scripts.moss_speech.p5.quality import build_cases, sha256
+from scripts.moss_speech.p5.quality import (
+    build_cases,
+    comparison_text,
+    reference_text_fields,
+    sha256,
+)
+
+
+def check_text_lengths(
+    http: httpx.Client, args: Any, refs: dict, streaming: bool
+) -> list[dict]:
+    """Compare actual HTTP text to prefixes of an immutable independent HF grid."""
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=False)
+    results = []
+    for case in build_cases(args.manifest):
+        if case["id"] not in ("en_00_t2t", "zh_00_t2t"):
+            continue
+        grid = refs[case["id"]]["grid"]
+        caps = {1, 2, 3}
+        # Exercise a real incomplete multibyte token when present in the reference.
+        for cap in range(1, min(len(grid), 32)):
+            if tokenizer.decode(
+                [row[0] for row in grid[:cap]], skip_special_tokens=True
+            ).endswith("\ufffd"):
+                caps.add(cap)
+                break
+        for cap in sorted(caps):
+            assert cap < len(grid)
+            expected = reference_text_fields(tokenizer, grid[:cap], audio_output=False)
+            body = {**case["body"], "max_tokens": cap, "stream": streaming}
+            text, finish, done = "", [], 0
+            if streaming:
+                with http.stream("POST", "/v1/chat/completions", json=body) as response:
+                    response.raise_for_status()
+                    for line in response.iter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        if line[6:] == "[DONE]":
+                            done += 1
+                            continue
+                        event = json.loads(line[6:])
+                        assert "error" not in event, event
+                        choice = event["choices"][0]
+                        text += choice["delta"].get("content") or ""
+                        if choice.get("finish_reason"):
+                            finish.append(choice["finish_reason"])
+                assert done == 1
+            else:
+                response = http.post("/v1/chat/completions", json=body)
+                response.raise_for_status()
+                result = response.json()
+                choice = result["choices"][0]
+                text = choice["message"].get("content") or ""
+                finish = [choice["finish_reason"]]
+                assert result["usage"]["completion_tokens"] == cap
+            assert finish == ["length"] and text == expected["service_text"], (
+                case["id"],
+                cap,
+                text,
+                expected,
+            )
+            results.append(
+                dict(id=case["id"], cap=cap, actual_text=text, **expected, pass_=True)
+            )
+    assert len(results) >= 6
+    return results
 
 
 def check_profile(args: Any, streaming: bool, report: dict[str, Any]) -> None:
@@ -135,12 +202,18 @@ def check_profile(args: Any, streaming: bool, report: dict[str, Any]) -> None:
                         assert encoded == expected.read_bytes(), f"Audio changed: {rid}"
                         (out / expected.name).write_bytes(encoded)
                     else:
-                        assert text == refs[rid]["text"], f"Text changed: {rid}"
+                        assert text == comparison_text(
+                            refs[rid]
+                        ), f"Text changed: {rid}"
                     report["results"].append(
                         {"id": rid, "pass": True, "bytes": len(encoded)}
                     )
                     print(out.name, rid, "passed", flush=True)
                 report["checks"]["four_modes"] = len(report["results"]) == 4
+                report["text_lengths"] = check_text_lengths(http, args, refs, streaming)
+                report["checks"]["text_lengths"] = all(
+                    r["pass_"] for r in report["text_lengths"]
+                )
                 if not streaming:
                     response = http.post(
                         "/v1/chat/completions", json={**body, "stream": True}
@@ -198,6 +271,7 @@ def main() -> None:
     report: dict[str, Any] = {
         "pass": False,
         "source_sha256": sha256(Path(__file__)),
+        "reference_sha256": sha256(args.reference),
         "profiles": {},
     }
     try:

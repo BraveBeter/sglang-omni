@@ -15,7 +15,7 @@ from typing import Any
 import httpx
 import torch
 import uvicorn
-from quality import build_cases, sha256, validate_pairs
+from quality import TEXT_DECODE_PROFILE, build_cases, sha256, validate_pairs
 
 from tests.test_model.moss_speech_ci_config import MossSpeechCiPreset
 
@@ -126,6 +126,7 @@ async def run(args: Any, report: dict[str, Any]) -> None:
                         input_grid=state["input_grid"],
                         grid=state["output_grid"],
                         text=state["generated_text"],
+                        text_decode_profile=TEXT_DECODE_PROFILE,
                         finish_reason=choice["finish_reason"],
                     )
                     if case["mode"].endswith("s"):

@@ -274,3 +274,17 @@ export MOSS_SPEECH_CI_OUTPUT="$PWD/artifacts/ci-new"
 bash sglang-omni/scripts/moss_speech/ci/run_gpu.sh
 # Use run_streaming_gpu.sh with a fresh output directory for the streaming lane.
 ```
+
+### Text at the output limit
+
+Text responses decode every generated text-channel token, including an ordinary
+last token when `finish_reason="length"`. Special tokens are filtered; trailing
+Unicode replacement characters from an incomplete byte sequence are withheld,
+matching the streaming terminal. Grid/usage counts retain those tokens.
+
+This integration behavior differs from the locked upstream processor, which
+unconditionally removes the last grid row before decoding. New reference exports
+retain that upstream result in `text`, and record `service_text` with profile
+`moss-full-grid-unicode-prefix-v1`. Grid parity and service-text parity are separate
+checks. Frozen P0–P6 reports are unchanged; unversioned reports retain their old
+comparison semantics. See the [audit remediation](../design/moss_speech/audit_20260909.md).

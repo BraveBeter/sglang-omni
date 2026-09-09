@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 import torch
-from quality import build_cases, sha256
+from quality import build_cases, reference_text_fields, sha256
 
 
 def main() -> None:
@@ -74,17 +74,14 @@ def main() -> None:
                     )
                 grid = output[0].cpu().tolist()
                 assert 0 < len(grid) <= 512 and all(len(x) == 2 for x in grid)
-                text = (
-                    processor.tokenizer.decode(
-                        [x[0] for x in grid[:-1]], skip_special_tokens=True
-                    )
-                    .replace("<|empty|>", ".")
-                    .replace("<|end_empty|>", ":")
-                )
                 row.update(
                     input_grid=canonical,
                     grid=grid,
-                    text="" if case["mode"].endswith("s") else text,
+                    **reference_text_fields(
+                        processor.tokenizer,
+                        grid,
+                        audio_output=case["mode"].endswith("s"),
+                    ),
                     finish_reason=(
                         "stop" if grid[-1][0] in (151643, 151645) else "length"
                     ),

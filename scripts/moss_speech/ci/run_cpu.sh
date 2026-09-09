@@ -6,6 +6,8 @@ cd "$repo_root"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 OMP_NUM_THREADS=1
 export PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}"
 python -m pytest -q \
+  tests/unit_test/moss_speech/test_preprocessing_lifetime.py \
+  tests/unit_test/serve/test_chat_preflight.py \
   tests/unit_test/moss_speech/test_request_contract.py \
   tests/unit_test/moss_speech/test_http_contract.py \
   tests/unit_test/moss_speech/test_codec_adapter_cpu.py \
