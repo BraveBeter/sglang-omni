@@ -33,3 +33,5 @@ openai==2.6.1
 av==17.1.0
 safetensors==0.8.0
 diffusers==0.37.0
+typer==0.27.2
+tomli==2.4.1; python_version < "3.11"

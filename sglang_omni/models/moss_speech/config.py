@@ -69,6 +69,24 @@ class MossSpeechPipelineConfig(PipelineConfig):
         # separate processes per the P1 placement decision D-3.
         return frozenset()
 
+    # Model-specific dynamic CLI options: --codec-path and --voice-wav.
+    codec_path: str | None = None
+    voice_wav: str | None = None
+
+    def model_post_init(self, __context: Any = None) -> None:
+        super().model_post_init(__context)
+        # Top-level asset options override serialized stage defaults on every
+        # config merge. Existing rendered configs remain valid when unset.
+        for stage in self.stages:
+            if self.codec_path is not None and stage.name in {
+                "preprocessing",
+                "ar_engine",
+                "audio_vocoder",
+            }:
+                stage.factory_args["codec_path"] = self.codec_path
+            if self.voice_wav is not None and stage.name == "preprocessing":
+                stage.factory_args["voice_wav"] = self.voice_wav
+
     model_path: str
     entry_stage: str | None = "preprocessing"
     stages: list[StageConfig] = [

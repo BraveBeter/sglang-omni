@@ -9,59 +9,68 @@ PyTorch attention. Uploaded voices, radix caching, CUDA Graph, compile,
 quantization and TP>1 are disabled. The pipeline uses one inline input encoder and
 separate text/audio terminals. Codec execution concurrency is1.
 
-## Environment and assets
+## Installation and model assets
 
-Commands below run from the workspace root containing the `sglang-omni/` checkout.
-Use a dedicated Python3.10 environment. The verified GPU profile is torch and
-torchaudio2.9.1+cu128, transformers5.12.1, SGLang0.5.16 and TorchCodec0.8.1.
-The existing `moss-speech` optional extra supplies the codec extras; diffusers0.37.0
-is also required by the vendored Matcha components. Installing the repository's
-newer torch2.11/CUDA13 default stack is a different, unqualified profile; do not
-upgrade a frozen parity environment as part of launching the server.
-
-The package/version receipt, CPU installation instructions and compatibility
-repair are documented in
-`sglang-omni/docs/design/moss_speech/p5/02_dependencies_and_rights.md`.
-Run `uv pip install --python .venv-omni/bin/python --no-deps -e sglang-omni`
-only after preparing that GPU dependency environment; `--no-deps` does not install
-its dependencies or certify an arbitrary existing environment.
-
-Stage assets online before entering a GPU allocation:
-
-- AR/tokenizer: `fnlp/MOSS-Speech` at cff025bb41d8459d59abac0b5e44aba7f659ec9e.
-- Codec: `fnlp/MOSS-Speech-Codec` at eeec733e4e1dea7da444d332d8e1621ef257414c,
-  including `flow/flow.pt`, `flow/hift.pt`, `flow/campplus.onnx` and config files.
-- A configured default voice WAV. Qualification uses
-  `repos/MOSS-Speech/assets/prompt-cn.wav` from the locked reference checkout.
-
-The old fnlp URLs resolve to OpenMOSS-Team. No `trust_remote_code` executes in the
-native serving path. Keep checkpoints local and do not bundle their weights with
-an integration release: checkpoint and HF-code redistribution terms remain
-unresolved in the provenance audit. The HF reference exporter alone needs the
-locked remote-code files and the separate `.venv-p0` environment.
-
-## Render and launch
-
-Avoid copying the workspace-specific paths from a checked-in example. Generate
-an explicit config using your local paths:
+Install the checkout containing MOSS-Speech support in your SGLang-Omni runtime
+by following [Installation](../get_started/installation.md). Include the
+`moss-speech` extra when installing from source. Commands below run from the
+parent directory of the `sglang-omni/` checkout:
 
 ```bash
-export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
-export HF_HOME=/remote-home1/xrluan/.cache/huggingface
-export TMPDIR=/dev/shm OMP_NUM_THREADS=1
-.venv-omni/bin/python sglang-omni/scripts/moss_speech/p5/make_config.py \
-  --model-path models/MOSS-Speech --codec-path models/MOSS-Speech-Codec \
-  --voice-wav repos/MOSS-Speech/assets/prompt-cn.wav \
-  --runtime-dir artifacts/moss-runtime --output artifacts/moss.yaml
-# Run the serving command inside a Slurm GPU allocation.
-.venv-omni/bin/python -m sglang_omni.cli serve \
-  --config artifacts/moss.yaml --host 127.0.0.1 --port 8000
+uv pip install -e './sglang-omni[moss-speech]'
+sglang-omni serve --help
 ```
 
-All inference requires an allocated GPU. `/health` reports readiness; use SIGTERM
-or Ctrl-C for complete child-process shutdown. The config generator emits full
-stage factory arguments because compact `stage_overrides` currently accepts only
-runtime overrides. Model, codec and voice paths are independently configurable.
+`sglang-omni` and `sgl-omni` are equivalent installed console commands. Use either
+in your existing runtime or container; serving does not require a specially
+named virtual environment, a Python module command, or a generated YAML file.
+If upgrading an existing checkout, reinstall the package to register the new
+`sglang-omni` alias. The `moss-speech` extra supplies the codec dependencies;
+model weights are downloaded separately.
+
+Download the qualified model and codec revisions on a network-enabled machine:
+
+```bash
+hf download OpenMOSS-Team/MOSS-Speech \
+  --revision cff025bb41d8459d59abac0b5e44aba7f659ec9e \
+  --local-dir models/MOSS-Speech
+hf download OpenMOSS-Team/MOSS-Speech-Codec \
+  --revision eeec733e4e1dea7da444d332d8e1621ef257414c \
+  --local-dir models/MOSS-Speech-Codec
+```
+
+Provide a local default-voice WAV, shown as `voice.wav` below. This is a server
+asset used to condition speech output; it is separate from user speech input.
+The server needs the AR/tokenizer directory, the full codec directory and this
+voice file. No reference-source checkout is required for serving. The native
+path does not execute `trust_remote_code`.
+
+## Start the server
+
+On a GPU host, launch directly with local asset paths:
+
+```bash
+sglang-omni serve \
+  --model-path models/MOSS-Speech \
+  --codec-path models/MOSS-Speech-Codec \
+  --voice-wav voice.wav \
+  --host 127.0.0.1 --port 8000
+```
+
+`--model-path` discovers the MOSS-Speech pipeline automatically. `--codec-path`
+and `--voice-wav` are model-specific configuration options handled by the normal
+CLI. Relative asset paths are relative to the launch directory. The codec path
+may be omitted when it is the sibling `<model-path>-Codec` directory. Explicit
+voice configuration takes precedence over `MOSS_SPEECH_VOICE_WAV`, which remains
+available for existing deployments.
+
+A portable optional preset is available at
+`sglang-omni/examples/configs/moss_speech.yaml`; pass it with `--config` and the
+same asset options if you prefer file-based configuration. The file contains
+no operator-specific paths. `/health` reports readiness; SIGTERM or Ctrl-C stops
+the server and its workers. On Slurm, run the command inside an allocated GPU
+job. For offline deployment, download assets first and set `HF_HUB_OFFLINE=1`
+and `TRANSFORMERS_OFFLINE=1`.
 
 ## Four-mode requests
 
@@ -115,19 +124,20 @@ including template/input-audio positions. A disconnect aborts outstanding work.
 
 ## Explicit streaming variant
 
-P6 qualifies chunk5 streaming on the A80080GB profile. The default P5 YAML
-continues to reject streaming; the capability declaration describes availability
-of the separate variant.
-Render the separate profile and launch it with the same serving command:
+For incremental output, select the supplied streaming preset. It uses the same
+asset options and installed console command:
 
 ```bash
-.venv-omni/bin/python sglang-omni/scripts/moss_speech/p6/make_config.py \
-  --model-path models/MOSS-Speech --codec-path models/MOSS-Speech-Codec \
-  --voice-wav repos/MOSS-Speech/assets/prompt-cn.wav \
-  --runtime-dir artifacts/moss-stream-runtime --output artifacts/moss-stream.yaml
-.venv-omni/bin/python -m sglang_omni.cli serve \
-  --config artifacts/moss-stream.yaml --host 127.0.0.1 --port 8000
+sglang-omni serve \
+  --config sglang-omni/examples/configs/moss_speech_streaming.yaml \
+  --model-path models/MOSS-Speech \
+  --codec-path models/MOSS-Speech-Codec \
+  --voice-wav voice.wav \
+  --host 127.0.0.1 --port 8000
 ```
+
+The default pipeline rejects `stream=True`; the streaming preset enables it
+explicitly. No config-generation step is needed.
 
 This requires `flow/flow-chunk-5.pt` in addition to the offline codec assets.
 Chunk25 is component-tested separately; the HTTP baseline uses chunk5. The
@@ -221,51 +231,46 @@ can break inactive-audio ties. P5 documents and retains that failed comparison;
 it neither exempts those tokens nor modifies P3 expected grids. See P5 protocol
 AppendixA for the explicit reference configuration.
 
-## Quality benchmark and CI
+## Qualification and developer reproduction
 
-Prepare the pinned bilingual sample and independent ASR checkpoint on a node
-with network access:
+The measurements above use the recorded A800 profile: Python3.10,
+torch/torchaudio2.9.1+cu128, transformers5.12.1, SGLang0.5.16 and TorchCodec0.8.1.
+The installation guide's newer default CUDA13/torch2.11 stack is a separate
+dependency profile; these numbers do not qualify that stack. Environment names
+used in experiment receipts are not serving requirements.
+
+The fixed regression set contains eight bilingual rows, four unique source
+audios and32 mode requests. All32 AR outputs and16 audio outputs agree with their
+independent same-profile references. Chinese T2S CER is38.75%; two S2S responses
+reach the512-row budget. No human MOS or calibrated quality/performance threshold
+is claimed. Checkpoint/HF-code redistribution terms remain unresolved; weights
+are not bundled with the integration.
+
+For reproduction and CI rather than ordinary server launch, see:
+
+- `sglang-omni/docs/design/moss_speech/cli_launch.md`: installed console commands,
+  noninteractive startup and four-mode launch verification.
+- `sglang-omni/docs/design/moss_speech/p5/02_dependencies_and_rights.md`: exact
+  tested dependencies and provenance.
+- `sglang-omni/docs/design/moss_speech/p5/05_gate_report.md`: offline quality and
+  benchmark/CPU/GPU CI commands.
+- `sglang-omni/docs/design/moss_speech/p6/02_reproduction.md`: streaming codec,
+  full HTTP regression, independent ASR and aggregation commands.
+- `sglang-omni/docs/design/moss_speech/p6/03_gate_report.md`: streaming results,
+  measured boundaries and retained diagnostic failures.
+
+
+The developer GPU CI entry accepts explicit assets and an already generated
+independent reference report. Run it in the installed runtime on an allocated
+GPU; it launches and stops its own service:
 
 ```bash
-mkdir -p artifacts/download-tmp
-PYTHONPATH="$PWD/sglang-omni" TMPDIR="$PWD/artifacts/download-tmp" \
-  .venv-omni/bin/python sglang-omni/scripts/moss_speech/p5/prepare_assets.py \
-  --out-dir artifacts/p5/seedtts --asr-dir models/eval
-```
-
-The default subset is the first four rows
-per language, including repeated source recordings:8 rows,4 unique source audios,
-32 mode requests. It is a small regression sample, not a full SeedTTS result.
-The independent reference exporter uses `.venv-p0` with the locked MOSS-Speech
-and Matcha checkouts on PYTHONPATH. Run reference generation, native generation,
-and independent Whisper scoring in separate GPU stages; command templates are
-in `sglang-omni/scripts/moss_speech/p5/` and the final gate report.
-
-```bash
-# GPU-free; can use the separately installed CPU requirements.
-PATH="$PWD/.venv-p5-cpu/bin:$PATH" \
-  bash sglang-omni/scripts/moss_speech/ci/run_cpu.sh
-
-# In an allocated GPU job, with the independent reference already produced:
 export MOSS_SPEECH_MODEL_DIR="$PWD/models/MOSS-Speech"
 export MOSS_SPEECH_CODEC_DIR="$PWD/models/MOSS-Speech-Codec"
-export MOSS_SPEECH_VOICE_WAV="$PWD/repos/MOSS-Speech/assets/prompt-cn.wav"
+export MOSS_SPEECH_VOICE_WAV="$PWD/voice.wav"
 export MOSS_SPEECH_MANIFEST="$PWD/artifacts/p5/seedtts/manifest.json"
 export MOSS_SPEECH_REFERENCE="$PWD/artifacts/p5/reference/report.json"
-export MOSS_SPEECH_CI_OUTPUT="$PWD/artifacts/p5/ci-new"
-PATH="$PWD/.venv-omni/bin:$PATH" \
-  bash sglang-omni/scripts/moss_speech/ci/run_gpu.sh
+export MOSS_SPEECH_CI_OUTPUT="$PWD/artifacts/ci-new"
+bash sglang-omni/scripts/moss_speech/ci/run_gpu.sh
+# Use run_streaming_gpu.sh with a fresh output directory for the streaming lane.
 ```
-
-Missing assets fail immediately. The workflow runs CPU contracts; the GPU entry
-is explicitly operated on staged assets. Local A800 passes do not claim hosted
-CI calibration. Quality/performance thresholds remain disabled, without invented
-placeholder numbers; functional, full-grid and finite/nonempty waveform gates
-remain mandatory. Report English WER/Chinese CER, reference differences and
-truncations; human MOS is unassessed.
-
-Final measured quality, including Chinese T2S CER38.75% and two truncated S2S
-requests, is in `sglang-omni/docs/design/moss_speech/p5/04_quality.md`.
-Reference and native agree exactly on these cases; agreement does not establish
-a dedicated transcription/reading quality guarantee. Full reproduction and
-evidence: `sglang-omni/docs/design/moss_speech/p5/05_gate_report.md`.

@@ -1,0 +1,5 @@
+# Opt-in chunk5 streaming on the measured A800-80GB profile.
+# Override assets directly with --model-path, --codec-path and --voice-wav.
+# The model defaults own routing, worker allocation, and request budgets.
+config_cls: MossSpeechStreamingPipelineConfig
+model_path: models/MOSS-Speech
