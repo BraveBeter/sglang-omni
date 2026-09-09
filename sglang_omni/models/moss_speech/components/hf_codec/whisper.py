@@ -432,7 +432,10 @@ class WhisperVQEncoder(WhisperPreTrainedModel):
         conv2_cache: Optional[torch.Tensor] = None,
     ):
         return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
+            return_dict
+            if return_dict is not None
+            else self.config.return_dict
+            and not getattr(self.config, "torchscript", False)
         )
         output_attentions = (
             output_attentions

@@ -5,6 +5,8 @@ from __future__ import annotations
 import subprocess
 import sys
 
+import pytest
+
 
 def test_capabilities_match_qualified_features() -> None:
     from sglang_omni.models.moss_speech import CAPABILITIES
@@ -81,3 +83,29 @@ def test_hf_config_registers_and_parses_locked_checkpoint() -> None:
     assert parsed.num_hidden_layers == 36
     assert parsed.vocab_size == 151680 and parsed.audio_vocab_size == 16512
     assert parsed.channels == 2 and parsed.audio_pad_token_id == 512
+
+
+@pytest.mark.parametrize("scaling", [None, {"rope_type": "linear", "factor": 2.0}])
+def test_hf_rope_validation_preserves_parameters_without_deprecation(scaling):
+    import warnings
+
+    from sglang_omni.models.moss_speech.hf_config import MossSpeechConfig
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message=".*rope_config_validation.*")
+        config = MossSpeechConfig(rope_scaling=scaling)
+        restored = MossSpeechConfig.from_dict(config.to_dict())
+    assert restored.rope_theta == config.rope_theta == 10000.0
+    for value in (config, restored):
+        params = getattr(value, "rope_parameters", value.rope_scaling)
+        if scaling is not None:
+            assert params["rope_type"] == "linear" and params["factor"] == 2.0
+        elif params is not None:
+            assert params["rope_type"] == "default"
+
+
+def test_hf_rope_validation_still_rejects_missing_factor():
+    from sglang_omni.models.moss_speech.hf_config import MossSpeechConfig
+
+    with pytest.raises(KeyError, match="factor"):
+        MossSpeechConfig(rope_scaling={"rope_type": "linear"})

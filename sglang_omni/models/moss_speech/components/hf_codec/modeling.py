@@ -240,7 +240,7 @@ class AudioDecoder(nn.Module):
         session_options.intra_op_num_threads = 1
         self.campplus_session = onnxruntime.InferenceSession(
             str(campplus_model),
-            sess_opts=session_options,
+            sess_options=session_options,
             providers=["CPUExecutionProvider"],
         )
         self.speech_window = np.hamming(2 * self.source_cache_len)

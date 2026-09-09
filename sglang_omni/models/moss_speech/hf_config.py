@@ -7,12 +7,9 @@ Faithful port of the locked `configuration_moss_speech.py` from
 under its ``model_type``.
 
 Deviations from the source (documented; no semantic change):
-1. transformers>=5 removed ``rope_config_validation`` /
-   ``layer_type_validation`` module functions (moved onto
-   ``PreTrainedConfig`` as ``validate_rope`` / ``validate_layer_type``).
-   Compat shims call the new methods when present and no-op otherwise —
-   the locked checkpoint sets no rope scaling and default layer types, so
-   validation outcomes are identical.
+1. Prefer modern ``PreTrainedConfig`` RoPE normalization and validation
+   methods, with the legacy free-function fallback for transformers 4.x.
+   Layer-type validation remains standalone for compatibility.
 2. Checkpoint fields are preserved verbatim, including
    ``num_hidden_layers=36`` (32 shared + 4 modality per the config's own
    invariant). The 40-layer (32+4+4) KV accounting is a P3 memory-pool
@@ -26,16 +23,19 @@ from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
-try:  # transformers < 5
-    from transformers.modeling_rope_utils import (
-        rope_config_validation as _rope_config_validation,
-    )
-except ImportError:  # transformers >= 5: moved to PreTrainedConfig.validate_rope
 
-    def _rope_config_validation(config: PretrainedConfig) -> None:
-        validate = getattr(config, "validate_rope", None)
-        if validate is not None:
-            validate()
+def _rope_config_validation(config: PretrainedConfig) -> None:
+    # New releases may retain the deprecated free function, so prefer the
+    # instance API while preserving its normalization-before-validation order.
+    standardize = getattr(config, "standardize_rope_params", None)
+    validate = getattr(config, "validate_rope", None)
+    if callable(standardize) and callable(validate):
+        standardize()
+        validate()
+    else:
+        from transformers.modeling_rope_utils import rope_config_validation
+
+        rope_config_validation(config)
 
 
 def _layer_type_validation(layer_types: list[str]) -> None:
