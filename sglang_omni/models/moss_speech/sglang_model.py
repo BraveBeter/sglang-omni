@@ -4,7 +4,7 @@
 Dual-channel (text/audio) decoder: shared 32-layer trunk, two independent
 4-layer tails (text layer ids 32-35, audio 36-39) each with its own final
 RMSNorm and LM head. One grid row == one KV position in all 40 attention
-layers (see docs/design/moss_speech/p3/01_native_design.md §2-3).
+layers.
 
 Weight mapping (checkpoint -> module), 446 source tensors, all consumed:
 
@@ -45,7 +45,7 @@ from sglang.srt.models.qwen3 import Qwen3DecoderLayer
 
 logger = logging.getLogger(__name__)
 
-# Token ids frozen by MODEL_CONTRACT / P3-01 §2.
+# Token IDs from the locked checkpoint configuration.
 MODALITY_PAD_ID = 151667
 
 

@@ -2,8 +2,7 @@
 """HF config port for MOSS-Speech (P2/T2.2).
 
 Faithful port of the locked `configuration_moss_speech.py` from
-`fnlp/MOSS-Speech` @ snapshot `cff025bb` (see
-docs/design/moss_speech/p0/01_version_lock.md). SGLang does not execute
+`OpenMOSS-Team/MOSS-Speech` @ snapshot `cff025bb`. SGLang does not execute
 ``trust_remote_code``, so the config class is vendored here and registered
 under its ``model_type``.
 

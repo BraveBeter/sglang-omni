@@ -1,7 +1,9 @@
 # MOSS-Speech P0 Golden Fixtures
 
-Parity ground truth exported from the locked reference (see
-`docs/design/moss_speech/MODEL_CONTRACT.md` and `p0/01_version_lock.md`).
+Historical FP32 fixtures exported from MOSS-Speech revision
+`cff025bb41d8459d59abac0b5e44aba7f659ec9e`, codec revision
+`eeec733e4e1dea7da444d332d8e1621ef257414c`, and the reference driver
+`OpenMOSS/MOSS-Speech@1ea408a10d07b9fdc7a27bce19d1211b62067784`.
 
 ## Generation settings
 
@@ -28,7 +30,7 @@ Cases: `t2t_short`, `t2s_cn`, `s2s_cn`, `s2t_cn`, `mixed_multiturn` (fixed-liter
 - `mixed_multiturn` exercises per-turn processor dispatch over mixed text/audio history; `s2*` cases exercise codec encode of user audio.
 
 - P3 native greedy targets are the separate explicit-BF16 `artifacts/p3/reference/` grids, not these P0 FP32 grids. Missing long-case captures are supplemented in `artifacts/p3/reference_complete_3838/`, with original grid and capture hashes unchanged. P0 files are preserved for processor/codec and historical regression.
-- Final native validation: `sglang-omni/docs/design/moss_speech/p3/03_gate_report.md`. No native result is used to replace a reference expected value.
+- Native parity requires an independently generated BF16 reference. These P0 FP32 grids are not its expected output; no native result replaces a reference value.
 
 ## Archived large captures
 

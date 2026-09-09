@@ -2,8 +2,20 @@
 
 All vendored code serves the MOSS-Speech codec inference closure only. Each
 subtree keeps its upstream license; numerics of kept methods are unchanged
-unless a deviation is listed. Locked revisions: see
-`docs/design/moss_speech/p0/01_version_lock.md`.
+unless a deviation is listed. Locked sources:
+
+| Source | Revision |
+|---|---|
+| OpenMOSS-Team/MOSS-Speech (model, tokenizer, HF configuration/processor) | `cff025bb41d8459d59abac0b5e44aba7f659ec9e` |
+| OpenMOSS-Team/MOSS-Speech-Codec (HF codec code and weights) | `eeec733e4e1dea7da444d332d8e1621ef257414c` |
+| OpenMOSS/MOSS-Speech (GitHub reference driver and CosyVoice subset) | `1ea408a10d07b9fdc7a27bce19d1211b62067784` |
+| shivammehta25/Matcha-TTS | `bd4d90d93214b37f7a159cf205ae85762c2c10aa` |
+
+The locked HF snapshots do not contain a license file. The GitHub source's
+Apache-2.0 declaration does not establish terms for the separate checkpoints
+or automatically resolve the HF codec source terms. Applicability remains
+unconfirmed; do not infer redistribution permission. No weights are bundled.
+Preserve the Apache-2.0 / MIT notices with the corresponding vendored sources.
 
 ## matcha_components/ ← shivammehta25/Matcha-TTS @ bd4d90d (MIT)
 
@@ -28,7 +40,7 @@ unless a deviation is listed. Locked revisions: see
 | `utils_common.py` | `cosyvoice/utils/common.py` | kept `set_all_random_seed`, `mask_to_bias`, `get_padding`, `init_weights` only |
 | `utils_mask.py` | `cosyvoice/utils/mask.py` | none |
 
-## hf_codec/ ← fnlp/MOSS-Speech-Codec snapshot eeec733e (license: no file upstream — Apache-2.0 assumed pending MOSS confirmation)
+## hf_codec/ ← OpenMOSS-Team/MOSS-Speech-Codec snapshot eeec733e (terms unconfirmed)
 
 | file | source | deviations |
 |---|---|---|

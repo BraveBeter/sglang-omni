@@ -1,8 +1,7 @@
 # SPDX-License: Apache-2.0
 """Request building & canonical lowering for MOSS-Speech (P2/T2.3).
 
-Pure-CPU normalize/validate implementing the P2 chat contract
-(`docs/design/moss_speech/p2/01_chat_contract.md` §3/§6). The preprocessing
+Pure-CPU chat normalization and validation. The preprocessing
 stage calls :func:`normalize_and_validate` before any codec/GPU work; the
 AR-facing builder and routing helpers live here too.
 

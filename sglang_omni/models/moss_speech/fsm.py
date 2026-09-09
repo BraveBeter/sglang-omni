@@ -2,8 +2,7 @@
 """MOSS-Speech FSM and dual-channel sampling (locked reference semantics).
 
 Every rule here is code-verified against the reference revision
-(modeling_moss_speech.py, MossSpeechGenerationMixin; see
-docs/design/moss_speech/p3/01_native_design.md §2.2-2.3):
+(modeling_moss_speech.py, MossSpeechGenerationMixin, HF revision cff025bb):
 
 - Mode transition is evaluated BEFORE the forward of each step, reading the
   last appended grid row:

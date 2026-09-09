@@ -12,8 +12,9 @@ GitHub repo, feat/docs @ 1ea408a) with three minimal, documented deviations:
 3. No gradio UI: uses the `Inference` engine directly (gradio is still imported
    transitively by `utils.interface` at module top level).
 
-Runs on a Slurm compute node in offline mode. See
-docs/design/moss_speech/p0/{01_version_lock,02_deps}.md for environment details.
+Runs on a Slurm compute node in offline mode. The locked reference uses
+transformers 4.57.1 and torch/torchaudio 2.9.1; put the MOSS-Speech and
+Matcha-TTS source checkouts on PYTHONPATH before running.
 """
 
 from __future__ import annotations

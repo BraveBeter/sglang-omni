@@ -3,8 +3,7 @@
 
 Model-input semantics only: official chat-template segment construction and
 the (B, L, 2) token grid with left-padded collate, faithful to the locked
-reference processor (`processing_moss_speech.py` @ cff0d0b, see
-docs/design/moss_speech/p0/MODEL_CONTRACT.md §3). Codec encoding lives in
+reference processor (`processing_moss_speech.py` @ cff025bb). Codec encoding lives in
 the P1 adapter and is NOT duplicated here — this module consumes per-turn
 codes produced by preprocessing.
 

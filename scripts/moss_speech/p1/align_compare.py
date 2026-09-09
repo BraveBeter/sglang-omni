@@ -2,8 +2,8 @@
 """Frozen-rule comparison for the T1.3 alignment run (A1–A9).
 
 Consumes artifacts/p1/alignment/{reference,adapter}/* and emits
-machine-readable pass/fail with diagnostics. Rules are frozen in
-docs/design/moss_speech/p1/02_alignment.md and must not be relaxed here.
+machine-readable pass/fail with diagnostics. The explicit assertions below
+implement the frozen alignment rules; do not loosen them to fit native results.
 """
 
 from __future__ import annotations

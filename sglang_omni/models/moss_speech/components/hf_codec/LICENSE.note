@@ -1,4 +1,6 @@
-Source: fnlp/MOSS-Speech-Codec HF snapshot eeec733e4e1dea7da444d332d8e1621ef257414c.
-The upstream HF repo ships no LICENSE file (recorded as a P0 open item);
-code in this directory is a trimmed inference port. Treat as Apache-2.0
-pending confirmation with the MOSS team (same as the model repo code).
+Source: OpenMOSS-Team/MOSS-Speech-Codec HF snapshot eeec733e4e1dea7da444d332d8e1621ef257414c.
+The locked HF snapshot contains no LICENSE file. This directory is a trimmed
+inference port; applicability of the GitHub MOSS-Speech code license to these
+separate HF sources remains unconfirmed. Do not assume redistribution permission
+or extend a code license to checkpoint weights. See the parent VENDORED_SOURCES.md
+for source revisions and modifications. This note is not a license grant.

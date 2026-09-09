@@ -14,7 +14,7 @@ from typing import Any, Optional
 
 from sglang_omni.scheduling.pipeline_state import DeclarativeStateBase, wire
 
-# Reference token/grid constants (MODEL_CONTRACT §3).
+# Reference token/grid constants from the locked checkpoint.
 SOSP_TOKEN_ID = 151646
 EOSP_TOKEN_ID = 16384
 MODALITY_PAD_TOKEN_ID = 151667
