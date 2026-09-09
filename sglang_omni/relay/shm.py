@@ -67,7 +67,7 @@ class ShmPutOperation(ShmOperation):
             return
         try:
             await asyncio.wait_for(self._receiver_done, timeout=timeout)
-        except TimeoutError as exc:
+        except asyncio.TimeoutError as exc:
             self._unlink_if_present()
             raise TimeoutError(
                 f"SHM block {self._shm_name} was not consumed in time"
