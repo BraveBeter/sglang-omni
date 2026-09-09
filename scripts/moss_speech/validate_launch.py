@@ -90,8 +90,8 @@ def check_text_lengths(
 def check_profile(args: Any, streaming: bool, report: dict[str, Any]) -> None:
     out = args.out_dir / ("streaming" if streaming else "offline")
     out.mkdir()
-    executable = shutil.which("sglang-omni")
-    assert executable, "Install the checkout so sglang-omni is on PATH"
+    executable = shutil.which("sgl-omni")
+    assert executable, "Install the checkout so sgl-omni is on PATH"
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]

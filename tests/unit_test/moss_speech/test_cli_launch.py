@@ -100,14 +100,15 @@ def test_cli_asset_overrides_survive_config_roundtrip_without_cross_instance_lea
     assert legacy.stages[0].factory_args["voice_wav"] == "legacy.wav"
 
 
-def test_both_console_names_use_the_same_app() -> None:
+def test_model_reuses_existing_console_entry() -> None:
     try:
         import tomllib
     except ModuleNotFoundError:
         import tomli as tomllib
     project = tomllib.loads((REPO / "pyproject.toml").read_text())
     scripts = project["project"]["scripts"]
-    assert scripts["sglang-omni"] == scripts["sgl-omni"] == "sglang_omni.cli:app"
+    assert scripts["sgl-omni"] == "sglang_omni.cli:app"
+    assert "sglang-omni" not in scripts
 
 
 @pytest.mark.parametrize("name", ["moss_speech", "moss_speech_streaming"])

@@ -117,7 +117,6 @@ moss-speech = [
 
 [project.scripts]
 sgl-omni = "sglang_omni.cli:app"
-sglang-omni = "sglang_omni.cli:app"
 sgl-omni-router = "sglang_omni_router.serve:main"
 
 [project.entry-points."sglang.serve_backends"]
