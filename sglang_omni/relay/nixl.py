@@ -17,18 +17,25 @@ logger = logging.getLogger(__name__)
 # ==========================================
 # Dependency Check
 # ==========================================
+_NIXL_IMPORT_ERROR: ImportError | None = None
 try:
     from nixl._api import nixl_agent as NixlAgent
     from nixl._api import nixl_agent_config
 
     NIXL_AVAILABLE = True
 except ImportError as e:
-    logger.error(f"Failed to import nixl: {e}. NixlRelay will not work.")
+    logger.debug("Failed to import nixl: %s. NixlRelay will not work.", e)
+    _NIXL_IMPORT_ERROR = e
     NIXL_AVAILABLE = False
 
 
 class Connection:
     def __init__(self, engine_id: str, num_threads: int = 2):
+        if not NIXL_AVAILABLE:
+            raise ImportError(
+                "The nixl relay requires the optional nixl package and its native "
+                "dependencies. Install them or select another relay backend."
+            ) from _NIXL_IMPORT_ERROR
         self.name = engine_id
         config = nixl_agent_config(num_threads=num_threads)
         self._nixl = NixlAgent(str(uuid.uuid4()), config)

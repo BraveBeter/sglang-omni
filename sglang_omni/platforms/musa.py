@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 try:
     import torchada  # noqa: F401
 except ImportError as exc:
-    logger.warning(
+    logger.debug(
         f"Failed to import torchada: {exc}. MUSA platform compatibility will not work."
     )
 
