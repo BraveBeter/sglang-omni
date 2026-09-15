@@ -10,6 +10,8 @@ python -m pytest -q \
   tests/unit_test/serve/test_chat_preflight.py \
   tests/unit_test/moss_speech/test_request_contract.py \
   tests/unit_test/moss_speech/test_http_contract.py \
+  tests/unit_test/moss_speech/test_speech_endpoints.py \
+  tests/unit_test/serve/test_speech_errors.py \
   tests/unit_test/moss_speech/test_codec_adapter_cpu.py \
   tests/unit_test/moss_speech/test_parity_metrics_cpu.py \
   tests/unit_test/moss_speech/test_p5_qualification.py \

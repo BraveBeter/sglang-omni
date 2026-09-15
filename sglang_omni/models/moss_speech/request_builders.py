@@ -92,6 +92,12 @@ def _request_generate(request: OmniRequest) -> Any:
     from sglang_omni.client.types import SamplingParams
 
     inputs = request.inputs
+    if (request.metadata or {}).get("task") in ("tts", "asr") and (
+        isinstance(inputs, str) or isinstance(inputs, dict) and "audio_bytes" in inputs
+    ):
+        from .audio_tasks import restore_audio_task_request
+
+        return restore_audio_task_request(request)
     if not isinstance(inputs, list) and not request.params and not request.metadata:
         return _as_generate_request(inputs)
     if isinstance(inputs, dict) and "sampling" in inputs:
@@ -209,6 +215,10 @@ def normalize_and_validate(
     §6 before any GPU/codec work.
     """
     gen = _request_generate(request)
+    if (gen.metadata or {}).get("task") in ("tts", "asr"):
+        from .audio_tasks import lower_audio_task
+
+        gen = lower_audio_task(gen)
 
     sampling = getattr(gen, "sampling", None)
     for name in ("temperature", "top_p", "repetition_penalty", "min_p"):
