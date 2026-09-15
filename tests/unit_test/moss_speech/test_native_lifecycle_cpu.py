@@ -221,3 +221,81 @@ def test_rope_frequency_initialization_is_cpu_float32():
 def test_out_of_vocabulary_native_input_rejected_on_cpu(rows):
     with pytest.raises(ValueError):
         make_data(input_grid=rows, attention_mask=[1])
+
+
+def test_cached_linear_retains_reference_matrix_rows(monkeypatch):
+    from sglang_omni.models.moss_speech.sglang_model import request_linear
+
+    x = torch.randn(3, 8)
+    weight = torch.randn(4, 8)
+    original = torch.nn.functional.linear
+    shapes = []
+
+    def linear(x, w):
+        shapes.append(x.shape[0])
+        return original(x, w)
+
+    monkeypatch.setattr(torch.nn.functional, "linear", linear)
+    result = request_linear(x, weight, [2, 1], prefixes=[7, 3])
+    assert shapes == [9, 4]
+    torch.testing.assert_close(result, original(x, weight))
+
+
+def test_mixed_modalities_opt_in_admits_and_releases_independently():
+    from sglang_omni.models.moss_speech.engine_builder import MossSpeechEngineBuilder
+    from sglang_omni.scheduling.types import DeferredAdmission
+
+    builder = MossSpeechEngineBuilder(mixed_modalities=True)
+    rb, _ = builder.make_adapters(None)
+    source = make_data().stage_payload
+    live = []
+    for rid, modality in [("t1", "text"), ("a1", "audio"), ("t2", "text")]:
+        data = rb(
+            StagePayload(
+                request_id=rid,
+                request=SimpleNamespace(),
+                data={**source.data, "output_modality": modality},
+            )
+        )
+        assert not isinstance(data, DeferredAdmission)
+        live.append(data)
+    assert builder.request_lifecycle.snapshot() == {
+        "requests": 3,
+        "active": 3,
+        "pending": 0,
+    }
+    live[1].output_rows.append((151667, 12))
+    builder.make_abort_callback()("a1")
+    builder.make_abort_callback()("a1")
+    assert builder.request_lifecycle.snapshot() == {
+        "requests": 2,
+        "active": 2,
+        "pending": 0,
+    }
+    assert not live[1].output_rows
+    for rid in ["t1", "t2"]:
+        builder.make_request_finished_callback()(rid)
+    assert builder.request_lifecycle.snapshot() == {
+        "requests": 0,
+        "active": 0,
+        "pending": 0,
+    }
+
+
+def test_cached_norm_preserves_full_reduction_shape():
+    from sglang_omni.models.moss_speech.sglang_model import request_norm
+
+    calls = []
+
+    def norm(x, residual=None):
+        calls.append(tuple(x.shape))
+        value = x if residual is None else x + residual
+        result = value / (value.square().mean(-1, keepdim=True) + 1e-6).sqrt()
+        return result if residual is None else (result, value)
+
+    x = torch.randn(3, 4, 8)
+    residual = torch.randn_like(x)
+    result, summed = request_norm(norm, x, [2, 1], residual, prefixes=[7, 3])
+    assert calls == [(9, 4, 8), (4, 4, 8)]
+    torch.testing.assert_close(summed, x + residual)
+    torch.testing.assert_close(result, norm(x, residual)[0])

@@ -237,3 +237,46 @@ def test_arch_key_matches_hf_architectures():
         "architectures"
     ]
     assert ARCH_KEY in hf_archs
+
+
+@pytest.mark.parametrize("prefixes", [[0, 0], [5, 3]])
+def test_cached_prefill_heads_keep_full_prompt_gemm_shapes(monkeypatch, prefixes):
+    """Cached rows must not change the BF16 head kernel's matrix dimensions."""
+    import sglang_omni.models.moss_speech.sglang_model as module
+
+    model = make_tiny_model()
+    model._last_request_lengths = [2, 1]
+    model._last_prefix_lengths = prefixes
+    model._last_head_indices = torch.tensor([1, 2])
+    model._last_text_hidden = torch.randn(3, TINY["hidden_size"])
+    model._last_audio_hidden = torch.randn(3, TINY["hidden_size"])
+    model.text_lm_head.float()
+    model.audio_lm_head.float()
+    with torch.no_grad():
+        model.text_lm_head.weight.normal_(std=0.02)
+        model.audio_lm_head.weight.normal_(std=0.02)
+    original = module.request_linear
+    calls = []
+
+    def linear(x, weight, lengths):
+        calls.append((list(lengths), x.clone()))
+        return original(x, weight, lengths)
+
+    monkeypatch.setattr(module, "request_linear", linear)
+    output = model.compute_dual_logits()
+    expected_lengths = [p + n for p, n in zip(prefixes, [2, 1])]
+    assert [lengths for lengths, _ in calls] == [expected_lengths] * 2
+    for hidden, (_, packed) in zip(
+        [model._last_text_hidden, model._last_audio_hidden], calls
+    ):
+        for part, suffix, prefix in zip(
+            packed.split(expected_lengths), hidden.split([2, 1]), prefixes
+        ):
+            torch.testing.assert_close(part[prefix:], suffix)
+            assert torch.count_nonzero(part[:prefix]) == 0
+    for logits, hidden, head in [
+        (output.text_logits, model._last_text_hidden, model.text_lm_head),
+        (output.audio_logits, model._last_audio_hidden, model.audio_lm_head),
+    ]:
+        expected = torch.nn.functional.linear(hidden[[1, 2]], head.weight)
+        torch.testing.assert_close(logits, expected)

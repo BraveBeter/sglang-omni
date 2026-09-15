@@ -74,3 +74,17 @@ def test_t34_adapters_wired():
 def test_builder_rejects_unqualified_attention_and_remote_config(overrides):
     with pytest.raises(ValueError, match="rejects"):
         MossSpeechEngineBuilder().adjust_overrides(overrides)
+
+
+def test_prefix_cache_is_opt_in_without_enabling_other_features():
+    builder = MossSpeechEngineBuilder(prefix_cache=True)
+    defaults = builder.generation_defaults()
+    assert defaults["disable_radix_cache"] is False
+    assert defaults["disable_cuda_graph"] is True
+    overrides = {}
+    builder.adjust_overrides(overrides)
+    assert overrides["disable_radix_cache"] is False
+    assert overrides["tp_size"] == 1
+    builder.validate_before_infrastructure(_server_args(disable_radix_cache=False))
+    with pytest.raises(ValueError, match="radix_cache"):
+        builder.validate_before_infrastructure(_server_args(disable_radix_cache=True))

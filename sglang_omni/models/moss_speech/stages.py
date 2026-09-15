@@ -185,6 +185,10 @@ def create_ar_engine_executor(
     context_length: int = DEFAULT_CONTEXT_LIMIT,
     server_args_overrides: dict[str, Any] | None = None,
     streaming: bool = False,
+    prefix_cache: bool = False,
+    eager_cpu_metadata: bool = False,
+    mixed_modalities: bool = False,
+    decode_projection_graphs: bool = False,
 ) -> Any:
     """Build the validated native SGLang scheduler used by the formal YAML."""
     validate_ar_preconditions(model_path, dtype=dtype, codec_path=codec_path)
@@ -197,7 +201,12 @@ def create_ar_engine_executor(
     overrides = dict(server_args_overrides or {})
     overrides["trust_remote_code"] = False
     return MossSpeechEngineBuilder(
-        context_length=context_length, streaming=streaming
+        context_length=context_length,
+        streaming=streaming,
+        prefix_cache=prefix_cache,
+        eager_cpu_metadata=eager_cpu_metadata,
+        mixed_modalities=mixed_modalities,
+        decode_projection_graphs=decode_projection_graphs,
     ).build(
         model_path,
         gpu_id=0 if gpu_id is None else gpu_id,

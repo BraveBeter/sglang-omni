@@ -8,9 +8,10 @@ Model-specific subclass of the COMMON generation builder
 - ``model_arch_override="MossSpeechForCausalLM"`` rides the common bootstrap
   and triggers ModelWorker's 40-attention-layer accounting branch
   (num_shared + 2 * num_modality = 40; HF num_hidden_layers stays 36).
-- V1 policy is locked here: CUDA graph / torch compile / radix cache /
+- Default policy is locked here: CUDA graph / torch compile / radix cache /
   quantization / TP>1 must stay OFF; violating operator overrides raise
-  instead of silently enabling (P3-01 §3.5).
+  instead of silently enabling. Prefix caching is a separate opt-in profile
+  using model-specific canonical keys over the common KV pools.
 - The model runner and request/result adapters are T3.4 deliverables; this
   module only fixes their wiring points so T3.3's minimal driver and T3.7's
   formal takeover share ONE build path (P3 task dependency note).
@@ -32,15 +33,27 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
     model_arch_override = "MossSpeechForCausalLM"
 
     def __init__(
-        self, context_length: int | None = None, *, streaming: bool = False
+        self,
+        context_length: int | None = None,
+        *,
+        streaming: bool = False,
+        prefix_cache: bool = False,
+        eager_cpu_metadata: bool = False,
+        mixed_modalities: bool = False,
+        decode_projection_graphs: bool = False,
     ) -> None:
         super().__init__()
         self.streaming = streaming
+        self.prefix_cache = prefix_cache
+        self.eager_cpu_metadata = eager_cpu_metadata
+        self.decode_projection_graphs = decode_projection_graphs
         from sglang_omni.models.moss_speech.request_lifecycle import (
             MossSpeechRequestLifecycle,
         )
 
-        self.request_lifecycle = MossSpeechRequestLifecycle()
+        self.request_lifecycle = MossSpeechRequestLifecycle(
+            mixed_modalities=mixed_modalities
+        )
         if context_length is not None:
             self.context_length = int(context_length)
 
@@ -59,7 +72,7 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
             "dtype": dtype,
             "disable_cuda_graph": True,
             "enable_torch_compile": False,
-            "disable_radix_cache": True,
+            "disable_radix_cache": not self.prefix_cache,
             "tp_size": 1,
             # chunked prefill splits prompts across multiple EXTEND blocks,
             # firing post_prefill per chunk; the reference-semantics sampling
@@ -74,7 +87,7 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
             "trust_remote_code": False,
             "disable_cuda_graph": True,
             "enable_torch_compile": False,
-            "disable_radix_cache": True,
+            "disable_radix_cache": not self.prefix_cache,
             "tp_size": 1,
             "chunked_prefill_size": -1,
         }
@@ -91,7 +104,7 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
     def customize_server_args(self, server_args: Any) -> None:
         server_args.disable_cuda_graph = True
         server_args.enable_torch_compile = False
-        server_args.disable_radix_cache = True
+        server_args.disable_radix_cache = not self.prefix_cache
         if int(getattr(server_args, "tp_size", 1)) != 1:
             raise ValueError("MOSS-Speech V1 supports TP=1 only")
 
@@ -102,8 +115,8 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
             problems.append("cuda_graph enabled")
         if getattr(sa, "enable_torch_compile", False):
             problems.append("torch_compile enabled")
-        if not sa.disable_radix_cache:
-            problems.append("radix_cache enabled")
+        if bool(sa.disable_radix_cache) == self.prefix_cache:
+            problems.append("radix_cache does not match the selected profile")
         if int(getattr(sa, "chunked_prefill_size", -1) or -1) != -1:
             problems.append(f"chunked_prefill_size={sa.chunked_prefill_size}")
         if int(getattr(sa, "tp_size", 1)) != 1:
@@ -133,6 +146,26 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
                 f"{self.model_name}: expected MossSpeechSGLangModel, got {type(model)}"
             )
         model.assert_heads_independent()
+        if self.decode_projection_graphs:
+            for layer in (
+                list(model.layers) + list(model.text_block) + list(model.audio_block)
+            ):
+                layer.enable_projection_graphs = True
+        if self.eager_cpu_metadata:
+            from sglang.srt.layers.attention.torch_native_backend import (
+                TorchNativeAttnBackend,
+            )
+
+            from .attention import MossSpeechTorchNativeBackend
+
+            runner = model_worker.model_runner
+            if type(runner.attn_backend) is not TorchNativeAttnBackend:
+                raise ValueError(
+                    "Host metadata requires the eager torch_native backend"
+                )
+            runner.attn_backend = MossSpeechTorchNativeBackend(runner)
+            runner.attn_backend.prefill_attention_backend_str = "torch_native"
+            runner.attn_backend.decode_attention_backend_str = "torch_native"
         # the decode-feedback staging embedding is not a checkpoint tensor;
         # the weight loader leaves it on the init device — move it here
         target = torch.device(device)
@@ -154,8 +187,32 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
 
         self.request_lifecycle.model = model
         return make_moss_speech_scheduler_adapters(
-            model=model, lifecycle=self.request_lifecycle
+            model=model,
+            lifecycle=self.request_lifecycle,
+            prefix_cache=self.prefix_cache,
         )
+
+    def _build_runtime(self, **kwargs: Any) -> tuple[Any, Any]:
+        if self.prefix_cache:
+            from sglang.srt.mem_cache.cache_init_params import CacheInitParams
+
+            from .prefix_cache import MossSpeechRadixCache
+
+            # Infrastructure has allocated the shared pools but admitted no
+            # requests yet. Bind the semantic cache before constructing runtime.
+            args = kwargs["server_args"]
+            cache = MossSpeechRadixCache(
+                CacheInitParams(
+                    disable=False,
+                    req_to_token_pool=kwargs["req_to_token_pool"],
+                    token_to_kv_pool_allocator=kwargs["token_to_kv_pool_allocator"],
+                    page_size=args.page_size,
+                    chunked_prefill_size=args.chunked_prefill_size,
+                )
+            )
+            kwargs["tree_cache"] = cache
+            kwargs["prefill_manager"].tree_cache = cache
+        return super()._build_runtime(**kwargs)
 
     def extra_scheduler_kwargs(self) -> dict[str, Any]:
         if not self.streaming:

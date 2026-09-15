@@ -254,6 +254,10 @@ class MossSpeechModelRunner(ModelRunner):
 
             row = self._select_row(data, text_logits[i], audio_logits[i])
             data.output_rows.append(row)
+            if hasattr(data.req, "_moss_output_cache_ids"):
+                from .prefix_cache import record_cache_output
+
+                record_cache_output(data.req, row)
             selected = fsm.row_selected_token(row)
             next_tokens.append(selected)
             # stage the feedback embedding for the next decode step

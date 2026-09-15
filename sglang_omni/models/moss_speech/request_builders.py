@@ -558,7 +558,7 @@ def __getattr__(name: str) -> Any:
 
 
 def build_sglang_moss_request(
-    state: Any, *, payload: Any = None
+    state: Any, *, payload: Any = None, prefix_cache: bool = False
 ) -> MossSpeechSGLangRequestData:
     """MossSpeechState (P2 wire) -> engine request data.
 
@@ -659,6 +659,10 @@ def build_sglang_moss_request(
         vocab_size=TEXT_VOCAB_LIMIT,
     )
     req.tokenizer = None
+    if prefix_cache:
+        from .prefix_cache import attach_cache_key
+
+        attach_cache_key(req, prompt_rows.tolist())
 
     data = MossSpeechSGLangRequestData(
         req=req,
@@ -676,7 +680,9 @@ def build_sglang_moss_request(
     return data
 
 
-def make_moss_speech_scheduler_adapters(*, model: Any, lifecycle: Any = None) -> Any:
+def make_moss_speech_scheduler_adapters(
+    *, model: Any, lifecycle: Any = None, prefix_cache: bool = False
+) -> Any:
     """StagePayload <-> engine request adapters (moss_tts_local pattern)."""
     import traceback as _tb
 
@@ -702,7 +708,9 @@ def make_moss_speech_scheduler_adapters(*, model: Any, lifecycle: Any = None) ->
         state = payload.data
         if not isinstance(state, MossSpeechState):
             state = MossSpeechState.from_dict(state)
-        data = build_sglang_moss_request(state, payload=payload)
+        data = build_sglang_moss_request(
+            state, payload=payload, prefix_cache=prefix_cache
+        )
         return lifecycle.admit(data, state.output_modality)
 
     @_logged

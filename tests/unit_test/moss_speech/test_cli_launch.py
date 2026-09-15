@@ -117,3 +117,30 @@ def test_shipped_configs_have_no_operator_specific_paths(name: str) -> None:
     assert not Path(config.model_path).is_absolute()
     assert not config.env_defaults
     assert "/remote-home" not in config.endpoints.base_path
+
+
+@pytest.mark.parametrize(
+    "cls", [MossSpeechPipelineConfig, MossSpeechStreamingPipelineConfig]
+)
+def test_performance_options_roundtrip_and_explicit_disable(cls):
+    names = [
+        "prefix_cache",
+        "eager_cpu_metadata",
+        "mixed_modalities",
+        "decode_projection_graphs",
+    ]
+    initial = cls(model_path="model")
+    manager = ConfigManager(initial)
+    updated = manager.merge_config(
+        manager.parse_extra_args(
+            [arg for name in names for arg in ["--" + name.replace("_", "-"), "true"]]
+        )
+    )
+    ar = next(stage for stage in updated.stages if stage.name == "ar_engine")
+    assert all(ar.factory_args[name] is True for name in names)
+    restored = cls.model_validate_json(updated.model_dump_json())
+    disabled = ConfigManager(restored).merge_config(dict.fromkeys(names, False))
+    ar_disabled = next(stage for stage in disabled.stages if stage.name == "ar_engine")
+    assert all(ar_disabled.factory_args[name] is False for name in names)
+    fresh_ar = next(stage for stage in initial.stages if stage.name == "ar_engine")
+    assert all(not fresh_ar.factory_args.get(name) for name in names)

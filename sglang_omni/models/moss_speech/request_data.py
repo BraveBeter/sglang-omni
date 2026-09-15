@@ -46,6 +46,8 @@ class MossSpeechSGLangRequestData(SGLangARRequestData):
     def reset(self) -> None:
         """Idempotent reset for retry: drop generated state, keep prompt."""
         self.output_rows = []
+        if hasattr(self.req, "_moss_output_cache_ids"):
+            del self.req._moss_output_cache_ids[:]
         self.generation_steps = 0
         self.stream_grid_cursor = 0
         self.stream_token_cursor = 0

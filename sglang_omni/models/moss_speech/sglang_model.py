@@ -141,11 +141,26 @@ def reference_rope_frequencies(head_dim: int, theta: float) -> torch.Tensor:
 
 
 def request_linear(
-    x: torch.Tensor, weight: torch.Tensor, lengths: list[int]
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    lengths: list[int],
+    *,
+    prefixes: list[int] | None = None,
 ) -> torch.Tensor:
     """Keep each request's GEMM shape independent of unrelated batch members."""
     if sum(lengths) != x.shape[0]:
         raise ValueError("request lengths do not cover the packed tensor")
+    if prefixes is not None and any(prefixes):
+        if len(prefixes) != len(lengths) or any(prefix < 0 for prefix in prefixes):
+            raise ValueError("invalid cached prefix lengths")
+        return torch.cat(
+            [
+                torch.nn.functional.linear(
+                    torch.cat([part.new_zeros((prefix, part.shape[-1])), part]), weight
+                )[prefix:]
+                for part, prefix in zip(x.split(lengths), prefixes)
+            ]
+        )
     if len(lengths) <= 1:
         return torch.nn.functional.linear(x, weight)
     return torch.cat(
@@ -159,8 +174,31 @@ def request_norm(
     x: torch.Tensor,
     lengths: list[int],
     residual: Optional[torch.Tensor] = None,
+    *,
+    prefixes: list[int] | None = None,
 ) -> Any:
     """Evaluate reduction shapes independently for each packed request."""
+    if prefixes is not None and any(prefixes):
+        chunks = x.split(lengths, dim=0)
+        residuals = (
+            residual.split(lengths, dim=0)
+            if residual is not None
+            else [None] * len(lengths)
+        )
+        results = []
+        for chunk, r, prefix in zip(chunks, residuals, prefixes):
+            zeros = chunk.new_zeros((prefix, *chunk.shape[1:]))
+            padded = torch.cat([zeros, chunk])
+            if r is None:
+                results.append(norm(padded)[prefix:])
+            else:
+                padded_r = torch.cat([zeros, r])
+                results.append(
+                    tuple(value[prefix:] for value in norm(padded, padded_r))
+                )
+        if residual is None:
+            return torch.cat(results)
+        return tuple(torch.cat([result[i] for result in results]) for i in range(2))
     if len(lengths) <= 1:
         return norm(x, residual) if residual is not None else norm(x)
     chunks = x.split(lengths, dim=0)
@@ -184,57 +222,110 @@ class MossSpeechDecoderLayer(Qwen3DecoderLayer):
         post_residual_addition: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         lengths = forward_batch._moss_request_lengths
+        prefixes = getattr(forward_batch, "_moss_prefix_lengths", None)
         if post_residual_addition is not None:
             raise ValueError("Post residual addition is not supported in V1")
-        if residual is None:
-            residual = hidden_states
-            hidden_states = request_norm(self.input_layernorm, hidden_states, lengths)
-        else:
-            hidden_states, residual = request_norm(
-                self.input_layernorm, hidden_states, lengths, residual
-            )
+        from .projection_graphs import run_projection
+
         attn = self.self_attn
-        # Keep separate GEMMs and BF16 elementwise rounding as in the checkpoint.
-        # Packed storage remains unchanged for SGLang's weight loader.
-        q_weight, k_weight, v_weight = attn.qkv_proj.weight.split(
-            [attn.q_size, attn.kv_size, attn.kv_size], dim=0
-        )
-        q = request_linear(hidden_states, q_weight, lengths)
-        k = request_linear(hidden_states, k_weight, lengths)
-        v = request_linear(hidden_states, v_weight, lengths)
-        q = request_norm(
-            attn.q_norm, q.reshape(-1, attn.num_heads, attn.head_dim), lengths
-        )
-        k = request_norm(
-            attn.k_norm, k.reshape(-1, attn.num_kv_heads, attn.head_dim), lengths
-        )
-        inv_freq = reference_rope_frequencies(attn.head_dim, attn.rope_theta).to(
-            positions.device
-        )
-        with torch.autocast(device_type=positions.device.type, enabled=False):
-            freqs = (
-                inv_freq[None, :, None] @ positions[None, None, :].float()
-            ).transpose(1, 2)
-            angles = torch.cat((freqs, freqs), dim=-1)
-            cos = angles.cos().to(q.dtype)[0, :, None, :]
-            sin = angles.sin().to(q.dtype)[0, :, None, :]
+        inv_freq = getattr(self, "_projection_inv_freq", None)
+        if inv_freq is None or inv_freq.device != positions.device:
+            inv_freq = reference_rope_frequencies(attn.head_dim, attn.rope_theta).to(
+                positions.device
+            )
+            self._projection_inv_freq = inv_freq
 
-        def rotate(x: torch.Tensor) -> torch.Tensor:
-            left, right = x.chunk(2, dim=-1)
-            return torch.cat((-right, left), dim=-1)
+        def prepare(
+            hidden_states: torch.Tensor,
+            residual: Optional[torch.Tensor],
+            positions: torch.Tensor,
+        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            if residual is None:
+                residual = hidden_states
+                hidden_states = request_norm(
+                    self.input_layernorm, hidden_states, lengths, prefixes=prefixes
+                )
+            else:
+                hidden_states, residual = request_norm(
+                    self.input_layernorm,
+                    hidden_states,
+                    lengths,
+                    residual,
+                    prefixes=prefixes,
+                )
+            attn = self.self_attn
+            # Keep separate GEMMs and BF16 elementwise rounding as in the checkpoint.
+            # Packed storage remains unchanged for SGLang's weight loader.
+            q_weight, k_weight, v_weight = attn.qkv_proj.weight.split(
+                [attn.q_size, attn.kv_size, attn.kv_size], dim=0
+            )
+            q = request_linear(hidden_states, q_weight, lengths, prefixes=prefixes)
+            k = request_linear(hidden_states, k_weight, lengths, prefixes=prefixes)
+            v = request_linear(hidden_states, v_weight, lengths, prefixes=prefixes)
+            q = request_norm(
+                attn.q_norm,
+                q.reshape(-1, attn.num_heads, attn.head_dim),
+                lengths,
+                prefixes=prefixes,
+            )
+            k = request_norm(
+                attn.k_norm,
+                k.reshape(-1, attn.num_kv_heads, attn.head_dim),
+                lengths,
+                prefixes=prefixes,
+            )
+            with torch.autocast(device_type=positions.device.type, enabled=False):
+                freqs = (
+                    inv_freq[None, :, None] @ positions[None, None, :].float()
+                ).transpose(1, 2)
+                angles = torch.cat((freqs, freqs), dim=-1)
+                cos = angles.cos().to(q.dtype)[0, :, None, :]
+                sin = angles.sin().to(q.dtype)[0, :, None, :]
 
-        q = (q * cos + rotate(q) * sin).reshape(-1, attn.q_size)
-        k = (k * cos + rotate(k) * sin).reshape(-1, attn.kv_size)
+            def rotate(x: torch.Tensor) -> torch.Tensor:
+                left, right = x.chunk(2, dim=-1)
+                return torch.cat((-right, left), dim=-1)
+
+            q = (q * cos + rotate(q) * sin).reshape(-1, attn.q_size)
+            k = (k * cos + rotate(k) * sin).reshape(-1, attn.kv_size)
+            return q, k, v, residual
+
+        def finish(
+            hidden_states: torch.Tensor, residual: torch.Tensor
+        ) -> Tuple[torch.Tensor, torch.Tensor]:
+            hidden_states = request_linear(
+                hidden_states, attn.o_proj.weight, lengths, prefixes=prefixes
+            )
+            hidden_states, residual = request_norm(
+                self.post_attention_layernorm,
+                hidden_states,
+                lengths,
+                residual,
+                prefixes=prefixes,
+            )
+            gate_weight, up_weight = self.mlp.gate_up_proj.weight.chunk(2, dim=0)
+            gate = request_linear(
+                hidden_states, gate_weight, lengths, prefixes=prefixes
+            )
+            up = request_linear(hidden_states, up_weight, lengths, prefixes=prefixes)
+            hidden_states = request_linear(
+                torch.nn.functional.silu(gate) * up,
+                self.mlp.down_proj.weight,
+                lengths,
+                prefixes=prefixes,
+            )
+            return hidden_states, residual
+
+        q, k, v, residual = run_projection(
+            self,
+            "prepare",
+            prepare,
+            (hidden_states, residual, positions),
+            forward_batch,
+        )
         hidden_states = attn.attn(q, k, v, forward_batch)
-        hidden_states = request_linear(hidden_states, attn.o_proj.weight, lengths)
-        hidden_states, residual = request_norm(
-            self.post_attention_layernorm, hidden_states, lengths, residual
-        )
-        gate_weight, up_weight = self.mlp.gate_up_proj.weight.chunk(2, dim=0)
-        gate = request_linear(hidden_states, gate_weight, lengths)
-        up = request_linear(hidden_states, up_weight, lengths)
-        hidden_states = request_linear(
-            torch.nn.functional.silu(gate) * up, self.mlp.down_proj.weight, lengths
+        hidden_states, residual = run_projection(
+            self, "finish", finish, (hidden_states, residual), forward_batch
         )
         return hidden_states, residual
 
@@ -460,6 +551,15 @@ class MossSpeechSGLangModel(torch.nn.Module):
             )
         forward_batch._moss_request_lengths = lengths
         self._last_request_lengths = lengths
+        self._last_prefix_lengths = (
+            list(
+                getattr(forward_batch, "extend_prefix_lens_cpu", None)
+                or [0] * len(lengths)
+            )
+            if mode is None or not mode.is_decode()
+            else [0] * len(lengths)
+        )
+        forward_batch._moss_prefix_lengths = self._last_prefix_lengths
         hidden_states = input_embeds
         residual: Optional[torch.Tensor] = None
         for layer in self.layers:
@@ -495,10 +595,18 @@ class MossSpeechSGLangModel(torch.nn.Module):
 
         last_idx = self._last_token_indices(text_hidden, forward_batch)
         text_final, _ = request_norm(
-            self.text_norm, text_hidden, lengths, text_residual
+            self.text_norm,
+            text_hidden,
+            lengths,
+            text_residual,
+            prefixes=self._last_prefix_lengths,
         )
         audio_final, _ = request_norm(
-            self.audio_norm, audio_hidden, lengths, audio_residual
+            self.audio_norm,
+            audio_hidden,
+            lengths,
+            audio_residual,
+            prefixes=self._last_prefix_lengths,
         )
         self._last_head_indices = last_idx
         # Final hidden states are consumed by the heads in this forward.
@@ -592,17 +700,30 @@ class MossSpeechSGLangModel(torch.nn.Module):
         model (the runner injects next_token_ids), so the sampler-contract
         forwarding of ParallelLMHead is not needed here.
         """
-        text_logits = request_linear(
-            self._last_text_hidden, self.text_lm_head.weight, self._last_request_lengths
-        )
-        audio_logits = request_linear(
-            self._last_audio_hidden,
-            self.audio_lm_head.weight,
-            self._last_request_lengths,
-        )
+        text_hidden = self._last_text_hidden
+        audio_hidden = self._last_audio_hidden
+        lengths = self._last_request_lengths
+        indices = self._last_head_indices
+        prefixes = getattr(self, "_last_prefix_lengths", [0] * len(lengths))
+        if any(prefixes):
+            # Keep the full-prompt GEMM shape even when KV prefix rows are
+            # reused. Each projection row is independent; placeholders retain
+            # the reference kernel shape without retaining cached hiddens.
+            def pad(hidden: torch.Tensor) -> torch.Tensor:
+                return torch.cat(
+                    [
+                        torch.cat([part.new_zeros((prefix, part.shape[-1])), part])
+                        for part, prefix in zip(hidden.split(lengths), prefixes)
+                    ]
+                )
+
+            text_hidden, audio_hidden = pad(text_hidden), pad(audio_hidden)
+            lengths = [prefix + length for prefix, length in zip(prefixes, lengths)]
+            indices = torch.tensor(lengths, device=text_hidden.device).cumsum(0) - 1
+        text_logits = request_linear(text_hidden, self.text_lm_head.weight, lengths)
+        audio_logits = request_linear(audio_hidden, self.audio_lm_head.weight, lengths)
         # Reference projects the complete prefill before selecting its last
         # row. Selecting hidden first changes the BF16 GEMM shape and ties.
-        indices = self._last_head_indices
         text_logits = text_logits[indices]
         audio_logits = audio_logits[indices]
         return MossSpeechModelOutput(

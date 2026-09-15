@@ -13,8 +13,9 @@ from sglang_omni.scheduling.types import DeferredAdmission
 class MossSpeechRequestLifecycle:
     """Allow same-modality batches and defer the next modality without blocking."""
 
-    def __init__(self, model: Any = None) -> None:
+    def __init__(self, model: Any = None, *, mixed_modalities: bool = False) -> None:
         self.model = model
+        self.mixed_modalities = mixed_modalities
         self.lock = threading.RLock()
         self.requests: dict[str, Any] = {}
         self.active: dict[str, str] = {}
@@ -30,8 +31,10 @@ class MossSpeechRequestLifecycle:
             if rid in self.requests:
                 raise ValueError(f"duplicate live MOSS-Speech request: {rid}")
             self.requests[rid] = data
-            if not self.pending and (
-                not self.active or modality in self.active.values()
+            if (
+                self.mixed_modalities
+                or not self.pending
+                and (not self.active or modality in self.active.values())
             ):
                 self.active[rid] = modality
                 return data
