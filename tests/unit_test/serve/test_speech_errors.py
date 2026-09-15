@@ -23,3 +23,17 @@ def test_speech_generation_error_keeps_other_failures_as_500() -> None:
     err = speech_generation_error(RuntimeError("cuda out of memory"))
     assert err.status_code == 500
     assert "cuda out of memory" in err.message
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ValueError("Invalid model request: unsupported voice"),
+        RuntimeError("max_new_tokens must be within [1, 512]"),
+    ],
+)
+def test_speech_generation_error_reuses_model_validation_classification(exc):
+    error = speech_generation_error(exc)
+    assert error.status_code == 400
+    assert error.error_type == "BadRequestError"
+    assert error.message == str(exc)
