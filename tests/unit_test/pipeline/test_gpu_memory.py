@@ -345,10 +345,11 @@ def test_calculate_stage_load_delta_bytes_rejects_memory_growth() -> None:
         )
 
 
-def test_gpu_startup_lock_path_uses_visible_device_mapping(
+def test_gpu_startup_lock_path_falls_back_to_visible_device_mapping(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
+    monkeypatch.setattr(gpu_memory, "_try_import_pynvml", lambda: None)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,MIG-GPU-deadbeef/1/2")
 
     first = gpu_memory.get_gpu_startup_lock_path(0, base_dir=tmp_path)

@@ -269,18 +269,37 @@ def calculate_stage_load_delta_bytes(
     return int((pre_model_load_memory_gib - post_model_load_memory_gib) * (1024**3))
 
 
+def _get_device_uuid(device_id: int | str) -> str | None:
+    """Resolve a stable lock identity without creating a CUDA context."""
+    pynvml = _try_import_pynvml()
+    if pynvml is None:
+        return None
+    try:
+        pynvml.nvmlInit()
+        handle = _get_device_handle(pynvml, device_id)
+        device_uuid = _decode_nvml_string(pynvml.nvmlDeviceGetUUID(handle))
+        if isinstance(device_uuid, str) and device_uuid.startswith(("GPU-", "MIG-")):
+            return device_uuid
+    except Exception as exc:
+        logger.debug("NVML lock identity unavailable for %r: %s", device_id, exc)
+    finally:
+        _shutdown_nvml(pynvml)
+    return None
+
+
 def get_gpu_startup_lock_path(
     logical_gpu_id: int,
     *,
     env: dict[str, str] | None = None,
     base_dir: str | Path | None = None,
 ) -> Path:
-    """Return the launch-time lock path for a CUDA logical GPU id."""
+    """Return a physical-device startup lock, with visible-id fallback."""
 
     source_env = env if env is not None else os.environ
     visible_devices = parse_cuda_visible_devices(source_env.get("CUDA_VISIBLE_DEVICES"))
     visible_device = resolve_visible_device_id(logical_gpu_id, visible_devices)
-    safe_device = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(visible_device)).strip("_")
+    device_identity = _get_device_uuid(visible_device) or str(visible_device)
+    safe_device = re.sub(r"[^A-Za-z0-9_.-]+", "_", device_identity).strip("_")
     if not safe_device:
         safe_device = str(logical_gpu_id)
     lock_dir = Path(base_dir) if base_dir is not None else Path(tempfile.gettempdir())
