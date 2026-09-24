@@ -1,0 +1,102 @@
+"""Frozen TailBlock arithmetic; only Q/K/V schedule is replaced."""
+
+from __future__ import annotations
+from typing import Any, Callable
+from sglang_omni.models.moss_speech.components.cfm_block_tail import TailBlock, require
+
+
+class ParallelTailBlock(TailBlock):
+    def __init__(self, *args, schedule, **kwargs):
+        super().__init__(*args, **kwargs)
+        require(
+            self.length in (1392, 1424),
+            "Only independently qualified N1392/N1424 are admitted",
+        )
+        self.schedule = schedule
+        self.capture_owners = []
+
+    def _parallel_qkv(self, normalized, record, project):
+        import torch
+
+        if torch.cuda.is_current_stream_capturing():
+            self.capture_owners.append(normalized)
+        slots = dict(q=self.query, k=self.key_slot, v=self.value_slot)
+
+        def enqueue(kind, value):
+            slots[kind][:, 1280:, :].copy_(record(kind, project(kind, value)))
+
+        self.schedule.run(normalized, enqueue)
+
+    def run(
+        self, hidden: Any, mask: Any, *, key: tuple, observe: Callable | None = None
+    ) -> Any:
+        import torch
+        import torch.nn.functional as F
+
+        require(key == self.key, "Changed block prefix identity")
+        length = self.length
+        require(
+            hidden.shape == (2, length, 256)
+            and hidden.is_contiguous()
+            and hidden.dtype == self.query.dtype
+            and hidden.device == self.query.device,
+            "Unknown current block input layout",
+        )
+
+        def record(name, value):
+            if observe is not None:
+                observe(name, value)
+            return value
+
+        def project(kind, value):
+            result = self.plans[kind](value)
+            self._projections += 1
+            return result
+
+        current = hidden[:, 1280:, :]
+        normalized = record("norm1", self.block.norm1(current))
+        self._parallel_qkv(normalized, record, project)
+        q, k, v = (
+            value.view(2, length, 8, 64).transpose(1, 2)
+            for value in (self.query, self.key_slot, self.value_slot)
+        )
+        q = q[..., 1280:, :]
+        require(
+            q.stride() == (length * 512, 64, 512, 1)
+            and q.storage_offset() == 1280 * 512
+            and all(
+                value.stride() == (length * 512, 64, 512, 1)
+                and value.storage_offset() == 0
+                for value in (k, v)
+            ),
+            "Changed original SDPA layout",
+        )
+        bias = self.block.attn1.prepare_attention_mask(mask, length, 2).view(
+            2, 8, length, length
+        )
+        bias = bias[..., 1280:, :]
+        require(
+            int(torch._fused_sdp_choice(q, k, v, bias, 0.0, False))
+            == int(torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION),
+            "Unqualified tail SDPA backend",
+        )
+        attention = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=bias, dropout_p=0.0, is_causal=False
+        )
+        self._sdpa += 1
+        attention = record(
+            "sdpa", attention.transpose(1, 2).reshape(2, -1, 512).to(q.dtype)
+        )
+        output = record("to_out", project("to_out", attention))
+        output = record(
+            "scaled",
+            self.block.attn1.to_out[1](output) / self.block.attn1.rescale_output_factor,
+        )
+        residual = record("residual1", output + current)
+        normalized = record("norm3", self.block.norm3(residual))
+        first = record("ff_first", project("ff_first", normalized))
+        activated = record("gelu", self.block.ff.net[0].gelu(first))
+        ff = record("ff_last", project("ff", self.block.ff.net[1](activated)))
+        output = torch.cat((self.output_prefix, ff + residual), dim=1)
+        self._blocks += 1
+        return record("output", output)

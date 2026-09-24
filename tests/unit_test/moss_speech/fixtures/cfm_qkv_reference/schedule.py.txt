@@ -1,0 +1,122 @@
+"""Only the fixed Q/K/V fork/join; no tensor arithmetic or synchronization here."""
+
+import ctypes as C
+
+WORKSPACE_BYTES = 1048576
+KINDS = ("q", "k", "v")
+
+
+def need(value, reason):
+    if not value:
+        raise ValueError(reason)
+
+
+def identity(streams, contexts):
+    need(set(streams) == set(contexts) == set(KINDS), "Three Q/K/V owners required")
+    result = []
+    for kind in KINDS:
+        stream, context = streams[kind], contexts[kind]
+        need(not context.closed and not context.failed, "Closed or failed Lt context")
+        need(
+            context.stream.cuda_stream == stream.cuda_stream
+            and context.device == stream.device,
+            "Context not prebound to its branch stream/device",
+        )
+        result.append(
+            (
+                int(stream.cuda_stream),
+                int(context.handle.value),
+                int(context.workspace.data_ptr()),
+                str(context.device),
+                id(context),
+                C.addressof(context.handle),
+                context.version,
+                str(context.path),
+            )
+        )
+    need(
+        len({x[0] for x in result}) == 3
+        and len({x[4] for x in result}) == 3
+        and len({x[5] for x in result}) == 3,
+        "Branch streams, context owners and handle slots must be independent",
+    )
+    need(
+        all(x[0] and x[1] and x[2] for x in result)
+        and len({x[3] for x in result}) == 1,
+        "Invalid owner or device",
+    )
+    # 4337 observed public120804 Create returning the same opaque value to
+    # independent owners. It is immutable/non-null, not a unique resource ID.
+    need(
+        all(x[6] == 120804 for x in result) and len({x[7] for x in result}) == 1,
+        "Changed qualified Lt library/version",
+    )
+    intervals = sorted((x[2], x[2] + WORKSPACE_BYTES) for x in result)
+    need(
+        all(a[1] <= b[0] for a, b in zip(intervals, intervals[1:])),
+        "Concurrent branches must not overlap workspace storage",
+    )
+    return tuple(result)
+
+
+class QkvSchedule:
+    def __init__(self, api, streams, contexts):
+        need(not api.is_current_stream_capturing(), "Prepare events outside capture")
+        self.api, self.streams, self.contexts = api, dict(streams), dict(contexts)
+        self.initial = identity(self.streams, self.contexts)
+        self.ready = api.Event(enable_timing=False, external=False)
+        self.done = {
+            k: api.Event(enable_timing=False, external=False) for k in ("k", "v")
+        }
+        self.busy = self.closed = False
+        self.calls = 0
+        self.input_owner = None
+        # Initialize event handles before graph capture. The caller has already
+        # established model/plan readiness on all three streams.
+        self.ready.record(self.streams["q"])
+        for kind in ("k", "v"):
+            self.done[kind].record(self.streams[kind])
+            self.streams["q"].wait_event(self.done[kind])
+
+    def run(self, value, enqueue):
+        need(not self.closed and not self.busy, "Closed or reentrant fork/join")
+        need(
+            identity(self.streams, self.contexts) == self.initial,
+            "Changed branch owner",
+        )
+        main = self.streams["q"]
+        need(
+            self.api.current_stream(main.device).cuda_stream == main.cuda_stream,
+            "Wrong caller stream",
+        )
+        self.busy = True
+        self.input_owner = value
+        started = []
+        try:
+            self.ready.record(main)
+            for kind in ("k", "v"):
+                with self.api.stream(self.streams[kind]):
+                    self.streams[kind].wait_event(self.ready)
+                    started.append(kind)
+                    try:
+                        enqueue(kind, value)
+                    finally:
+                        self.done[kind].record(self.streams[kind])
+            enqueue("q", value)
+            self.calls += 1
+        finally:
+            # Includes tail writes and any startup-only snapshot on each branch.
+            # No host sync: main's later SDPA is ordered after these dependencies.
+            try:
+                for kind in started:
+                    main.wait_event(self.done[kind])
+            finally:
+                self.busy = False
+
+    def close(self):
+        if self.closed:
+            return
+        need(not self.busy, "Cannot close active schedule")
+        self.input_owner = None
+        self.closed = True
+        # Driver first synchronizes/resets graphs, then closes Lt contexts.
