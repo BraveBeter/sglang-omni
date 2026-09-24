@@ -17,6 +17,17 @@ python -m pytest -q \
   tests/unit_test/moss_speech/test_p5_qualification.py \
   tests/unit_test/moss_speech/test_streaming_codec.py \
   tests/unit_test/moss_speech/test_streaming_pipeline.py \
+  tests/unit_test/moss_speech/test_voice_transport.py \
+  tests/unit_test/moss_speech/test_small_first_config.py \
+  tests/unit_test/moss_speech/test_cfm_prefix_cache.py \
+  tests/unit_test/moss_speech/test_cfm_prefix_manifest.py \
+  tests/unit_test/moss_speech/test_cfm_prefix_bank.py \
+  tests/unit_test/moss_speech/test_cfm_prefix_lifetime.py \
+  tests/unit_test/moss_speech/test_stream_decode_fairness.py \
+  tests/unit_test/moss_speech/test_startup_schedule.py \
+  tests/unit_test/moss_speech/test_codec_launch_profile.py \
+  tests/unit_test/scheduling/test_bounded_streaming_vocoder.py \
+  tests/unit_test/moss_speech/test_cfm_segmented_attention.py \
   tests/unit_test/moss_speech/test_cli_launch.py \
   tests/unit_test/pipeline/test_config_discovery.py \
   tests/unit_test/serve/test_chat_stream_errors.py \
