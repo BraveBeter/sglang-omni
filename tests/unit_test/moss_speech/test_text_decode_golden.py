@@ -5,10 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from scripts.moss_speech.p5.quality import reference_text_fields
 from sglang_omni.models.moss_speech import stages
 from sglang_omni.models.moss_speech.payload_types import MossSpeechState
 from sglang_omni.proto.request import StagePayload
+from tests.unit_test.moss_speech.reference import reference_text_fields
 
 
 @pytest.mark.parametrize("text", ["hello world", "你好世界", "🙂"])

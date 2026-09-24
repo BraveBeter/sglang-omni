@@ -9,7 +9,7 @@ Historical FP32 fixtures exported from MOSS-Speech revision
 
 - greedy (`do_sample=False`, repetition_penalty=1.1, max_new_tokens=200, min_new=0), seed 0
 - reference env: transformers 4.57.1, torch 2.9.1+cu128, A800-SXM4-80GB. These P0 exports used FP32 AR computation; FP32 file storage alone does not determine computation dtype (corrected by P3 baseline audit).
-- exported by `scripts/moss_speech/p0/export_fixtures.py`; determinism gate: rerun tokens bit-equal, sanitized logits max-abs diff = 0.0
+- exported by the independent Hugging Face reference workflow; determinism gate: rerun tokens bit-equal, sanitized logits max-abs diff = 0.0
 
 ## Per-case contents
 

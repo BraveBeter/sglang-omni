@@ -109,3 +109,31 @@ def test_hf_rope_validation_still_rejects_missing_factor():
 
     with pytest.raises(KeyError, match="factor"):
         MossSpeechConfig(rope_scaling={"rope_type": "linear"})
+
+
+def test_quality_thresholds_cannot_be_enabled_without_calibration() -> None:
+    import pytest
+
+    from tests.test_model.moss_speech_ci_config import MossSpeechCiPreset
+
+    assert not MossSpeechCiPreset().gate_thresholds
+    with pytest.raises(ValueError, match="calibrat"):
+        MossSpeechCiPreset(gate_thresholds=True)
+
+
+def test_chat_contract_import_does_not_load_sglang() -> None:
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.modules['sglang'] = None; "
+            "from sglang_omni.models.moss_speech import request_builders; "
+            "assert 'sglang_omni.models.moss_speech.request_data' not in sys.modules",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr

@@ -11,7 +11,6 @@ on:
       - 'tests/unit_test/pipeline/test_config_discovery.py'
       - 'benchmarks/tasks/asr.py'
       - 'tests/unit_test/serve/**'
-      - 'scripts/moss_speech/**'
       - 'tests/unit_test/moss_speech/**'
       - 'tests/test_model/moss_speech_ci_config.py'
       - '.github/workflows/test-moss-speech-ci.yaml'
@@ -35,8 +34,8 @@ jobs:
         run: |
           uv venv
           uv pip install torch==2.9.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cpu
-          uv pip install -r scripts/moss_speech/ci/requirements-cpu.txt
+          uv pip install -r tests/unit_test/moss_speech/ci/requirements-cpu.txt
       - name: Run asset-free contracts
         run: |
           source .venv/bin/activate
-          bash scripts/moss_speech/ci/run_cpu.sh
+          bash tests/unit_test/moss_speech/ci/run_cpu.sh

@@ -1,15 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Parity metrics must reject errors hidden by sparse/NaN reductions."""
-import importlib.util
-from pathlib import Path
-
 import torch
 
-p = Path(__file__).resolve().parents[3] / "scripts/moss_speech/p3/validate_native.py"
-spec = importlib.util.spec_from_file_location("moss_parity_driver", p)
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-compare = module.compare_logits
+from tests.unit_test.moss_speech.reference import compare_logits as compare
 
 
 def test_nan_and_inf_patterns_are_hard_failures():

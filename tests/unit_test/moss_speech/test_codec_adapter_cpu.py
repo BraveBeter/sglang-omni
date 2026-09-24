@@ -3,7 +3,7 @@
 Covers input normalization, error paths, cleanup idempotency, voice-hook
 store/load round-trip, and the RNG-scope helper — everything that does not
 require weights on a GPU device. GPU behavior is covered by the smoke script
-(`scripts/moss_speech/p1/smoke_adapter.py`).
+(the external checkpoint smoke workflow).
 """
 
 from __future__ import annotations
