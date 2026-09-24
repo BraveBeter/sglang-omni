@@ -31,6 +31,7 @@ across threads keep their own ``_state_lock`` discipline.
 from __future__ import annotations
 
 import logging
+import queue
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from typing import Any, Generic, TypeVar
@@ -39,7 +40,7 @@ import torch
 
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.proto import StagePayload
-from sglang_omni.scheduling.messages import OutgoingMessage
+from sglang_omni.scheduling.messages import IncomingMessage, OutgoingMessage
 from sglang_omni.scheduling.streaming_simple_scheduler import StreamingSimpleScheduler
 from sglang_omni.utils.audio_payload import audio_waveform_payload
 
@@ -112,7 +113,15 @@ class StreamingVocoderBase(
         request_cost_fn: Callable[[Any], int] | None = None,
         max_batch_cost: int | None = None,
         abort_callback: Callable[[str], None] | None = None,
+        defer_stream_decode: bool = False,
     ) -> None:
+        if defer_stream_decode and self._can_batch_stream_chunks:
+            raise ValueError("Deferred decoding cannot coalesce stream chunks")
+        self._defer_stream_decode = bool(defer_stream_decode)
+        self._deferred_stream_ready: dict[str, None] = {}
+        self._deferred_stream_final: set[str] = set()
+        self._stream_ingest_budget = 64
+        self._stream_ingest_count = 0
         self._stream_states: dict[str, StreamStateT] = {}
         self._emitted_stream_ids: set[str] = set()
         self._completed_stream_request_ids: dict[str, None] = {}
@@ -191,6 +200,10 @@ class StreamingVocoderBase(
         state = self._ingest_stream_item(request_id, item)
         if state is None:
             return []
+        if self._defer_stream_decode:
+            if self.should_decode(state, is_final=False):
+                self._deferred_stream_ready.setdefault(request_id, None)
+            return []
         return self._decode_and_emit(request_id, state)
 
     def on_stream_chunk_batch(self, items: list[tuple[str, StreamItem]]) -> None:
@@ -222,18 +235,103 @@ class StreamingVocoderBase(
         item = self._validate_stream_chunk_item(request_id, item)
         self.on_stream_chunk_batch([(request_id, item)])
 
+    def _next_message(self) -> IncomingMessage | None:
+        if not self._defer_stream_decode:
+            return super()._next_message()
+        with self._state_lock:
+            ready = bool(self._deferred_stream_ready)
+        if not ready:
+            self._stream_ingest_count = 0
+            return super()._next_message()
+        if self._stream_ingest_count < self._stream_ingest_budget:
+            if self._pending_messages:
+                message = self._pending_messages.popleft()
+            else:
+                try:
+                    message = self.inbox.get_nowait()
+                except queue.Empty:
+                    message = None
+            if message is not None:
+                self._stream_ingest_count += 1
+                return message
+        self._stream_ingest_count = 0
+        self._run_deferred_stream_step()
+        return None
+
+    def _handle_stream_done(self, request_id: str) -> None:
+        if not self._defer_stream_decode:
+            super()._handle_stream_done(request_id)
+            return
+        with self._state_lock:
+            if self._is_aborted(request_id):
+                return
+            if request_id not in self._stream_payloads:
+                if (
+                    request_id not in self._completed_stream_request_ids
+                    and request_id not in self._completed_non_streaming_request_ids
+                ):
+                    self._pending_done.add(request_id)
+                return
+            self._deferred_stream_final.add(request_id)
+            self._deferred_stream_ready.setdefault(request_id, None)
+
+    def _run_deferred_stream_step(self) -> None:
+        """Run one model-owned work unit, then return to message ingestion."""
+        failed = None
+        with self._state_lock:
+            if not self._deferred_stream_ready:
+                return
+            request_id = next(iter(self._deferred_stream_ready))
+            self._deferred_stream_ready.pop(request_id)
+            state = self._stream_states.get(request_id)
+            if state is None or self._is_aborted(request_id):
+                return
+            try:
+                final = request_id in self._deferred_stream_final
+                messages = (
+                    self.on_stream_done(request_id)
+                    if final
+                    else self._decode_and_emit(request_id, state)
+                )
+                if self._is_aborted(request_id):
+                    return
+                for message in messages:
+                    self.outbox.put(message)
+                if final and any(message.type == "result" for message in messages):
+                    self._clear_request_state(request_id)
+                elif final or self.has_pending_stream_decode(
+                    request_id, state, is_final=False
+                ):
+                    self._deferred_stream_ready[request_id] = None
+            except Exception as exc:
+                if not self._is_aborted(request_id):
+                    self._emit_error(request_id, exc)
+                self._abort_state(request_id)
+                failed = request_id
+        if failed is not None:
+            self._cleanup_aborted_request(failed)
+
     def on_stream_done(self, request_id: str) -> list[OutgoingMessage]:
         payload = self._stream_payloads[request_id]
         state = self._get_or_create_stream_state(request_id)
         if state is None:
             return []
         waveform = self.decode_delta(request_id, state, is_final=True)
-        if waveform is None and not self._stream_has_emitted(request_id):
+        pending = self._defer_stream_decode and self.has_pending_stream_decode(
+            request_id, state, is_final=True
+        )
+        if (
+            not pending
+            and waveform is None
+            and not self._stream_has_emitted(request_id)
+        ):
             waveform = self.fallback_full_decode(request_id, payload, state)
         messages: list[OutgoingMessage] = []
         if waveform is not None:
             self._mark_stream_emitted(request_id)
             messages.append(self._stream_chunk_message(request_id, waveform))
+        if pending:
+            return messages
         messages.append(
             OutgoingMessage(
                 request_id=request_id,
@@ -249,6 +347,8 @@ class StreamingVocoderBase(
         return messages
 
     def clear_stream_state(self, request_id: str) -> None:
+        self._deferred_stream_ready.pop(request_id, None)
+        self._deferred_stream_final.discard(request_id)
         self._emitted_stream_ids.discard(request_id)
         state = self._stream_states.pop(request_id, None)
         if state is not None:
@@ -418,6 +518,18 @@ class StreamingVocoderBase(
     ) -> torch.Tensor | None:
         """All cursor/overlap/crossfade/holdback math plus the codec call;
         ``is_final`` flushes the remainder at stream-done. None emits nothing."""
+
+    def has_pending_stream_decode(
+        self, request_id: str, state: StreamStateT, *, is_final: bool
+    ) -> bool:
+        """Whether another bounded decode can run without more input.
+
+        Deferred subclasses must report final work until their final codec
+        operation completes. The default matches a decoder that drains each
+        call completely. This hook must not perform model computation.
+        """
+        del request_id, state, is_final
+        return False
 
     def stream_payload(self, request_id: str, waveform: torch.Tensor) -> dict[str, Any]:
         del request_id
