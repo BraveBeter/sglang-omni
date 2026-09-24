@@ -59,9 +59,11 @@ class MossSpeechState(DeclarativeStateBase):
 
     # ---- voice conditioning transport (audio requests only) ----------------
     # Immutable precomputed default voice, transported with the request
-    # (P2 contract §7.1) as wire-safe lists; the vocoder caches device tensor
-    # copies keyed by voice_key. prompt token ids are int32 values.
+    # (P2 contract §7.1) as opaque typed-tensor bytes. AR and control-plane
+    # transport must not decode these; only the vocoder restores tensors.
+    # The list fields remain readable for legacy internal payloads.
     voice_key: Optional[str] = wire(None, codec="str_or")
+    voice_payload: Optional[dict[str, Any]] = wire(None, codec="raw")
     voice_token_ids: list[int] = wire(default_factory=list, codec="list")
     voice_feat: list[list[float]] = wire(default_factory=list, codec="list")  # (F, 80)
     voice_embedding: list[float] = wire(default_factory=list, codec="list")  # (192,)

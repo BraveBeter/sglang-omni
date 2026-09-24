@@ -18,6 +18,12 @@ from sglang_omni.scheduling.streaming_vocoder import StreamingVocoderBase
 
 from .payload_types import EOSP_TOKEN_ID, MODALITY_PAD_TOKEN_ID
 from .request_builders import resolve_output_terminal
+from .voice_transport import (
+    pack_voice_payload,
+    state_voice_payload,
+    unpack_voice_payload,
+    voice_payload_digest,
+)
 
 
 def resolve_stream_terminal(request_id: str, payload: StagePayload) -> list[str]:
@@ -64,15 +70,15 @@ def make_stream_output_builder() -> Any:
             "row_index": cursor,
         }
         if audio and cursor == 0:
-            metadata.update(
-                seed=state["effective_seed"],
-                voice_key=state["voice_key"],
-                voice={
+            metadata.update(seed=state["effective_seed"], voice_key=state["voice_key"])
+            if state.get("voice_payload") is not None:
+                metadata["voice_payload"] = state["voice_payload"]
+            else:
+                metadata["voice"] = {
                     "prompt_token": [state["voice_token_ids"]],
                     "prompt_feat": [state["voice_feat"]],
                     "embedding": [state["voice_embedding"]],
-                },
-            )
+                }
         data.stream_token_cursor = cursor + len(tokens)
         return [
             OutgoingMessage(
@@ -93,6 +99,7 @@ class AudioStreamState:
     codes: list[int] = field(default_factory=list)
     voice_key: str | None = None
     voice_digest: str | None = None
+    legacy_voice_digest: str | None = None
     seed: int | None = None
     session: Any = None
     pending: list[int] = field(default_factory=list)
@@ -113,16 +120,19 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[AudioStreamState, None]):
     def latch_stream_contract(
         self, request_id: str, state: AudioStreamState, source: Any, *, origin: str
     ) -> None:
+        legacy_voice = None
         if origin == "payload":
             from .stages import _state_from_payload
 
             payload_state = _state_from_payload(source)
             key, seed = payload_state.voice_key, payload_state.effective_seed
-            voice = {
-                "prompt_token": [payload_state.voice_token_ids],
-                "prompt_feat": [payload_state.voice_feat],
-                "embedding": [payload_state.voice_embedding],
-            }
+            packed = state_voice_payload(payload_state)
+            if payload_state.voice_payload is None:
+                legacy_voice = {
+                    "prompt_token": [payload_state.voice_token_ids],
+                    "prompt_feat": [payload_state.voice_feat],
+                    "embedding": [payload_state.voice_embedding],
+                }
         else:
             if source.get("stream") is not True or source.get("row_index") != len(
                 state.codes
@@ -130,19 +140,30 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[AudioStreamState, None]):
                 raise ValueError(
                     "Noncontiguous streaming code cursor or invalid stream flag"
                 )
-            key, seed, voice = (
-                source.get("voice_key"),
-                source.get("seed"),
-                source.get("voice"),
-            )
+            key, seed = source.get("voice_key"), source.get("seed")
+            packed, legacy_voice = source.get("voice_payload"), source.get("voice")
             if (
                 state.session is not None
                 and key is None
                 and seed is None
-                and voice is None
+                and packed is None
+                and legacy_voice is None
             ):
                 return
-        digest = hashlib.sha256(json.dumps(voice, sort_keys=True).encode()).hexdigest()
+            if packed is not None and legacy_voice is not None:
+                raise ValueError("Ambiguous compact and legacy streaming voice")
+            if packed is None:
+                if not legacy_voice:
+                    raise ValueError("First audio chunk requires voice and seed")
+                packed = pack_voice_payload(legacy_voice)
+        digest = voice_payload_digest(packed)
+        legacy_digest = (
+            hashlib.sha256(
+                json.dumps(legacy_voice, sort_keys=True).encode()
+            ).hexdigest()
+            if legacy_voice is not None
+            else None
+        )
         if state.session is not None:
             if (
                 key != state.voice_key
@@ -150,17 +171,24 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[AudioStreamState, None]):
                 or digest != state.voice_digest
             ):
                 raise ValueError("Streaming voice/seed contract changed")
+            if legacy_digest is not None:
+                expected_legacy = state.legacy_voice_digest
+                if expected_legacy is None:
+                    canonical = {
+                        name: value.tolist()
+                        for name, value in unpack_voice_payload(packed).items()
+                    }
+                    expected_legacy = hashlib.sha256(
+                        json.dumps(canonical, sort_keys=True).encode()
+                    ).hexdigest()
+                if legacy_digest != expected_legacy:
+                    raise ValueError("Streaming legacy voice contract changed")
             return
-        if key is None or seed is None or not voice:
+        if key is None or seed is None:
             raise ValueError("First audio chunk requires voice and seed")
-        converted = {
-            k: torch.as_tensor(
-                v, dtype=torch.int32 if k == "prompt_token" else torch.float32
-            )
-            for k, v in voice.items()
-        }
-        self.codec.begin(request_id, converted, seed=int(seed))
+        self.codec.begin(request_id, unpack_voice_payload(packed), seed=int(seed))
         state.voice_digest = digest
+        state.legacy_voice_digest = legacy_digest
         state.voice_key, state.seed, state.session = (
             key,
             int(seed),

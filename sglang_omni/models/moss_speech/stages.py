@@ -42,6 +42,11 @@ from sglang_omni.models.moss_speech.request_builders import (
     pop_decoded_audio,
     remember_vocoder_session,
 )
+from sglang_omni.models.moss_speech.voice_transport import (
+    pack_voice_payload,
+    state_voice_payload,
+    unpack_voice_payload,
+)
 from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
@@ -110,6 +115,10 @@ def create_preprocessing_executor(
             "default voice asset required for V1 audio output: pass voice_wav or set the "
             "MOSS_SPEECH_VOICE_WAV env default (PipelineConfig env_defaults in the YAML)"
         )
+    # Request types are input-independent; initialize them before readiness.
+    import importlib
+
+    importlib.import_module("sglang_omni.client.types")
     adapter = MossSpeechCodecAdapter(codec_dir, load_encoder=True, load_decoder=False)
     tokenizer = _load_tokenizer(model_path)
     processor = MossSpeechGridProcessor(tokenizer)
@@ -117,6 +126,14 @@ def create_preprocessing_executor(
     voice = adapter.encode_voice_ref(voice_wav)
     voice_key = (
         voice.meta.get("revision", "voice") + ":" + str(voice.prompt_token.shape[1])
+    )
+
+    voice_payload = pack_voice_payload(
+        {
+            "prompt_token": voice.prompt_token,
+            "prompt_feat": voice.prompt_feat,
+            "embedding": voice.embedding,
+        }
     )
 
     def compute(payload: StagePayload) -> StagePayload:
@@ -139,9 +156,7 @@ def create_preprocessing_executor(
         state.prompt_grid_len = built.prompt_len
         if state.output_modality == "audio":
             state.voice_key = voice_key
-            state.voice_token_ids = voice.prompt_token[0].to(torch.int32).tolist()
-            state.voice_feat = voice.prompt_feat[0].tolist()
-            state.voice_embedding = voice.embedding[0].tolist()
+            state.voice_payload = voice_payload
         return StagePayload(
             request_id=payload.request_id, request=payload.request, data=state.to_dict()
         )
@@ -297,9 +312,7 @@ def create_audio_vocoder_executor(
             )
 
             cached = VoiceConditioning(
-                prompt_token=torch.tensor([state.voice_token_ids], dtype=torch.int32),
-                prompt_feat=torch.tensor([state.voice_feat], dtype=torch.float32),
-                embedding=torch.tensor([state.voice_embedding], dtype=torch.float32),
+                **unpack_voice_payload(state_voice_payload(state)),
                 meta={"sr": 24000},
             )
             _VOICE_CACHE[key] = cached
