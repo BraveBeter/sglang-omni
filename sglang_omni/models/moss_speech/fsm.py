@@ -130,6 +130,8 @@ def sample_row(
     generating_length: int,
     mode: int,
     generator: Optional[torch.Generator] = None,
+    *,
+    defer_scalar_reads: bool = False,
 ) -> Tuple[int, int]:
     """One generation step's (text_token, audio_token) BEFORE the audio-mode
     overwrite; callers apply :func:`finalize_row` afterwards.
@@ -146,6 +148,19 @@ def sample_row(
     if params.do_sample:
         t = apply_warpers(t, params)
         a = apply_warpers(a, params)
+    if defer_scalar_reads:
+        # Keep the original text-then-audio RNG draws, synchronizing only once.
+        if params.do_sample:
+            text_id = torch.multinomial(
+                torch.softmax(t, dim=-1), 1, generator=generator
+            ).reshape(())
+            audio_id = torch.multinomial(
+                torch.softmax(a, dim=-1), 1, generator=generator
+            ).reshape(())
+        else:
+            text_id, audio_id = t.argmax(), a.argmax()
+        text_tok, audio_tok = torch.stack([text_id, audio_id]).cpu().tolist()
+        return int(text_tok), int(audio_tok)
     text_tok = sample_channel(t, params.do_sample, generator)
     audio_tok = sample_channel(a, params.do_sample, generator)
     return text_tok, audio_tok

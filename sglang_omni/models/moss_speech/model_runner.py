@@ -80,6 +80,7 @@ class MossSpeechModelRunner(ModelRunner):
     def __init__(self, tp_worker: Any, output_processor: Any) -> None:
         super().__init__(tp_worker, output_processor)
         self._last_transport = "none"
+        self.sampling_optimizations = False
 
     # ------------------------------------------------------------------ embeds
     def _rows_to_embeds(self, rows: torch.Tensor) -> torch.Tensor:
@@ -272,9 +273,32 @@ class MossSpeechModelRunner(ModelRunner):
 
     def _select_row(self, data: Any, text_logits: Any, audio_logits: Any) -> Any:
         """One real sample; parity drivers may override only in forced mode."""
-        t_hist, a_hist = fsm.channel_histories(data.prompt_rows, data.output_rows)
-        t_hist = t_hist.to(text_logits.device)
-        a_hist = a_hist.to(audio_logits.device)
+        optimized = (
+            getattr(self, "sampling_optimizations", False)
+            and text_logits.device == audio_logits.device
+        )
+        if optimized and data.params.repetition_penalty == 1.0:
+            t_hist = text_logits.new_empty(0, dtype=torch.long)
+            a_hist = audio_logits.new_empty(0, dtype=torch.long)
+        elif optimized:
+            from .sampling import DeviceChannelHistory
+
+            cache = getattr(data, "sampling_history", None)
+            if (
+                cache is None
+                or cache.prompt_rows is not data.prompt_rows
+                or cache.rows.device != text_logits.device
+                or cache.generated > len(data.output_rows)
+            ):
+                cache = DeviceChannelHistory(
+                    data.prompt_rows, data.params.max_new_tokens, text_logits.device
+                )
+                data.sampling_history = cache
+            t_hist, a_hist = cache.histories(data.output_rows)
+        else:
+            t_hist, a_hist = fsm.channel_histories(data.prompt_rows, data.output_rows)
+            t_hist = t_hist.to(text_logits.device)
+            a_hist = a_hist.to(audio_logits.device)
         gen = (
             self._generator_for(data, text_logits.device)
             if data.params.do_sample
@@ -289,6 +313,7 @@ class MossSpeechModelRunner(ModelRunner):
             len(data.output_rows) + 1,
             data.mode,
             gen,
+            defer_scalar_reads=optimized,
         )
         return fsm.finalize_row(text_tok, audio_tok, data.mode)
 

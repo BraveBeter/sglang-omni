@@ -34,6 +34,7 @@ class MossSpeechSGLangRequestData(SGLangARRequestData):
     # lazily-created per-request RNG (seeded from effective_seed); greedy
     # paths never draw. Owned by this data object; freed with it.
     rng_generator: Any = None
+    sampling_history: Any = None
 
     def __post_init__(self) -> Any:
         if self.output_rows is None:
@@ -55,6 +56,7 @@ class MossSpeechSGLangRequestData(SGLangARRequestData):
         self.finished = False
         self.stop_reason = None
         self.rng_generator = None
+        self.sampling_history = None
         if self.pending_feedback_queue is not None:
             self.pending_feedback_queue.clear()
         from sglang_omni.models.moss_speech.fsm import initial_mode

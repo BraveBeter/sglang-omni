@@ -41,12 +41,14 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
         eager_cpu_metadata: bool = False,
         mixed_modalities: bool = False,
         decode_projection_graphs: bool = False,
+        sampling_optimizations: bool = False,
     ) -> None:
         super().__init__()
         self.streaming = streaming
         self.prefix_cache = prefix_cache
         self.eager_cpu_metadata = eager_cpu_metadata
         self.decode_projection_graphs = decode_projection_graphs
+        self.sampling_optimizations = sampling_optimizations
         from sglang_omni.models.moss_speech.request_lifecycle import (
             MossSpeechRequestLifecycle,
         )
@@ -178,7 +180,9 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
         runner_mod = importlib.import_module(
             "sglang_omni.models.moss_speech.model_runner"
         )
-        return runner_mod.MossSpeechModelRunner(model_worker, output_proc)
+        runner = runner_mod.MossSpeechModelRunner(model_worker, output_proc)
+        runner.sampling_optimizations = self.sampling_optimizations
+        return runner
 
     def make_adapters(self, model: Any) -> tuple[Any, Any]:
         from sglang_omni.models.moss_speech.request_builders import (

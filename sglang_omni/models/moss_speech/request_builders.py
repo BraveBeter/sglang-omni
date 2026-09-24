@@ -769,4 +769,5 @@ def cleanup_ar_request_state(data: MossSpeechSGLangRequestData) -> None:
     )
     data.output_rows = []
     data.rng_generator = None
+    data.sampling_history = None
     data.finished = True

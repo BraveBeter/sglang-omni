@@ -76,6 +76,7 @@ class MossSpeechPipelineConfig(PipelineConfig):
     eager_cpu_metadata: bool | None = None
     mixed_modalities: bool | None = None
     decode_projection_graphs: bool | None = None
+    sampling_optimizations: bool | None = None
 
     def model_post_init(self, __context: Any = None) -> None:
         super().model_post_init(__context)
@@ -88,6 +89,7 @@ class MossSpeechPipelineConfig(PipelineConfig):
                     "eager_cpu_metadata",
                     "mixed_modalities",
                     "decode_projection_graphs",
+                    "sampling_optimizations",
                 ):
                     value = getattr(self, name)
                     if value is not None:

@@ -189,6 +189,7 @@ def create_ar_engine_executor(
     eager_cpu_metadata: bool = False,
     mixed_modalities: bool = False,
     decode_projection_graphs: bool = False,
+    sampling_optimizations: bool = False,
 ) -> Any:
     """Build the validated native SGLang scheduler used by the formal YAML."""
     validate_ar_preconditions(model_path, dtype=dtype, codec_path=codec_path)
@@ -207,6 +208,7 @@ def create_ar_engine_executor(
         eager_cpu_metadata=eager_cpu_metadata,
         mixed_modalities=mixed_modalities,
         decode_projection_graphs=decode_projection_graphs,
+        sampling_optimizations=sampling_optimizations,
     ).build(
         model_path,
         gpu_id=0 if gpu_id is None else gpu_id,
