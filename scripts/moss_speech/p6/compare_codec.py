@@ -6,20 +6,31 @@ import argparse
 import json
 from pathlib import Path
 
-import torch
 
-from sglang_omni.models.moss_speech.components.streaming_codec import (
-    MossSpeechStreamingCodec,
-)
-
-
-def main() -> None:
+def parser() -> argparse.ArgumentParser:
+    """Expose the candidate switch without loading the inference runtime."""
     p = argparse.ArgumentParser()
     p.add_argument("--codec-path", type=Path, required=True)
     p.add_argument("--state", type=Path, required=True)
     p.add_argument("--reference-dir", type=Path, required=True)
     p.add_argument("--out-dir", type=Path, required=True)
-    args = p.parse_args()
+    p.add_argument(
+        "--codec-optimizations",
+        action="store_true",
+        help="Compare the opt-in codec optimization path against the same reference",
+    )
+    return p
+
+
+def main() -> None:
+    args = parser().parse_args()
+
+    import torch
+
+    from sglang_omni.models.moss_speech.components.streaming_codec import (
+        MossSpeechStreamingCodec,
+    )
+
     args.out_dir.mkdir(parents=True, exist_ok=False)
     torch.set_num_threads(1)
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -36,10 +47,15 @@ def main() -> None:
         "cases": {},
         "interleaved": {},
         "gpu": torch.cuda.get_device_name(0),
+        "codec_optimizations": args.codec_optimizations,
     }
     try:
         for chunk in (5, 25):
-            codec = MossSpeechStreamingCodec(args.codec_path, chunk_size=chunk)
+            codec = MossSpeechStreamingCodec(
+                args.codec_path,
+                chunk_size=chunk,
+                codec_optimizations=args.codec_optimizations,
+            )
             cases = reference["profiles"][str(chunk)]["cases"]
             for rid, meta in cases.items():
                 data = torch.load(
