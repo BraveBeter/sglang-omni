@@ -43,6 +43,8 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen3 import Qwen3DecoderLayer
 
+from .decode_norm_pointwise import graph_norm
+
 logger = logging.getLogger(__name__)
 
 # Token IDs from the locked checkpoint configuration.
@@ -118,6 +120,9 @@ class MossSpeechRMSNorm(RMSNorm):
                 residual = residual + post_residual_addition
             x = x + residual
             residual = x
+        accelerated = graph_norm(self, x)
+        if accelerated is not None:
+            return accelerated if residual is None else (accelerated, residual)
         dtype = x.dtype
         value = x.float()
         value = value * torch.rsqrt(

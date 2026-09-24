@@ -205,6 +205,8 @@ def create_ar_engine_executor(
     mixed_modalities: bool = False,
     decode_projection_graphs: bool = False,
     decode_full_graphs: bool = False,
+    decode_norm_pointwise: bool = False,
+    decode_norm_kernel_manifest: str | None = None,
     prefill_full_graphs: bool = False,
     sampling_optimizations: bool = False,
 ) -> Any:
@@ -226,6 +228,8 @@ def create_ar_engine_executor(
         mixed_modalities=mixed_modalities,
         decode_projection_graphs=decode_projection_graphs,
         decode_full_graphs=decode_full_graphs,
+        decode_norm_pointwise=decode_norm_pointwise,
+        decode_norm_kernel_manifest=decode_norm_kernel_manifest,
         prefill_full_graphs=prefill_full_graphs,
         sampling_optimizations=sampling_optimizations,
     ).build(

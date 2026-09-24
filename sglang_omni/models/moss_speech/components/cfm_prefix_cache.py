@@ -328,6 +328,7 @@ class PrefixCacheBank:
         from .cosyvoice_flow.cfm_attention import MossCfmAttnProcessor
 
         self.flow = flow
+        self._epoch_owner = None
         self.binding = CacheBinding(
             voice_digest, shapes, dict(environment), tensor_epoch(flow)
         )
@@ -381,8 +382,21 @@ class PrefixCacheBank:
                 )
             )
 
+    def install_epoch_owner(self, owner: Any) -> None:
+        if (
+            self.active_length is not None
+            or getattr(self, "_epoch_owner", None) is not None
+        ):
+            raise RuntimeError("Active or already-bound epoch owner")
+        if owner.flow is not self.flow or not owner.active or owner.closed:
+            raise ValueError("Epoch owner is not qualified for this flow")
+        self._epoch_owner = owner
+
     def current_epoch(self) -> tuple[Any, ...]:
-        return tensor_epoch(self.flow)
+        owner = getattr(self, "_epoch_owner", None)
+        if owner is None:
+            return tensor_epoch(self.flow)
+        return owner.snapshot(self.flow, tensor_epoch)
 
     def scope(
         self, voice: str | None, length: int, final: bool, environment: dict[str, Any]
@@ -486,6 +500,7 @@ class PrefixCacheBank:
         for _, module, original in self.modules:
             module.set_processor(original)
         self.entries.clear()
+        self._epoch_owner = None
 
 
 def build_prepared_manifest(

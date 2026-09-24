@@ -21,6 +21,7 @@ from sglang.srt.model_executor import forward_context as context_api
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 
 from .attention import MossSpeechTorchNativeBackend, _HostIndexVector
+from .decode_norm_pointwise import close_norm_owner, norm_capture
 
 logger = logging.getLogger(__name__)
 CAPACITIES = (128, 512, 1024)
@@ -234,6 +235,7 @@ class _VarlenNativeBackend(TorchNativeAttnBackend):
 class _DecodeGraph:
     def __init__(self, model: Any, runtime: Any, capacity: int) -> None:
         self.model, self.capacity = model, capacity
+        self.norm_owner = getattr(model, "_moss_decode_norm_owner", None)
         device = model._decode_input_embedding.weight.device
         self.input_ids = torch.zeros(1, device=device, dtype=torch.int64)
         self.positions = torch.zeros_like(self.input_ids)
@@ -274,7 +276,10 @@ class _DecodeGraph:
 
     def _forward(self) -> Any:
         self.backend.prepare(self.batch, self.lengths)
-        with (scoped_backend(self.backend),):
+        with (
+            scoped_backend(self.backend),
+            norm_capture(self.norm_owner, self.model, self.capacity),
+        ):
             return self.model._forward_eager(
                 input_ids=self.input_ids,
                 positions=self.positions,
@@ -460,6 +465,10 @@ class MossSpeechDecodeGraphManager:
             self.reason = "insufficient memory during startup capture"
             logger.warning("MOSS full decode graphs disabled: %s", self.reason)
             return
+        except BaseException:
+            if getattr(self.model, "_moss_decode_norm_owner", None) is not None:
+                self.close()
+            raise
         self.startup_seconds = time.perf_counter() - start
         logger.info(
             "MOSS full decode graphs ready: graphs=%d startup_seconds=%.3f",
@@ -523,4 +532,10 @@ class MossSpeechDecodeGraphManager:
             return output
 
     def close(self) -> None:
+        if getattr(self.model, "_moss_decode_norm_owner", None) is not None:
+            # The first startup body can fail before insertion into the cache.
+            # Keep launch code alive until even that queued warmup has drained.
+            torch.cuda.synchronize(self.device)
         self.cache.close()
+        # Release native launch code only after all owned graphs were reset.
+        close_norm_owner(self.model)

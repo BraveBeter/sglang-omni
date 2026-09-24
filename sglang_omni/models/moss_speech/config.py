@@ -77,12 +77,16 @@ class MossSpeechPipelineConfig(PipelineConfig):
     mixed_modalities: bool | None = None
     decode_projection_graphs: bool | None = None
     decode_full_graphs: bool | None = None
+    decode_norm_pointwise: bool | None = None
+    decode_norm_kernel_manifest: str | None = None
     prefill_full_graphs: bool | None = None
     codec_optimizations: bool | None = None
     codec_full_graphs: bool | None = None
     codec_final_bias_alignment: bool | None = None
     codec_final_bias_elision: bool | None = None
     codec_qkv_multistream: bool | None = None
+    codec_native_epoch: bool | None = None
+    codec_native_epoch_manifest: str | None = None
     small_first_chunk: bool | None = None
     stream_startup_schedule: Literal["6_8_align25"] | None = None
     codec_prefix_cache_manifest: str | None = None
@@ -102,6 +106,8 @@ class MossSpeechPipelineConfig(PipelineConfig):
                     "mixed_modalities",
                     "decode_projection_graphs",
                     "decode_full_graphs",
+                    "decode_norm_pointwise",
+                    "decode_norm_kernel_manifest",
                     "prefill_full_graphs",
                     "sampling_optimizations",
                 ):
@@ -126,6 +132,8 @@ class MossSpeechPipelineConfig(PipelineConfig):
                     "codec_final_bias_alignment",
                     "codec_final_bias_elision",
                     "codec_qkv_multistream",
+                    "codec_native_epoch",
+                    "codec_native_epoch_manifest",
                 ):
                     value = getattr(self, name)
                     if value is None:

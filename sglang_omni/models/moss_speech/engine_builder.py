@@ -19,11 +19,15 @@ Model-specific subclass of the COMMON generation builder
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any, Callable
 
 import torch
 
 from sglang_omni.scheduling.engine_factory import SGLangGenerationEngineBuilder
+
+logger = logging.getLogger(__name__)
 
 
 class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
@@ -42,9 +46,25 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
         mixed_modalities: bool = False,
         decode_projection_graphs: bool = False,
         decode_full_graphs: bool = False,
+        decode_norm_pointwise: bool = False,
+        decode_norm_kernel_manifest: str | None = None,
         prefill_full_graphs: bool = False,
         sampling_optimizations: bool = False,
     ) -> None:
+        if type(decode_norm_pointwise) is not bool:
+            raise ValueError("decode_norm_pointwise must be a boolean")
+        if decode_norm_pointwise:
+            if decode_full_graphs is not True or not decode_norm_kernel_manifest:
+                raise ValueError(
+                    "decode_norm_pointwise requires complete decode graphs and a kernel manifest"
+                )
+            from sglang_omni.models.moss_speech.decode_norm_kernel import (
+                validate_manifest,
+            )
+
+            validate_manifest(decode_norm_kernel_manifest)
+        self.decode_norm_pointwise = decode_norm_pointwise
+        self.decode_norm_kernel_manifest = decode_norm_kernel_manifest
         super().__init__()
         self.streaming = streaming
         self.prefix_cache = prefix_cache
@@ -213,7 +233,47 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
         del server_args, generation_cuda_graph_enabled
         if self.decode_full_graphs:
             self._decode_graph_manager = model._decode_graph_manager
-            self._decode_graph_manager.initialize()
+            if not getattr(self, "decode_norm_pointwise", False):
+                self._decode_graph_manager.initialize()
+                return
+            from sglang_omni.models.moss_speech.decode_norm_kernel import Engine
+            from sglang_omni.models.moss_speech.decode_norm_pointwise import (
+                DecodeNormOwner,
+                active_owner,
+            )
+            from sglang_omni.models.moss_speech.sglang_model import MossSpeechRMSNorm
+
+            if getattr(model, "_moss_decode_norm_owner", None) is not None:
+                raise ValueError("Existing decode norm owner")
+            engine = Engine(torch, self.decode_norm_kernel_manifest)
+            owner = DecodeNormOwner(model, MossSpeechRMSNorm, engine)
+            model._moss_decode_norm_owner = owner
+            try:
+                self._decode_graph_manager.initialize()
+                status = owner.status()
+                if not (
+                    self._decode_graph_manager.cache.size == 3
+                    and status["norm_calls"] == 1458
+                    and status["bodies"] == {"128": 3, "512": 3, "1024": 3}
+                    and status["fallback_calls"]
+                    == status["partial_projection_calls"]
+                    == status["failed_bodies"]
+                    == 0
+                    and status["norm_parameter_flags_preserved"] is True
+                    and status["closed"] is status["busy"] is False
+                    and active_owner() is None
+                ):
+                    raise ValueError("Incomplete complete-decode norm startup")
+                logger.info(
+                    "MOSS decode norm graphs ready: %s",
+                    json.dumps(
+                        dict(**status, kernel=engine.identity, replays=0),
+                        sort_keys=True,
+                    ),
+                )
+            except BaseException:
+                self._decode_graph_manager.close()
+                raise
 
     def extra_scheduler_callbacks(self) -> dict[str, Any]:
         if self._prefill_graph_manager is None:

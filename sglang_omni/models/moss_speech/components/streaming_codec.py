@@ -109,6 +109,8 @@ class MossSpeechStreamingCodec:
         self.small_first_chunk = small_first_chunk
         self.codec_path = Path(codec_path) if codec_path is not None else None
         self._prefix_cache = None
+        self._native_epoch = None
+        self._native_epoch_logged = False
         self._prefix_cache_receipt: dict[str, Any] | None = None
         self._prepared_voice = None
         self._full_graphs = None
@@ -713,6 +715,38 @@ class MossSpeechStreamingCodec:
             "MOSS prefix cache %s: %s", event, json.dumps(summary, sort_keys=True)
         )
 
+    def prepare_native_epoch(self, manifest_path: str | Path) -> dict[str, Any]:
+        """Explicit worker-local activation after original prefix/graph preparation."""
+        with self.lock:
+            if self.sessions:
+                raise ValueError("Cannot prepare native epoch with active sessions")
+            if self._prefix_cache is None or self._prepared_voice is None:
+                raise ValueError("Native epoch requires a prepared prefix cache")
+            if self._native_epoch is not None:
+                raise ValueError("Native epoch is already prepared")
+            from .cfm_native_epoch import NativeEpochOwner
+            from .cfm_prefix_cache import tensor_epoch
+
+            owner = NativeEpochOwner(self.flow, manifest_path, tensor_epoch)
+            try:
+                owner.prepare()
+                self._prefix_cache.install_epoch_owner(owner)
+            except BaseException:
+                owner.close()
+                raise
+            self._native_epoch = owner
+            logging.getLogger(__name__).info(
+                "MOSS native epoch ready: %s",
+                json.dumps(owner.status(), sort_keys=True),
+            )
+            return owner.status()
+
+    def native_epoch_status(self) -> dict[str, Any]:
+        with self.lock:
+            if self._native_epoch is None:
+                return dict(enabled=False, reason="disabled or not prepared")
+            return self._native_epoch.status()
+
     def final_bias_alignment_status(self) -> dict[str, Any]:
         with self.lock:
             if self._final_bias_alignment is None:
@@ -743,3 +777,10 @@ class MossSpeechStreamingCodec:
                     json.dumps(self._final_bias_alignment.status(), sort_keys=True),
                 )
                 self._final_bias_alignment_logged = True
+            if self._native_epoch is not None and not self._native_epoch_logged:
+                self._native_epoch.close()
+                logging.getLogger(__name__).info(
+                    "MOSS native epoch closed: %s",
+                    json.dumps(self._native_epoch.status(), sort_keys=True),
+                )
+                self._native_epoch_logged = True

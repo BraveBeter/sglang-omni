@@ -458,6 +458,8 @@ def create_streaming_audio_executor(
     codec_final_bias_alignment: bool = False,
     codec_final_bias_elision: bool = False,
     codec_qkv_multistream: bool = False,
+    codec_native_epoch: bool = False,
+    codec_native_epoch_manifest: str | None = None,
 ) -> MossSpeechStreamingVocoder:
     from .components.streaming_codec import (
         MossSpeechStreamingCodec,
@@ -466,6 +468,23 @@ def create_streaming_audio_executor(
     from .stages import _resolve_codec_dir, create_audio_vocoder_executor
 
     validate_startup_schedule(stream_startup_schedule, chunk_size, small_first_chunk)
+    if (
+        type(codec_native_epoch) is not bool
+        or (
+            codec_native_epoch
+            and (
+                chunk_size != 25
+                or not codec_optimizations
+                or not codec_prefix_cache_manifest
+                or not isinstance(codec_native_epoch_manifest, str)
+                or not codec_native_epoch_manifest
+            )
+        )
+        or (not codec_native_epoch and codec_native_epoch_manifest is not None)
+    ):
+        raise ValueError(
+            "Native epoch requires explicit opt-in, optimized chunk25, prepared prefix and package manifest"
+        )
     if codec_qkv_multistream and (
         chunk_size != 25 or not codec_optimizations or not codec_full_graphs
     ):
@@ -520,6 +539,8 @@ def create_streaming_audio_executor(
             codec.prepare_prefix_cache(codec_prefix_cache_manifest)
         if codec_full_graphs:
             codec.prepare_full_graphs()
+        if codec_native_epoch:
+            codec.prepare_native_epoch(codec_native_epoch_manifest)
         if codec_optimizations:
             # HiFT owns weights only; the two flow profiles keep separate sessions.
             offline = create_audio_vocoder_executor(

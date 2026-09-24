@@ -89,3 +89,10 @@ layouts, masks, training/custom processors or selected backends use the original
 path. The qualification is empirical bitwise regression of the supported
 shapes and tested inputs, rather than a claim that arbitrary SDPA subdomains
 are automatically bitwise equivalent.
+
+The optional native state traversal (`../kernels/epoch.cpp`) and decode norm
+(`../kernels/decode_norm_native.cu`) are adapter-owned implementations. They build
+explicitly through `python -m sglang_omni.models.moss_speech.prepare`, without
+importing the reference repository or bundling compiled binaries. Local build
+validation retains the original Torch reduction/BF16 rounding and compares the
+metadata traversal against the live Python implementation.

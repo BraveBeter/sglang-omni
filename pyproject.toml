@@ -152,3 +152,5 @@ version = {attr = "sglang_omni.__version__"}
 "sglang_omni.models.fishaudio_s2_pro" = ["fish_speech/configs/*.yaml"]
 "sglang_omni.models.higgs_tts" = ["configs/*.json"]
 "sglang_omni.models.zonos2" = ["moe_configs/*/*.json"]
+
+"sglang_omni.models.moss_speech" = ["kernels/*.cu", "kernels/*.cpp"]
