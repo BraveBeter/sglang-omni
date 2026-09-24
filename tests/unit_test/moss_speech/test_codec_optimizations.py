@@ -25,6 +25,42 @@ def make_codec(enabled: bool, chunk: int = 5) -> MossSpeechStreamingCodec:
     )
 
 
+@pytest.mark.parametrize("chunk", [5, 25])
+@pytest.mark.parametrize("length", [1, 10, 11, 13, 28, 33, 36, 64, 128])
+def test_optimized_overlap_preserves_samples_and_rng(chunk: int, length: int) -> None:
+    results = []
+    before = torch.get_rng_state().clone()
+    for enabled in (False, True):
+        codec = make_codec(enabled, chunk)
+        codec.begin("a", voice(), seed=11)
+        codec.begin("b", voice(), seed=17)
+        waves = []
+        for _ in range(length):
+            waves.extend(codec.push("a", [7]))
+            codec.push("b", [8])
+        codec.cleanup("b")
+        waves.extend(codec.push("a", [], final=True))
+        results.append(([w.numel() for w in waves], torch.cat(waves)))
+        assert not codec.sessions
+    assert results[0][0] == results[1][0]
+    assert torch.equal(results[0][1], results[1][1])
+    assert results[0][1].numel() == length * 1920
+    assert torch.equal(before, torch.get_rng_state())
+
+
+def test_unready_push_skips_rng_scope_but_validates_codes() -> None:
+    codec = make_codec(True)
+    codec.begin("a", voice(), seed=3)
+    with patch(
+        "torch.random.fork_rng", side_effect=AssertionError("unexpected RNG scope")
+    ):
+        assert codec.push("a", [1]) == []
+        assert codec.push("a", []) == []
+    with pytest.raises(ValueError, match="code"):
+        codec.push("a", [True])
+    assert not codec.sessions
+
+
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("channels", [[16], [16, 16]])
 def test_cfm_reuses_masks_with_exact_outputs(
@@ -91,6 +127,22 @@ def test_cfm_reuses_masks_with_exact_outputs(
         changed = cfm(**inputs)[0]
         cfm.inference_optimizations = False
         assert torch.equal(changed, cfm(**inputs)[0])
+
+
+def test_codec_options_are_opt_in_and_vocoder_only() -> None:
+    from sglang_omni.models.moss_speech.config import (
+        MossSpeechPipelineConfig,
+        MossSpeechStreamingPipelineConfig,
+    )
+
+    for cls in (MossSpeechPipelineConfig, MossSpeechStreamingPipelineConfig):
+        default = cls(model_path="local")
+        enabled = cls(model_path="local", codec_optimizations=True)
+        for stage in enabled.stages:
+            assert stage.factory_args.get("codec_optimizations", False) == (
+                stage.name == "audio_vocoder"
+            )
+        assert all("codec_optimizations" not in s.factory_args for s in default.stages)
 
 
 def test_attention_bias_prepares_heads_once_per_solve() -> None:
@@ -169,3 +221,24 @@ def test_optimized_decoder_adapter_skips_unused_voice_enrollment() -> None:
     ):
         cls("local", load_encoder=False, codec_optimizations=False)
         speaker.assert_called_once()
+
+
+def test_streaming_factory_shares_hift_in_optimized_profile() -> None:
+    from sglang_omni.models.moss_speech import stages, streaming
+    from sglang_omni.models.moss_speech.components import streaming_codec
+
+    hift = object()
+    codec = SimpleNamespace(hift=hift)
+    offline = SimpleNamespace(_fn=lambda p: p)
+    with (
+        patch.object(stages, "_resolve_codec_dir", return_value="local"),
+        patch.object(streaming_codec, "MossSpeechStreamingCodec", return_value=codec),
+        patch.object(
+            stages, "create_audio_vocoder_executor", return_value=offline
+        ) as factory,
+    ):
+        result = streaming.create_streaming_audio_executor(
+            "model", codec_optimizations=True
+        )
+        assert result.codec is codec
+        assert factory.call_args.kwargs["shared_hift"] is hift

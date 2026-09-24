@@ -1,5 +1,16 @@
-# Opt-in chunk5 streaming on the measured A800-80GB profile.
+# Legacy chunk5 compatibility profile; excluded from recommended deployment.
+# Use moss_speech_single_gpu.yaml or moss_speech_dual_gpu.yaml for chunk25.
 # Override assets directly with --model-path, --codec-path and --voice-wav.
 # The model defaults own routing, worker allocation, and request budgets.
 config_cls: MossSpeechStreamingPipelineConfig
 model_path: models/MOSS-Speech
+
+# Enable codec preparation/transfer optimizations in this example profile.
+# Streaming also shares HiFT weights with its offline decoder.
+codec_optimizations: true
+
+# Experimental request-local sampling preparation (disabled by default).
+# sampling_optimizations: true
+
+# Lower peak codec memory at a possible latency cost (disabled by default).
+# codec_memory_optimizations: true

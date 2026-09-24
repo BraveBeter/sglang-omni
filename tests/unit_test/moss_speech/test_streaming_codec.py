@@ -116,3 +116,55 @@ def test_weight_loader_allows_only_training_metadata():
         load_flow_weights(layer, dict(state, unknown=torch.zeros(1)))
     with pytest.raises(RuntimeError, match="Missing key"):
         load_flow_weights(layer, {"epoch": 12, "step": 100})
+
+
+@pytest.mark.parametrize("length", [1, 4, 5, 8, 10, 11, 13, 16, 21, 28, 512])
+def test_bounded_hops_preserve_samples_ledger_and_rng(length):
+    c = codec()
+    before = torch.get_rng_state().clone()
+    c.begin("eager", voice(), seed=7)
+    eager_state = c.sessions["eager"]
+    expected = c.push("eager", [2] * length, final=True)
+    c.begin("bounded", voice(), seed=7)
+    bounded_state = c.sessions["bounded"]
+    actual = c.push("bounded", [2] * length, final=True, max_hops=1)
+    assert len(actual) == 1
+    while "bounded" in c.sessions:
+        waves = c.push("bounded", [], max_hops=1)
+        assert len(waves) == 1
+        actual.extend(waves)
+    assert len(expected) == len(actual)
+    assert all(torch.equal(a, b) for a, b in zip(expected, actual))
+    assert eager_state.ledger == bounded_state.ledger
+    assert torch.equal(eager_state.cpu_rng, bounded_state.cpu_rng)
+    assert torch.equal(before, torch.get_rng_state())
+
+
+def test_bounded_hops_interleave_seeds_and_abort_without_rng_leak():
+    c = codec()
+    before = torch.get_rng_state().clone()
+    c.begin("eager", voice(), seed=7)
+    expected = c.push("eager", [2] * 28, final=True)
+    c.begin("a", voice(), seed=7)
+    c.begin("b", voice(), seed=19)
+    actual = c.push("a", [2] * 28, final=True, max_hops=1)
+    c.push("b", [3] * 28, final=True, max_hops=1)
+    c.cleanup("b")
+    while "a" in c.sessions:
+        actual.extend(c.push("a", [], max_hops=1))
+    assert all(torch.equal(a, b) for a, b in zip(expected, actual))
+    assert torch.equal(before, torch.get_rng_state())
+    assert not c.sessions
+
+
+def test_bounded_hop_validation_and_pending_final_reject_new_codes():
+    c = codec()
+    c.begin("bad_limit", voice(), seed=0)
+    with pytest.raises(ValueError, match="max_hops"):
+        c.push("bad_limit", [2], max_hops=0)
+    assert not c.sessions
+    c.begin("r", voice(), seed=0)
+    c.push("r", [2] * 28, final=True, max_hops=1)
+    with pytest.raises(ValueError, match="final"):
+        c.push("r", [3], max_hops=1)
+    assert not c.sessions

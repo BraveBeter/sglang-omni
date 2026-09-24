@@ -291,15 +291,25 @@ def create_audio_vocoder_executor(
     *,
     codec_path: Optional[str] = None,
     gpu_id: int | None = None,
+    codec_optimizations: bool = False,
+    codec_memory_optimizations: bool = False,
+    shared_hift: torch.nn.Module | None = None,
+    stream_decode_fairness: bool = False,
 ) -> SimpleScheduler:
+    # The option affects streaming scheduling only; offline requests stay whole.
+    del stream_decode_fairness
     codec_dir = _resolve_codec_dir(model_path, codec_path)
     adapter = MossSpeechCodecAdapter(
         codec_dir,
         load_encoder=False,
         load_decoder=True,
+        codec_optimizations=codec_optimizations,
+        codec_memory_optimizations=codec_memory_optimizations,
+        shared_hift=shared_hift,
         device=f"cuda:{gpu_id}" if gpu_id is not None else "cuda",
     )
-    _VOICE_CACHE: dict[str, Any] = {}  # device tensor copies keyed by voice_key
+    _VOICE_CACHE: dict[str, Any] = {}  # immutable per-voice conditioning
+    voice_device = adapter._device if codec_optimizations else torch.device("cpu")
 
     def _voice_for(state: MossSpeechState) -> Any:
         key = state.voice_key
@@ -311,8 +321,9 @@ def create_audio_vocoder_executor(
                 VoiceConditioning,
             )
 
+            tensors = unpack_voice_payload(state_voice_payload(state))
             cached = VoiceConditioning(
-                **unpack_voice_payload(state_voice_payload(state)),
+                **{name: value.to(voice_device) for name, value in tensors.items()},
                 meta={"sr": 24000},
             )
             _VOICE_CACHE[key] = cached

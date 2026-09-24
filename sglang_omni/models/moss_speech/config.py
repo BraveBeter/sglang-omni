@@ -7,7 +7,7 @@ uses the same native builder validated by the Phase 3 parity drivers.
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from sglang_omni.config import (
     PipelineConfig,
@@ -76,6 +76,16 @@ class MossSpeechPipelineConfig(PipelineConfig):
     eager_cpu_metadata: bool | None = None
     mixed_modalities: bool | None = None
     decode_projection_graphs: bool | None = None
+    codec_optimizations: bool | None = None
+    codec_full_graphs: bool | None = None
+    codec_final_bias_alignment: bool | None = None
+    codec_final_bias_elision: bool | None = None
+    codec_qkv_multistream: bool | None = None
+    small_first_chunk: bool | None = None
+    stream_startup_schedule: Literal["6_8_align25"] | None = None
+    codec_prefix_cache_manifest: str | None = None
+    stream_decode_fairness: bool | None = None
+    codec_memory_optimizations: bool | None = None
     sampling_optimizations: bool | None = None
 
     def model_post_init(self, __context: Any = None) -> None:
@@ -94,6 +104,35 @@ class MossSpeechPipelineConfig(PipelineConfig):
                     value = getattr(self, name)
                     if value is not None:
                         stage.factory_args[name] = value
+            if stage.name == "audio_vocoder":
+                for name in (
+                    "codec_optimizations",
+                    "codec_memory_optimizations",
+                    "stream_decode_fairness",
+                ):
+                    value = getattr(self, name)
+                    if value is not None:
+                        stage.factory_args[name] = value
+            if stage.name == "audio_vocoder":
+                for name in (
+                    "small_first_chunk",
+                    "stream_startup_schedule",
+                    "codec_prefix_cache_manifest",
+                    "codec_full_graphs",
+                    "codec_final_bias_alignment",
+                    "codec_final_bias_elision",
+                    "codec_qkv_multistream",
+                ):
+                    value = getattr(self, name)
+                    if value is None:
+                        continue
+                    if (
+                        stage.factory
+                        == f"{_PKG}.streaming.create_streaming_audio_executor"
+                    ):
+                        stage.factory_args[name] = value
+                    elif value:
+                        raise ValueError(f"{name} requires the streaming vocoder")
             if self.codec_path is not None and stage.name in {
                 "preprocessing",
                 "ar_engine",

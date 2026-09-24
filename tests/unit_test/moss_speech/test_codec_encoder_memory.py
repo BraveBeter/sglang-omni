@@ -117,6 +117,53 @@ def test_decoder_preparation_and_memory_options_are_independent(
     builder.assert_called_once_with(**expected)
 
 
+def test_memory_option_is_opt_in_and_vocoder_only() -> None:
+    from sglang_omni.models.moss_speech.config import (
+        MossSpeechPipelineConfig,
+        MossSpeechStreamingPipelineConfig,
+    )
+
+    for cls in (MossSpeechPipelineConfig, MossSpeechStreamingPipelineConfig):
+        default = cls(model_path="local", codec_optimizations=True)
+        assert all(
+            not s.factory_args.get("codec_memory_optimizations", False)
+            for s in default.stages
+        )
+        enabled = cls(model_path="local", codec_memory_optimizations=True)
+        for stage in enabled.stages:
+            assert stage.factory_args.get("codec_memory_optimizations", False) == (
+                stage.name == "audio_vocoder"
+            )
+            assert not stage.factory_args.get("codec_optimizations", False)
+
+
+@pytest.mark.parametrize("prepare", [False, True])
+def test_memory_option_reaches_both_streaming_decoders(prepare: bool) -> None:
+    from types import SimpleNamespace
+
+    from sglang_omni.models.moss_speech import stages, streaming
+    from sglang_omni.models.moss_speech.components import streaming_codec
+
+    with (
+        patch.object(stages, "_resolve_codec_dir", return_value="local"),
+        patch.object(
+            streaming_codec,
+            "MossSpeechStreamingCodec",
+            return_value=SimpleNamespace(hift=object()),
+        ) as chunk,
+        patch.object(
+            stages,
+            "create_audio_vocoder_executor",
+            return_value=SimpleNamespace(_fn=lambda p: p),
+        ) as offline,
+    ):
+        streaming.create_streaming_audio_executor(
+            "model", codec_optimizations=prepare, codec_memory_optimizations=True
+        )
+    assert chunk.call_args.kwargs["codec_memory_optimizations"] is True
+    assert offline.call_args.kwargs["codec_memory_optimizations"] is True
+
+
 @pytest.mark.parametrize("size", [1, 2, 3, 12, 17])
 @pytest.mark.parametrize("batch,heads", [(1, 2), (2, 3)])
 def test_relative_shift_reuses_storage_without_changing_elements(

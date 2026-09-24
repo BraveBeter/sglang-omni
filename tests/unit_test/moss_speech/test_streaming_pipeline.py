@@ -236,3 +236,95 @@ def test_text_utf8_hold_final_prefix_and_shutdown_cleanup():
     assert result["text"] == "你" and result["usage"]["completion_tokens"] == 1
     s.stop()
     assert not s.states
+
+
+@pytest.mark.parametrize("profile", ["chunk5", "chunk25", "small_first", "6_8_align25"])
+@pytest.mark.parametrize("length", [1, 8, 13, 28, 57])
+def test_bounded_scheduler_keeps_single_code_chunks_and_full_pcm(length, profile):
+    import numpy as np
+
+    from sglang_omni.models.moss_speech.streaming import MossSpeechStreamingVocoder
+    from tests.unit_test.moss_speech.test_streaming_codec import codec
+    from tests.unit_test.scheduling.test_bounded_streaming_vocoder import drain_pending
+
+    def run(bounded):
+        c = codec()
+        c.codec_optimizations = True
+        c.chunk_size = 5 if profile == "chunk5" else 25
+        c.small_first_chunk = profile == "small_first"
+        c.stream_startup_schedule = "6_8_align25" if profile == "6_8_align25" else None
+        s = MossSpeechStreamingVocoder(c, None, defer_stream_decode=bounded)
+        for index in range(length):
+            s._on_chunk("r", audio_item([3], index=index, first=(index == 0)))
+        s._on_done("r")
+        p = payload()
+        p.data["output_grid"] = [[151667, 3]] * length + [[151667, 16384]]
+        s._handle_streaming_new_request("r", p)
+        if bounded:
+            drain_pending(s)
+        messages = []
+        while not s.outbox.empty():
+            messages.append(s.outbox.get_nowait())
+        assert not c.sessions and not s._stream_states and not s._pending_done
+        chunks = [
+            np.frombuffer(m.data["audio_waveform"], dtype="float32")
+            for m in messages
+            if m.type == "stream"
+        ]
+        terminal = [m for m in messages if m.type == "result"]
+        assert len(terminal) == 1
+        return chunks, terminal[0].data.data["stream_codec_ledger"]
+
+    expected, expected_ledger = run(False)
+    actual, actual_ledger = run(True)
+    assert expected_ledger == actual_ledger
+    assert len(expected) == len(actual)
+    assert all(np.array_equal(a, b) for a, b in zip(expected, actual))
+
+
+@pytest.mark.parametrize("profile", ["chunk5", "chunk25", "small_first", "6_8_align25"])
+@pytest.mark.parametrize(
+    "sizes", [[28], [7, 21], [11, 17], [3, 11, 14], [1, 10, 1, 9, 7]]
+)
+def test_bounded_scheduler_keeps_burst_item_emission_boundaries(sizes, profile):
+    import numpy as np
+
+    from sglang_omni.models.moss_speech.streaming import MossSpeechStreamingVocoder
+    from tests.unit_test.moss_speech.test_streaming_codec import codec
+    from tests.unit_test.scheduling.test_bounded_streaming_vocoder import drain_pending
+
+    def run(bounded):
+        c = codec()
+        c.codec_optimizations = True
+        c.chunk_size = 5 if profile == "chunk5" else 25
+        c.small_first_chunk = profile == "small_first"
+        c.stream_startup_schedule = "6_8_align25" if profile == "6_8_align25" else None
+        s = MossSpeechStreamingVocoder(c, None, defer_stream_decode=bounded)
+        index = 0
+        for size in sizes:
+            s._on_chunk("r", audio_item([3] * size, index=index, first=(index == 0)))
+            index += size
+        s._on_done("r")
+        p = payload()
+        p.data["output_grid"] = [[151667, 3]] * index + [[151667, 16384]]
+        s._handle_streaming_new_request("r", p)
+        if bounded:
+            drain_pending(s)
+        messages = []
+        while not s.outbox.empty():
+            messages.append(s.outbox.get_nowait())
+        assert not c.sessions and not s._stream_states
+        chunks = [
+            np.frombuffer(m.data["audio_waveform"], dtype="float32")
+            for m in messages
+            if m.type == "stream"
+        ]
+        terminal = [m for m in messages if m.type == "result"]
+        assert len(terminal) == 1
+        return chunks, terminal[0].data.data["stream_codec_ledger"]
+
+    expected, expected_ledger = run(False)
+    actual, actual_ledger = run(True)
+    assert expected_ledger == actual_ledger
+    assert len(expected) == len(actual)
+    assert all(np.array_equal(a, b) for a, b in zip(expected, actual))
