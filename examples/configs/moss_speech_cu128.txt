@@ -1,0 +1,14 @@
+# Explicit overrides for the measured A800 graph/native-package profile.
+# Use with uv pip install --torch-backend=cu128 --overrides THIS_FILE.
+torch==2.9.1+cu128
+torchaudio==2.9.1+cu128
+torchvision==0.24.1+cu128
+torchcodec==0.8.1
+triton==3.5.1
+cuda-python==12.9.4
+cuda-bindings==12.9.4
+numpy==2.2.6
+scipy==1.15.3
+einops==0.8.1
+librosa==0.11.0
+onnxruntime==1.23.2

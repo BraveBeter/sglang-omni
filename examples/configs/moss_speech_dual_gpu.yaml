@@ -1,0 +1,80 @@
+# Measured on 2 x A800-SXM4-80GB, without MPS; TP=1.
+# GPU 0: AR. GPU 1: input encoder and streaming codec.
+# Build the three manifests with python -m sglang_omni.models.moss_speech.prepare.
+# Supply the resulting paths with the cookbook command:
+# --decode-norm-kernel-manifest, --codec-prefix-cache-manifest,
+# --codec-native-epoch-manifest. These packages are not bundled with the model.
+config_cls: MossSpeechStreamingPipelineConfig
+model_path: models/MOSS-Speech
+
+prefix_cache: false
+eager_cpu_metadata: true
+mixed_modalities: true
+decode_projection_graphs: true
+decode_full_graphs: true
+decode_norm_pointwise: true
+prefill_full_graphs: true
+codec_optimizations: true
+codec_full_graphs: true
+codec_final_bias_alignment: true
+codec_final_bias_elision: true
+codec_qkv_multistream: true
+codec_native_epoch: true
+stream_startup_schedule: 6_8_align25
+codec_memory_optimizations: false
+sampling_optimizations: false
+
+# Explicit stages preserve streaming routes while changing GPU placement.
+stages:
+  - name: preprocessing
+    process: preproc
+    factory: sglang_omni.models.moss_speech.stages.create_preprocessing_executor
+    factory_args:
+      encode_batch_size: 4
+      allow_streaming: true
+    gpu: 1
+    runtime:
+      resources:
+        total_gpu_memory_fraction: 0.06
+    next: ar_engine
+
+  - name: ar_engine
+    process: ar
+    factory: sglang_omni.models.moss_speech.stages.create_ar_engine_executor
+    factory_args:
+      dtype: bfloat16
+      streaming: true
+      server_args_overrides:
+        max_running_requests: 4
+        max_queued_requests: 20
+        max_total_tokens: 4096
+    gpu: 0
+    runtime:
+      resources:
+        total_gpu_memory_fraction: 0.54
+      sglang_server_args:
+        mem_fraction_static: 0.54
+    next: [text_decode, audio_vocoder]
+    route_fn: sglang_omni.models.moss_speech.request_builders.resolve_output_terminal
+    stream_to: [text_decode, audio_vocoder]
+    stream_done_to_fn: sglang_omni.models.moss_speech.streaming.resolve_stream_terminal
+
+  - name: text_decode
+    process: text_out
+    factory: sglang_omni.models.moss_speech.streaming.create_streaming_text_executor
+    terminal: true
+    can_accept_stream_before_payload: true
+
+  - name: audio_vocoder
+    process: vocoder
+    factory: sglang_omni.models.moss_speech.streaming.create_streaming_audio_executor
+    factory_args:
+      chunk_size: 25
+    gpu: 1
+    runtime:
+      resources:
+        total_gpu_memory_fraction: 0.30
+    env:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    terminal: true
+    can_accept_stream_before_payload: true

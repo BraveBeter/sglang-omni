@@ -4,8 +4,11 @@ MOSS-Speech provides text/speech input and text/speech output, with an opt-in
 streaming profile, through
 `POST /v1/chat/completions`. It is a conversation model; speech transcription and
 verbatim reading are prompting tasks, without a dedicated ASR/TTS quality claim.
-The streaming deployment preset targets one A800 80 GB GPU with TP1,
-BF16 AR/KV and FP32 codec. Codec execution concurrency is 1.
+Two streaming deployment presets are available: one A800 80 GB, and two A800
+80 GB GPUs with the AR stage separated from the input encoder and codec. Both
+use TP1, BF16 AR/KV and FP32 codec. The two-GPU preset also enables the measured
+AR/CFM graph and fixed-voice optimizations. These are stage placements, not tensor
+parallelism or two independent replicas. Codec execution concurrency is 1.
 
 ## Installation and model assets
 
@@ -56,6 +59,7 @@ working directory. No generated configuration or model-specific launcher is need
 | Preset | GPU placement | Streaming schedule | Graphs and caching |
 | --- | --- | --- | --- |
 | [Single GPU](../../examples/configs/moss_speech_single_gpu.yaml) | Input encoder, AR and codec on GPU 0 | chunk25 | Decode projection graphs; full AR/prefill/CFM graphs off; AR prefix KV cache off |
+| [Dual GPU](../../examples/configs/moss_speech_dual_gpu.yaml) | AR on GPU 0; input encoder and codec on GPU 1 | chunk25 with `6_8_align25` startup | Full AR decode/prefill and CFM graphs, qualified norm/QKV/final-bias/native-epoch options, fixed-voice CFM cache; AR prefix KV cache off |
 
 ### Single A800 80 GB
 
@@ -72,14 +76,91 @@ This is the single-GPU chunk25 profile evaluated on 2026-09-24. It needs the mod
 codec and default voice, with no separate optimization packages. The codec must
 include `flow/flow-chunk-25.pt` and the offline decoder assets.
 
-GPU IDs are logical indices within `CUDA_VISIBLE_DEVICES`. On a directly managed
-host, select one card with `CUDA_VISIBLE_DEVICES=0`. On Slurm, preserve the
-allocation's GPU visibility. This preset does not require MPS.
+### Two A800 80 GB GPUs
 
-Advanced full AR/CFM graphs and fixed-voice cache settings are described in the
-[model execution options](../../sglang_omni/models/moss_speech/README.md).
-They require a compatible runtime and independent validation of the selected
-voice and chunk schedule; the single-GPU preset keeps them disabled.
+The best measured profile uses Python 3.10, Torch 2.9.1+cu128, SGLang 0.5.16,
+Transformers 5.12.1 and Diffusers 0.37.0 on two A800-SXM4-80GB GPUs. The general
+project installation currently selects a newer Torch/CUDA stack. For this
+explicit profile, create a separate environment and use the supplied overrides:
+
+```bash
+uv venv --python 3.10 .venv-moss
+source .venv-moss/bin/activate
+uv pip install --torch-backend=cu128 \
+  --overrides sglang-omni/examples/configs/moss_speech_cu128.txt \
+  -e './sglang-omni[moss-speech]'
+```
+
+Install CUDA Toolkit 12.8 (`nvcc`) and a C++17 compiler (`g++`) on the build host.
+Build in the same Python environment used for serving. Native packages are local
+build artifacts: no private binary, source checkout outside this repository, or
+reference-model implementation is needed. The source files also ship in the wheel.
+
+The measured voice is `assets/prompt-cn.wav` from the upstream MOSS-Speech
+revision `1ea408a10d07b9fdc7a27bce19d1211b62067784`. Download it before going offline:
+
+```bash
+curl --fail --location \
+  https://raw.githubusercontent.com/OpenMOSS/MOSS-Speech/1ea408a10d07b9fdc7a27bce19d1211b62067784/assets/prompt-cn.wav \
+  --output voice.wav
+```
+
+On the allocated GPU host, create three fresh output directories using the
+installed preparation module. `--nvcc /path/to/nvcc` and `--cxx /path/to/g++` can
+select compilers that are not on `PATH`:
+
+```bash
+python -m sglang_omni.models.moss_speech.prepare norm --out prepared/norm
+python -m sglang_omni.models.moss_speech.prepare epoch --out prepared/epoch
+python -m sglang_omni.models.moss_speech.prepare prefix \
+  --codec-path models/MOSS-Speech-Codec --voice-wav voice.wav \
+  --device 1 --out prepared/prefix
+
+export MOSS_NORM_MANIFEST=prepared/norm/manifest.json
+export MOSS_PREFIX_MANIFEST=prepared/prefix/manifest.json
+export MOSS_EPOCH_MANIFEST=prepared/epoch/manifest.json
+```
+
+The norm build compares all intermediate tensors and CUDA graph replays with
+Torch arithmetic for the supported shapes. The epoch build checks live metadata
+against the Python traversal, including mutations and unsupported overrides.
+Prefix preparation encodes the voice, verifies its 342-code shape and compares
+original, cached and complete-CFM-graph execution before publishing its manifest.
+Failed builds leave diagnostics but no deployable manifest. These bounded checks
+do not replace a workload-level correctness and performance benchmark.
+
+Keep each complete output directory. Package paths are relative to their manifest;
+source, binary, runtime and validation fingerprints are checked on load. The
+prepared voice directory can be relocated together; after source/environment
+changes, rerun preparation in fresh directories. A different voice is not an
+interchangeable override: this profile currently requires 342 reference codes.
+Serving loads and verifies prepared artifacts and never invokes a compiler.
+
+```bash
+sgl-omni serve \
+  --config sglang-omni/examples/configs/moss_speech_dual_gpu.yaml \
+  --model-path models/MOSS-Speech \
+  --codec-path models/MOSS-Speech-Codec \
+  --voice-wav voice.wav \
+  --decode-norm-kernel-manifest "${MOSS_NORM_MANIFEST:?Set the qualified norm manifest}" \
+  --codec-prefix-cache-manifest "${MOSS_PREFIX_MANIFEST:?Set the prepared voice manifest}" \
+  --codec-native-epoch-manifest "${MOSS_EPOCH_MANIFEST:?Set the qualified epoch manifest}" \
+  --model-name moss-speech --host 127.0.0.1 --port 8000
+```
+
+The manifest paths can instead be set as the corresponding top-level YAML
+fields. GPU IDs are logical indices within `CUDA_VISIBLE_DEVICES`. On a directly
+managed host, select one card with `CUDA_VISIBLE_DEVICES=0` or two with
+`CUDA_VISIBLE_DEVICES=0,1` before the command. On Slurm, preserve the allocation's
+GPU visibility and request one or two GPUs respectively. Neither preset needs
+MPS; both keep AR tensor parallelism at 1.
+
+`6_8_align25` emits after 9, 17 and 36 generated audio codes, then uses 25-code
+hops. The first two audio chunks contain 320 ms and 640 ms. It has its own
+waveform reference and should not be compared byte-for-byte with ordinary
+chunk25. Full AR graph coverage is principally batch size 1; unsupported shapes
+use the existing fallback. The fixed-voice CFM cache is separate from prefix KV
+reuse in AR, which is disabled in both presets.
 
 ### Readiness, shutdown and offline output
 
@@ -204,20 +285,22 @@ Performance used three load rounds per client concurrency. The C1 statistics
 below include 57 speech requests, of which six reached the output limit. They
 are observations on A800-SXM4-80GB, not production latency guarantees.
 
-| Metric | Single GPU, chunk25 |
-| --- | ---: |
-| First audio, p50 / p95 | 2.299 / 2.338 s |
-| End-to-end RTF, p50 / p95 | 0.890 / 1.127 |
-| Pipeline-ready startup | 40.53 s |
-| Peak sampled GPU memory, including startup | 27.88 GiB |
+| Metric | Single GPU, chunk25 | Dual GPU, `6_8_align25` |
+| --- | ---: | ---: |
+| First audio, p50 / p95 | 2.299 / 2.338 s | 0.606 / 0.638 s |
+| End-to-end RTF, p50 / p95 | 0.890 / 1.127 | 0.638 / 0.811 |
+| Pipeline-ready startup | 40.53 s | 54.07 s |
+| Peak sampled GPU memory, including startup | 27.88 GiB | AR 30.96 GiB; encoder/codec 49.22 GiB |
 
 Start with client concurrency 1. C2/C4 increased first-audio and completion
 latency sharply with little throughput improvement. RTF below 1 does not by
-itself guarantee uninterrupted playback. The separately measured two-GPU experiment depended on native packages that
-are not included in this checkout, so its results do not describe this preset.
+itself guarantee uninterrupted playback. The deployments differ in graph/cache
+options and startup scheduling as well as GPU count.
 
-The streaming profile matched all 38 reference token grids, decoded text and
-finish reasons. The HF offline decoder is not a streaming PCM reference. The separate single-GPU
+Both streaming profiles matched all 38 reference token grids, decoded text and
+finish reasons. The dual-GPU optimized profile also matched all 19 waveforms
+from its ordinary-execution reference using the same startup schedule. The
+HF offline decoder is not a streaming PCM reference. The separate single-GPU
 offline test retained two strict PCM mismatches on length-capped S2S outputs:
 native decoded 512 valid codes, while the upstream processor decoded 511.
 This does not establish that all offline outputs are equivalent.
