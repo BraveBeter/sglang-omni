@@ -82,3 +82,12 @@ python examples/run_omni.py ming-speech-server \
 ```
 
 Use a different `--port` if you run more than one server at the same time.
+
+## MOSS-Speech
+
+Use the standard `sgl-omni serve --config ...` command with
+[the single-GPU preset](configs/moss_speech_single_gpu.yaml), which uses chunk25
+on an A800 80 GB GPU.
+See the [MOSS-Speech cookbook](../docs/cookbook/moss_speech.md) for asset
+preparation, complete launch commands, requests and measured limits. Its commands
+run from the parent directory of this checkout.

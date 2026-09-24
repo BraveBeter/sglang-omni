@@ -1,0 +1,18 @@
+# Measured on 1 x A800-SXM4-80GB, without MPS; TP=1.
+# All GPU stages share logical GPU 0. Streaming uses chunk25.
+# See docs/cookbook/moss_speech.md for assets and launch commands.
+config_cls: MossSpeechStreamingPipelineConfig
+model_path: models/MOSS-Speech
+
+prefix_cache: false
+eager_cpu_metadata: true
+mixed_modalities: true
+decode_projection_graphs: true
+codec_optimizations: true
+codec_memory_optimizations: false
+sampling_optimizations: false
+
+# Full AR/prefill/CFM graphs and the fixed-voice cache remain disabled.
+runtime_overrides:
+  audio_vocoder:
+    chunk_size: 25

@@ -4,10 +4,8 @@ MOSS-Speech provides text/speech input and text/speech output, with an opt-in
 streaming profile, through
 `POST /v1/chat/completions`. It is a conversation model; speech transcription and
 verbatim reading are prompting tasks, without a dedicated ASR/TTS quality claim.
-The measured baseline is one A80080GB, TP1, BF16 native AR/KV, FP32 codec, eager
-PyTorch attention. Uploaded voices, radix caching, CUDA Graph, compile,
-quantization and TP>1 are disabled. The pipeline uses one inline input encoder and
-separate text/audio terminals. Codec execution concurrency is 1.
+The streaming deployment preset targets one A800 80 GB GPU with TP1,
+BF16 AR/KV and FP32 codec. Codec execution concurrency is 1.
 
 ## Installation and model assets
 
@@ -42,32 +40,63 @@ The server needs the AR/tokenizer directory, the full codec directory and this
 voice file. No reference-source checkout is required for serving. The native
 path does not execute `trust_remote_code`.
 
-## Start the server
+## Server configuration
 
-On a GPU host, launch directly with local asset paths:
+Run the following commands from the parent directory of `sglang-omni/`, on an
+allocated GPU host. Download assets before using an offline compute node:
+
+```bash
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 OMP_NUM_THREADS=1
+```
+
+The presets contain no machine-specific paths. Supply local assets through the
+existing `sgl-omni serve` command; relative paths are relative to the launch
+working directory. No generated configuration or model-specific launcher is needed.
+
+| Preset | GPU placement | Streaming schedule | Graphs and caching |
+| --- | --- | --- | --- |
+| [Single GPU](../../examples/configs/moss_speech_single_gpu.yaml) | Input encoder, AR and codec on GPU 0 | chunk25 | Decode projection graphs; full AR/prefill/CFM graphs off; AR prefix KV cache off |
+
+### Single A800 80 GB
 
 ```bash
 sgl-omni serve \
+  --config sglang-omni/examples/configs/moss_speech_single_gpu.yaml \
   --model-path models/MOSS-Speech \
   --codec-path models/MOSS-Speech-Codec \
   --voice-wav voice.wav \
-  --host 127.0.0.1 --port 8000
+  --model-name moss-speech --host 127.0.0.1 --port 8000
 ```
 
-`--model-path` discovers the MOSS-Speech pipeline automatically. `--codec-path`
-and `--voice-wav` are model-specific configuration options handled by the normal
-CLI. Relative asset paths are relative to the launch directory. The codec path
-may be omitted when it is the sibling `<model-path>-Codec` directory. Explicit
-voice configuration takes precedence over `MOSS_SPEECH_VOICE_WAV`, which remains
-available for existing deployments.
+This is the single-GPU chunk25 profile evaluated on 2026-09-24. It needs the model,
+codec and default voice, with no separate optimization packages. The codec must
+include `flow/flow-chunk-25.pt` and the offline decoder assets.
 
-A portable optional preset is available at
-`sglang-omni/examples/configs/moss_speech.yaml`; pass it with `--config` and the
-same asset options if you prefer file-based configuration. The file contains
-no operator-specific paths. `/health` reports readiness; SIGTERM or Ctrl-C stops
-the server and its workers. On Slurm, run the command inside an allocated GPU
-job. For offline deployment, download assets first and set `HF_HUB_OFFLINE=1`
-and `TRANSFORMERS_OFFLINE=1`.
+GPU IDs are logical indices within `CUDA_VISIBLE_DEVICES`. On a directly managed
+host, select one card with `CUDA_VISIBLE_DEVICES=0`. On Slurm, preserve the
+allocation's GPU visibility. This preset does not require MPS.
+
+Advanced full AR/CFM graphs and fixed-voice cache settings are described in the
+[model execution options](../../sglang_omni/models/moss_speech/README.md).
+They require a compatible runtime and independent validation of the selected
+voice and chunk schedule; the single-GPU preset keeps them disabled.
+
+### Readiness, shutdown and offline output
+
+```bash
+curl --fail http://127.0.0.1:8000/health
+```
+
+Wait for readiness before sending requests. Ctrl-C or SIGTERM stops the service
+and workers. Use `--host 0.0.0.0` when clients connect from another machine.
+
+For the original non-streaming pipeline, use
+`--config sglang-omni/examples/configs/moss_speech.yaml` with the same model,
+codec and voice arguments. Model-path autodiscovery also selects that offline
+pipeline; it rejects `stream=true`. The legacy
+`sglang-omni/examples/configs/moss_speech_streaming.yaml` remains a chunk5
+compatibility example. Use the new chunk25 presets for deployment; chunk5 is
+excluded because of its measured latency.
 
 ## Four-mode requests
 
@@ -119,31 +148,12 @@ The default output budget is 200 grid rows. `finish_reason=length` means the
 utterance may be incomplete. Usage counts one dual-channel grid row as one token,
 including template/input-audio positions. A disconnect aborts outstanding work.
 
-## Explicit streaming variant
+## Streaming requests
 
-For incremental output, select the supplied streaming preset. It uses the same
-asset options and installed console command:
-
-```bash
-sgl-omni serve \
-  --config sglang-omni/examples/configs/moss_speech_streaming.yaml \
-  --model-path models/MOSS-Speech \
-  --codec-path models/MOSS-Speech-Codec \
-  --voice-wav voice.wav \
-  --host 127.0.0.1 --port 8000
-```
-
-The default pipeline rejects `stream=True`; the streaming preset enables it
-explicitly. No config-generation step is needed.
-
-This requires `flow/flow-chunk-5.pt` in addition to the offline codec assets.
-Chunk25 is component-tested separately; the HTTP baseline uses chunk5. The
-profile keeps BF16 AR/KV and FP32 codec, with deterministic cuDNN scoped to the
-streaming codec. The vocoder worker also defaults
-`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to avoid accumulating unused
-CUDA reservations as prefixes grow. Keep this measured setting; overriding it
-requires separate memory qualification. It does not change the default offline
-computation or the AR worker environment.
+Both single- and dual-GPU presets above enable streaming. The vocoder worker
+sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, and deterministic cuDNN
+is scoped to the streaming codec. Keep these settings when reproducing the
+measured profiles.
 
 Set `stream=True` on the four-mode request above. For speech output, explicitly
 select PCM to obtain headerless signed 16-bit little-endian samples at 24 kHz mono:
@@ -182,16 +192,35 @@ A successful stream has one finish/usage event and one `[DONE]`. A post-header
 failure has a sanitized SSE error and ends without success finish or `[DONE]`.
 Closing the connection aborts unfinished backend work.
 
-Streaming speech uses separately trained flow weights and prefix/overlap decoding;
-it need not equal the offline waveform. The hard comparison is against an
-independent reference with the same streaming profile. Early audio delivery does
-not establish real-time playback throughput or a latency SLA. Do not reuse the
-offline memory estimate for streaming. On the fixed 16 audio cases, client
-TTFA p50/p95 was 2.563/2.719s and E2E RTF p50/p95 was 3.868/5.639. This profile
-therefore does not sustain real-time playback. The full streaming run sampled
-26.487GiB peak GPU memory, including four two-request waves with identical idle
-memory. HTTP concurrency 2 was verified; the inherited AR limit 4 is not a measured
-four-stream load claim. Chunk25 and other hardware need separate HTTP qualification.
+Streaming speech uses separately trained flow weights and prefix/overlap
+decoding, so it need not equal the offline waveform. Compare against a reference
+using the same chunk and startup schedule.
+
+## Measured deployment results
+
+The 2026-09-24 regression used 38 bilingual modality tasks: 32 derived from eight
+SeedTTS source rows, plus six spoken-QA tasks from three OpenAudioBench questions.
+Performance used three load rounds per client concurrency. The C1 statistics
+below include 57 speech requests, of which six reached the output limit. They
+are observations on A800-SXM4-80GB, not production latency guarantees.
+
+| Metric | Single GPU, chunk25 |
+| --- | ---: |
+| First audio, p50 / p95 | 2.299 / 2.338 s |
+| End-to-end RTF, p50 / p95 | 0.890 / 1.127 |
+| Pipeline-ready startup | 40.53 s |
+| Peak sampled GPU memory, including startup | 27.88 GiB |
+
+Start with client concurrency 1. C2/C4 increased first-audio and completion
+latency sharply with little throughput improvement. RTF below 1 does not by
+itself guarantee uninterrupted playback. The separately measured two-GPU experiment depended on native packages that
+are not included in this checkout, so its results do not describe this preset.
+
+The streaming profile matched all 38 reference token grids, decoded text and
+finish reasons. The HF offline decoder is not a streaming PCM reference. The separate single-GPU
+offline test retained two strict PCM mismatches on length-capped S2S outputs:
+native decoded 512 valid codes, while the upstream processor decoded 511.
+This does not establish that all offline outputs are equivalent.
 
 ## Capacity and numerical contract
 
@@ -201,7 +230,7 @@ KV positions. The 25th in-flight request returns
 503. Invalid input returns 400/422; exact post-encode overflow returns 400 before
 AR. For latency-sensitive use start with client concurrency 1.
 
-The measured non-streaming A800 workloads peaked at 27.03–29.19 GiB. A 24 GB
+The 2026-09-24 single-GPU non-streaming workload peaked at 29.78 GiB. A 24 GB
 4090 could not fit the FP32 vocoder working set, even with AR concurrency 1 and
 KV 1024; there is no qualified 24 GB serving preset.
 
