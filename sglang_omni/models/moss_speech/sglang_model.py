@@ -346,6 +346,28 @@ def make_moss_decoder_layer(config: Any, **kwargs: Any) -> MossSpeechDecoderLaye
     return layer
 
 
+def publish_dual_logits(model: Any, out: Any, forward_batch: Any) -> None:
+    """Protect per-request dual heads from the engine sampler's in-place warp."""
+    rids = getattr(forward_batch, "rids", None)
+    if rids is not None:
+        _fm = getattr(forward_batch, "forward_mode", None)
+        _is_dec = bool(
+            _fm is not None
+            and getattr(_fm, "is_decode", None) is not None
+            and _fm.is_decode()
+        )
+        _mode_key = "decode" if _is_dec else "prefill"
+        for _i, _rid in enumerate(rids):
+            # clone: the engine's sampler warps next_token_logits
+            # (same storage as text_logits) IN PLACE inside
+            # forward_batch_generation; slices would see the warped
+            # distribution before the model runner consumes it.
+            model._dual_logits_by_rid[(_rid, _mode_key)] = (
+                out.text_logits[_i].clone(),
+                out.audio_logits[_i].clone(),
+            )
+
+
 class MossSpeechSGLangModel(torch.nn.Module):
     """MOSS-Speech AR backbone (architecture key: MossSpeechForCausalLM).
 
@@ -513,6 +535,37 @@ class MossSpeechSGLangModel(torch.nn.Module):
         input_embeds: Optional[torch.Tensor] = None,
         **kwargs: Any,
     ) -> MossSpeechModelOutput:
+        prefill = getattr(self, "_prefill_graph_manager", None)
+        mode = getattr(forward_batch, "forward_mode", None)
+        if (
+            prefill is not None
+            and mode is not None
+            and getattr(mode, "is_extend", lambda: False)()
+        ):
+            output = prefill.try_replay(
+                input_ids, positions, forward_batch, input_embeds, **kwargs
+            )
+            if output is not None:
+                return output
+        manager = getattr(self, "_decode_graph_manager", None)
+        if manager is not None and not kwargs:
+            output = manager.try_replay(
+                input_ids, positions, forward_batch, input_embeds
+            )
+            if output is not None:
+                return output
+        return self._forward_eager(
+            input_ids, positions, forward_batch, input_embeds, **kwargs
+        )
+
+    def _forward_eager(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        positions: Optional[torch.Tensor] = None,
+        forward_batch: Any = None,
+        input_embeds: Optional[torch.Tensor] = None,
+        **kwargs: Any,
+    ) -> MossSpeechModelOutput:
         del kwargs
         if input_embeds is None:
             if input_ids is None:
@@ -617,28 +670,8 @@ class MossSpeechSGLangModel(torch.nn.Module):
             [self._last_text_hidden[last_idx], self._last_audio_hidden[last_idx]], dim=0
         )
         out = self.compute_dual_logits()
-        # rid-keyed transport: forward_batch is rebuilt between the forward
-        # and the post hooks, and extra forwards (sampling/logprob recompute)
-        # clobber any single-slot stash. Keying by the batch's rids binds
-        # each request's dual logits to exactly this forward.
+        publish_dual_logits(self, out, forward_batch)
         rids = getattr(forward_batch, "rids", None)
-        if rids is not None:
-            _fm = getattr(forward_batch, "forward_mode", None)
-            _is_dec = bool(
-                _fm is not None
-                and getattr(_fm, "is_decode", None) is not None
-                and _fm.is_decode()
-            )
-            _mode_key = "decode" if _is_dec else "prefill"
-            for _i, _rid in enumerate(rids):
-                # clone: the engine's sampler warps next_token_logits
-                # (same storage as text_logits) IN PLACE inside
-                # forward_batch_generation; slices would see the warped
-                # distribution before the model runner consumes it.
-                self._dual_logits_by_rid[(_rid, _mode_key)] = (
-                    out.text_logits[_i].clone(),
-                    out.audio_logits[_i].clone(),
-                )
         out.hidden_states = dual_hidden
         import os as _os2
 
@@ -806,6 +839,12 @@ class MossSpeechSGLangModel(torch.nn.Module):
         return spans[shard]
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> None:
+        prefill = getattr(self, "_prefill_graph_manager", None)
+        if prefill is not None:
+            prefill.close()
+        manager = getattr(self, "_decode_graph_manager", None)
+        if manager is not None:
+            manager.close()
         params = dict(self.named_parameters())
         consumed_sources = 0
         shards_seen: dict[str, set] = {}

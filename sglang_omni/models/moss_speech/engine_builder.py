@@ -41,12 +41,18 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
         eager_cpu_metadata: bool = False,
         mixed_modalities: bool = False,
         decode_projection_graphs: bool = False,
+        decode_full_graphs: bool = False,
+        prefill_full_graphs: bool = False,
         sampling_optimizations: bool = False,
     ) -> None:
         super().__init__()
         self.streaming = streaming
         self.prefix_cache = prefix_cache
         self.eager_cpu_metadata = eager_cpu_metadata
+        self.decode_full_graphs = decode_full_graphs
+        self._decode_graph_manager = None
+        self.prefill_full_graphs = prefill_full_graphs
+        self._prefill_graph_manager = None
         self.decode_projection_graphs = decode_projection_graphs
         self.sampling_optimizations = sampling_optimizations
         from sglang_omni.models.moss_speech.request_lifecycle import (
@@ -173,6 +179,56 @@ class MossSpeechEngineBuilder(SGLangGenerationEngineBuilder):
         target = torch.device(device)
         if model._decode_input_embedding.weight.device != target:
             model._decode_input_embedding = model._decode_input_embedding.to(target)
+        if self.decode_full_graphs:
+            from .decode_graphs import MossSpeechDecodeGraphManager
+
+            self._decode_graph_manager = MossSpeechDecodeGraphManager(
+                model, model_worker.model_runner
+            )
+            model._decode_graph_manager = self._decode_graph_manager
+
+        if self.prefill_full_graphs:
+            from .prefill_graphs import MossSpeechPrefillGraphManager
+
+            self._prefill_graph_manager = MossSpeechPrefillGraphManager(
+                model, model_worker.model_runner
+            )
+            model._prefill_graph_manager = self._prefill_graph_manager
+
+    def post_scheduler_setup(self, scheduler: Any, model_runner: Any) -> None:
+        if self._prefill_graph_manager is not None:
+            if scheduler._running or scheduler._scheduler_thread_id is not None:
+                raise RuntimeError(
+                    "Prefill graphs must initialize before scheduler starts"
+                )
+            self._prefill_graph_manager.initialize(model_runner)
+
+    def setup_model_resources(
+        self,
+        model: Any,
+        server_args: Any,
+        *,
+        generation_cuda_graph_enabled: bool,
+    ) -> None:
+        del server_args, generation_cuda_graph_enabled
+        if self.decode_full_graphs:
+            self._decode_graph_manager = model._decode_graph_manager
+            self._decode_graph_manager.initialize()
+
+    def extra_scheduler_callbacks(self) -> dict[str, Any]:
+        if self._prefill_graph_manager is None:
+            return (
+                {}
+                if self._decode_graph_manager is None
+                else {"shutdown_callback": self._decode_graph_manager.close}
+            )
+        return {"shutdown_callback": self.cleanup_build_failure}
+
+    def cleanup_build_failure(self) -> None:
+        if self._prefill_graph_manager is not None:
+            self._prefill_graph_manager.close()
+        if self._decode_graph_manager is not None:
+            self._decode_graph_manager.close()
 
     def make_model_runner(self, model_worker: Any, output_proc: Any) -> Any:
         import importlib

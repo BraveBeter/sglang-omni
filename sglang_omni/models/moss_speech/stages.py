@@ -204,6 +204,8 @@ def create_ar_engine_executor(
     eager_cpu_metadata: bool = False,
     mixed_modalities: bool = False,
     decode_projection_graphs: bool = False,
+    decode_full_graphs: bool = False,
+    prefill_full_graphs: bool = False,
     sampling_optimizations: bool = False,
 ) -> Any:
     """Build the validated native SGLang scheduler used by the formal YAML."""
@@ -223,6 +225,8 @@ def create_ar_engine_executor(
         eager_cpu_metadata=eager_cpu_metadata,
         mixed_modalities=mixed_modalities,
         decode_projection_graphs=decode_projection_graphs,
+        decode_full_graphs=decode_full_graphs,
+        prefill_full_graphs=prefill_full_graphs,
         sampling_optimizations=sampling_optimizations,
     ).build(
         model_path,

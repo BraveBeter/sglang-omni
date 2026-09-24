@@ -184,6 +184,7 @@ def test_public_flag_defaults_and_streaming_merge():
         codec_final_bias_alignment=True,
         codec_optimizations=True,
         stream_startup_schedule="6_8_align25",
+        prefill_full_graphs=True,
     )
     changed = ConfigManager(config).merge_config({"codec_final_bias_alignment": False})
     stages = {s.name: s for s in changed.stages}
@@ -191,6 +192,7 @@ def test_public_flag_defaults_and_streaming_merge():
     assert (
         stages["audio_vocoder"].factory_args["stream_startup_schedule"] == "6_8_align25"
     )
+    assert stages["ar_engine"].factory_args["prefill_full_graphs"] is True
     assert config.codec_final_bias_alignment is True
 
 

@@ -76,6 +76,8 @@ class MossSpeechPipelineConfig(PipelineConfig):
     eager_cpu_metadata: bool | None = None
     mixed_modalities: bool | None = None
     decode_projection_graphs: bool | None = None
+    decode_full_graphs: bool | None = None
+    prefill_full_graphs: bool | None = None
     codec_optimizations: bool | None = None
     codec_full_graphs: bool | None = None
     codec_final_bias_alignment: bool | None = None
@@ -99,6 +101,8 @@ class MossSpeechPipelineConfig(PipelineConfig):
                     "eager_cpu_metadata",
                     "mixed_modalities",
                     "decode_projection_graphs",
+                    "decode_full_graphs",
+                    "prefill_full_graphs",
                     "sampling_optimizations",
                 ):
                     value = getattr(self, name)
