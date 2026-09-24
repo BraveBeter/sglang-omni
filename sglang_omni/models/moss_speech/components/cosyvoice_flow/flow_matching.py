@@ -16,6 +16,8 @@ import torch
 import torch.nn.functional as F
 
 from ..matcha_components.flow_matching_base import BASECFM
+from .cfm_attention import FullValidMask, expand_cfg_provenance
+from .decoder import CausalConditionalDecoder
 from .utils_common import set_all_random_seed
 
 
@@ -89,7 +91,17 @@ class ConditionalCFM(BASECFM):
             cache,
         )
 
-    def solve_euler(self, x, t_span, mu, mask, spks, cond, streaming=False):
+    def solve_euler(
+        self,
+        x: torch.Tensor,
+        t_span: torch.Tensor,
+        mu: torch.Tensor,
+        mask: torch.Tensor,
+        spks: torch.Tensor,
+        cond: torch.Tensor,
+        streaming: bool = False,
+        full_valid_mask: FullValidMask | None = None,
+    ) -> torch.Tensor:
         """
         Fixed euler solver for ODEs.
         Args:
@@ -108,7 +120,10 @@ class ConditionalCFM(BASECFM):
         t = t.unsqueeze(dim=0)
         # I am storing this because I can later plot it by putting a debugger here and saving it to a file
         # Or in future might add like a return_all_steps flag
-        sol = []
+        optimized = getattr(self, "inference_optimizations", False)
+        sol = None if optimized else []
+        # Lifetime is one ODE solve: the mask is unchanged across its steps.
+        attention_bias_cache = {} if optimized else None
 
         # Do not use concat, it may cause memory format changed and trt infer with wrong results!
         x_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
@@ -117,16 +132,32 @@ class ConditionalCFM(BASECFM):
         t_in = torch.zeros([2], device=x.device, dtype=x.dtype)
         spks_in = torch.zeros([2, 80], device=x.device, dtype=x.dtype)
         cond_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
+        cfg_proof = None
+        if optimized:
+            mask_in[:] = mask
+            cfg_proof = expand_cfg_provenance(full_valid_mask, mask, mask_in)
+            mu_in[0] = mu
+            spks_in[0] = spks
+            cond_in[0] = cond
         for step in range(1, len(t_span)):
             # Classifier-Free Guidance inference introduced in VoiceBox
             x_in[:] = x
-            mask_in[:] = mask
-            mu_in[0] = mu
+            if not optimized:
+                mask_in[:] = mask
+                mu_in[0] = mu
+                spks_in[0] = spks
+                cond_in[0] = cond
             t_in[:] = t.unsqueeze(0)
-            spks_in[0] = spks
-            cond_in[0] = cond
             dphi_dt = self.forward_estimator(
-                x_in, mask_in, mu_in, t_in, spks_in, cond_in, streaming
+                x_in,
+                mask_in,
+                mu_in,
+                t_in,
+                spks_in,
+                cond_in,
+                streaming,
+                attention_bias_cache=attention_bias_cache,
+                full_valid_mask=cfg_proof,
             )
             dphi_dt, cfg_dphi_dt = torch.split(dphi_dt, [x.size(0), x.size(0)], dim=0)
             dphi_dt = (
@@ -134,15 +165,39 @@ class ConditionalCFM(BASECFM):
             ) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt
             x = x + dt * dphi_dt
             t = t + dt
-            sol.append(x)
+            if sol is not None:
+                sol.append(x)
             if step < len(t_span) - 1:
                 dt = t_span[step + 1] - t
 
-        return sol[-1].float()
+        return x.float()
 
-    def forward_estimator(self, x, mask, mu, t, spks, cond, streaming=False):
+    def forward_estimator(
+        self,
+        x: torch.Tensor,
+        mask: torch.Tensor,
+        mu: torch.Tensor,
+        t: torch.Tensor,
+        spks: torch.Tensor,
+        cond: torch.Tensor,
+        streaming: bool = False,
+        attention_bias_cache: dict[tuple, torch.Tensor] | None = None,
+        full_valid_mask: FullValidMask | None = None,
+    ) -> torch.Tensor:
         if isinstance(self.estimator, torch.nn.Module):
-            return self.estimator(x, mask, mu, t, spks, cond, streaming=streaming)
+            kwargs = (
+                {}
+                if attention_bias_cache is None
+                else {"attention_bias_cache": attention_bias_cache}
+            )
+            if (
+                type(self.estimator) is CausalConditionalDecoder
+                and full_valid_mask is not None
+            ):
+                kwargs["full_valid_mask"] = full_valid_mask
+            return self.estimator(
+                x, mask, mu, t, spks, cond, streaming=streaming, **kwargs
+            )
         else:
             [estimator, stream], trt_engine = self.estimator.acquire_estimator()
             # NOTE need to synchronize when switching stream
@@ -229,6 +284,8 @@ class CausalConditionalCFM(ConditionalCFM):
         super().__init__(in_channels, cfm_params, n_spks, spk_emb_dim, estimator)
         set_all_random_seed(0)
         self.rand_noise = torch.randn([1, 80, 50 * 300])
+        self.inference_optimizations = False
+        self.register_buffer("_inference_noise", None, persistent=False)
 
     @torch.inference_mode()
     def forward(
@@ -240,6 +297,7 @@ class CausalConditionalCFM(ConditionalCFM):
         spks=None,
         cond=None,
         streaming=False,
+        full_valid_mask: FullValidMask | None = None,
     ):
         """Forward diffusion
 
@@ -259,7 +317,17 @@ class CausalConditionalCFM(ConditionalCFM):
                 shape: (batch_size, n_feats, mel_timesteps)
         """
 
-        z = self.rand_noise[:, :, : mu.size(2)].to(mu.device).to(mu.dtype) * temperature
+        if self.inference_optimizations:
+            noise = self._inference_noise
+            if noise is None or noise.device != mu.device or noise.dtype != mu.dtype:
+                noise = self.rand_noise.to(device=mu.device, dtype=mu.dtype)
+                self._inference_noise = noise
+            z = noise[:, :, : mu.size(2)] * temperature
+        else:
+            z = (
+                self.rand_noise[:, :, : mu.size(2)].to(mu.device).to(mu.dtype)
+                * temperature
+            )
         # fix prompt and overlap part mu and z
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device, dtype=mu.dtype)
         if self.t_scheduler == "cosine":
@@ -273,6 +341,7 @@ class CausalConditionalCFM(ConditionalCFM):
                 spks=spks,
                 cond=cond,
                 streaming=streaming,
+                full_valid_mask=full_valid_mask,
             ),
             None,
         )

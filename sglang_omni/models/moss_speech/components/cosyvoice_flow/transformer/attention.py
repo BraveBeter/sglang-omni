@@ -210,6 +210,7 @@ class RelPositionMultiHeadedAttention(MultiHeadedAttention):
         super().__init__(n_head, n_feat, dropout_rate, key_bias)
         # linear transformation for positional encoding
         self.linear_pos = nn.Linear(n_feat, n_feat, bias=False)
+        self.inference_optimizations = False
         # these two learnable bias are used in matrix c and matrix d
         # as described in https://arxiv.org/abs/1901.02860 Section 3.3
         self.pos_bias_u = nn.Parameter(torch.Tensor(self.h, self.d_k))
@@ -228,6 +229,25 @@ class RelPositionMultiHeadedAttention(MultiHeadedAttention):
             torch.Tensor: Output tensor.
 
         """
+        size = x.size(2)
+        if (
+            self.inference_optimizations
+            and not self.training
+            and not torch.is_grad_enabled()
+            and size > 0
+            and x.size(3) == 2 * size - 1
+            and x.is_contiguous()
+        ):
+            # Output (i, j) reads input (i, size - 1 - i + j); square
+            # self-attention never reaches the padded zeros. Keep this view
+            # read-only and derive inner strides from the contiguous shape,
+            # including singleton axes whose input strides may be zero.
+            strides = x.stride()
+            return x.as_strided(
+                (x.size(0), x.size(1), size, size),
+                (strides[0], strides[1], 2 * size - 2, 1),
+                storage_offset=x.storage_offset() + size - 1,
+            )
         zero_pad = torch.zeros(
             (x.size()[0], x.size()[1], x.size()[2], 1), device=x.device, dtype=x.dtype
         )
@@ -315,8 +335,18 @@ class RelPositionMultiHeadedAttention(MultiHeadedAttention):
         if matrix_ac.shape != matrix_bd.shape:
             matrix_bd = self.rel_shift(matrix_bd)
 
-        scores = (matrix_ac + matrix_bd) / math.sqrt(
-            self.d_k
-        )  # (batch, head, time1, time2)
+        if (
+            self.inference_optimizations
+            and not self.training
+            and not torch.is_grad_enabled()
+        ):
+            # Reuse the private matmul output without changing arithmetic order.
+            # Release the positional score storage before masking and softmax.
+            scores = matrix_ac
+            scores.add_(matrix_bd)
+            scores.div_(math.sqrt(self.d_k))
+            del matrix_ac, matrix_bd
+        else:
+            scores = (matrix_ac + matrix_bd) / math.sqrt(self.d_k)
 
         return self.forward_attention(v, scores, mask), new_cache

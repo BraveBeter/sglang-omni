@@ -19,6 +19,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+from .cfm_attention import new_full_valid_mask
+from .flow_matching import CausalConditionalCFM
 from .utils_mask import make_pad_mask
 
 
@@ -327,7 +329,10 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
             torch.concat([prompt_token, token], dim=1),
             prompt_token_len + token_len,
         )
-        mask = (~make_pad_mask(token_len)).unsqueeze(-1).to(embedding)
+        max_len = (
+            token.shape[1] if getattr(self, "inference_optimizations", False) else 0
+        )
+        mask = (~make_pad_mask(token_len, max_len)).unsqueeze(-1).to(embedding)
         token = self.input_embedding(torch.clamp(token, min=0)) * mask
 
         # text encode
@@ -351,14 +356,22 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         conds[:, :mel_len1] = prompt_feat
         conds = conds.transpose(1, 2)
 
-        mask = (~make_pad_mask(torch.tensor([mel_len1 + mel_len2]))).to(h)
+        decoder_kwargs = {}
+        if getattr(self, "inference_optimizations", False):
+            mask, proof = new_full_valid_mask(h, mel_len1 + mel_len2)
+            if type(self.decoder) is CausalConditionalCFM:
+                decoder_kwargs["full_valid_mask"] = proof
+        else:
+            mask = (~make_pad_mask(torch.tensor([mel_len1 + mel_len2]))).to(h)
+            mask = mask.unsqueeze(1)
         feat, _ = self.decoder(
             mu=h.transpose(1, 2).contiguous(),
-            mask=mask.unsqueeze(1),
+            mask=mask,
             spks=embedding,
             cond=conds,
             n_timesteps=10,
             streaming=streaming,
+            **decoder_kwargs,
         )
         feat_return = feat[:, :, mel_len1:]
         assert feat_return.shape[2] == mel_len2

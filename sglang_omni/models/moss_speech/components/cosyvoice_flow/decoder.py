@@ -27,6 +27,12 @@ from ..matcha_components.decoder import (
     Upsample1D,
 )
 from ..matcha_components.transformer import BasicTransformerBlock
+from .cfm_attention import (
+    AttentionPlan,
+    FullValidMask,
+    MossCfmAttnProcessor,
+    make_attention_plan,
+)
 from .utils_common import mask_to_bias
 from .utils_mask import add_optional_chunk_mask
 
@@ -355,6 +361,7 @@ class CausalConditionalDecoder(ConditionalDecoder):
         )
         self.static_chunk_size = static_chunk_size
         self.num_decoding_left_chunks = num_decoding_left_chunks
+        self.attention_heads = num_heads
         self.down_blocks = nn.ModuleList([])
         self.mid_blocks = nn.ModuleList([])
         self.up_blocks = nn.ModuleList([])
@@ -442,7 +449,72 @@ class CausalConditionalDecoder(ConditionalDecoder):
         self.final_proj = nn.Conv1d(channels[-1], self.out_channels, 1)
         self.initialize_weights()
 
-    def forward(self, x, mask, mu, t, spks=None, cond=None, streaming=False):
+    def _attention_bias(
+        self,
+        x: torch.Tensor,
+        mask: torch.Tensor,
+        streaming: bool,
+        cache: dict[tuple, torch.Tensor] | None,
+    ) -> torch.Tensor:
+        key = (
+            mask.data_ptr(),
+            tuple(mask.shape),
+            tuple(mask.stride()),
+            x.size(1),
+            x.dtype,
+            x.device,
+            streaming,
+            self.static_chunk_size,
+        )
+        if cache is not None and key in cache:
+            return cache[key]
+        if streaming:
+            bias = add_optional_chunk_mask(
+                x, mask.bool(), False, False, 0, self.static_chunk_size, -1
+            )
+        else:
+            bias = add_optional_chunk_mask(
+                x, mask.bool(), False, False, 0, 0, -1
+            ).repeat(1, x.size(1), 1)
+        bias = mask_to_bias(bias, x.dtype)
+        if cache is not None:
+            # Diffusers otherwise repeats this quadratic tensor in every block.
+            # Preserve its exact layout once for all layers and Euler steps.
+            bias = bias.repeat_interleave(self.attention_heads, dim=0)
+            cache[key] = bias
+        return bias
+
+    def _make_attention_plan(
+        self,
+        mask: torch.Tensor,
+        bias: torch.Tensor,
+        proof: FullValidMask | None,
+        streaming: bool,
+    ) -> AttentionPlan | None:
+        if (
+            type(self) is not CausalConditionalDecoder
+            or getattr(self._attention_bias, "__func__", None)
+            is not _NATIVE_CAUSAL_ATTENTION_BIAS
+            or self.training
+            or torch.is_grad_enabled()
+        ):
+            return None
+        return make_attention_plan(
+            mask, bias, proof, streaming=streaming, chunk_size=self.static_chunk_size
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: torch.Tensor,
+        mu: torch.Tensor,
+        t: torch.Tensor,
+        spks: torch.Tensor | None = None,
+        cond: torch.Tensor | None = None,
+        streaming: bool = False,
+        attention_bias_cache: dict[tuple, torch.Tensor] | None = None,
+        full_valid_mask: FullValidMask | None = None,
+    ) -> torch.Tensor:
         """Forward pass of the UNet1DConditional model.
 
         Args:
@@ -476,20 +548,35 @@ class CausalConditionalDecoder(ConditionalDecoder):
             mask_down = masks[-1]
             x = resnet(x, mask_down, t)
             x = rearrange(x, "b c t -> b t c").contiguous()
-            if streaming is True:
-                attn_mask = add_optional_chunk_mask(
-                    x, mask_down.bool(), False, False, 0, self.static_chunk_size, -1
+            attn_mask = self._attention_bias(
+                x, mask_down, streaming, attention_bias_cache
+            )
+            final_alignment = getattr(self, "_final_bias_alignment", None)
+            if final_alignment is not None:
+                attn_mask = final_alignment.apply(
+                    decoder=self,
+                    x=x,
+                    mask=mask_down,
+                    bias=attn_mask,
+                    proof=full_valid_mask,
+                    streaming=streaming,
+                    cache=attention_bias_cache,
                 )
-            else:
-                attn_mask = add_optional_chunk_mask(
-                    x, mask_down.bool(), False, False, 0, 0, -1
-                ).repeat(1, x.size(1), 1)
-            attn_mask = mask_to_bias(attn_mask, x.dtype)
+            plan = self._make_attention_plan(
+                mask_down, attn_mask, full_valid_mask, streaming
+            )
+            attention_kwargs = {"moss_cfm_mask_plan": plan} if plan is not None else {}
             for transformer_block in transformer_blocks:
                 x = transformer_block(
                     hidden_states=x,
                     attention_mask=attn_mask,
                     timestep=t,
+                    cross_attention_kwargs=(
+                        attention_kwargs
+                        if type(transformer_block.attn1.processor)
+                        is MossCfmAttnProcessor
+                        else {}
+                    ),
                 )
             x = rearrange(x, "b t c -> b c t").contiguous()
             hiddens.append(x)  # Save hidden states for skip connections
@@ -501,20 +588,35 @@ class CausalConditionalDecoder(ConditionalDecoder):
         for resnet, transformer_blocks in self.mid_blocks:
             x = resnet(x, mask_mid, t)
             x = rearrange(x, "b c t -> b t c").contiguous()
-            if streaming is True:
-                attn_mask = add_optional_chunk_mask(
-                    x, mask_mid.bool(), False, False, 0, self.static_chunk_size, -1
+            attn_mask = self._attention_bias(
+                x, mask_mid, streaming, attention_bias_cache
+            )
+            final_alignment = getattr(self, "_final_bias_alignment", None)
+            if final_alignment is not None:
+                attn_mask = final_alignment.apply(
+                    decoder=self,
+                    x=x,
+                    mask=mask_mid,
+                    bias=attn_mask,
+                    proof=full_valid_mask,
+                    streaming=streaming,
+                    cache=attention_bias_cache,
                 )
-            else:
-                attn_mask = add_optional_chunk_mask(
-                    x, mask_mid.bool(), False, False, 0, 0, -1
-                ).repeat(1, x.size(1), 1)
-            attn_mask = mask_to_bias(attn_mask, x.dtype)
+            plan = self._make_attention_plan(
+                mask_mid, attn_mask, full_valid_mask, streaming
+            )
+            attention_kwargs = {"moss_cfm_mask_plan": plan} if plan is not None else {}
             for transformer_block in transformer_blocks:
                 x = transformer_block(
                     hidden_states=x,
                     attention_mask=attn_mask,
                     timestep=t,
+                    cross_attention_kwargs=(
+                        attention_kwargs
+                        if type(transformer_block.attn1.processor)
+                        is MossCfmAttnProcessor
+                        else {}
+                    ),
                 )
             x = rearrange(x, "b t c -> b c t").contiguous()
 
@@ -524,23 +626,45 @@ class CausalConditionalDecoder(ConditionalDecoder):
             x = pack([x[:, :, : skip.shape[-1]], skip], "b * t")[0]
             x = resnet(x, mask_up, t)
             x = rearrange(x, "b c t -> b t c").contiguous()
-            if streaming is True:
-                attn_mask = add_optional_chunk_mask(
-                    x, mask_up.bool(), False, False, 0, self.static_chunk_size, -1
+            attn_mask = self._attention_bias(
+                x, mask_up, streaming, attention_bias_cache
+            )
+            final_alignment = getattr(self, "_final_bias_alignment", None)
+            if final_alignment is not None:
+                attn_mask = final_alignment.apply(
+                    decoder=self,
+                    x=x,
+                    mask=mask_up,
+                    bias=attn_mask,
+                    proof=full_valid_mask,
+                    streaming=streaming,
+                    cache=attention_bias_cache,
                 )
-            else:
-                attn_mask = add_optional_chunk_mask(
-                    x, mask_up.bool(), False, False, 0, 0, -1
-                ).repeat(1, x.size(1), 1)
-            attn_mask = mask_to_bias(attn_mask, x.dtype)
+            plan = self._make_attention_plan(
+                mask_up, attn_mask, full_valid_mask, streaming
+            )
+            attention_kwargs = {"moss_cfm_mask_plan": plan} if plan is not None else {}
             for transformer_block in transformer_blocks:
                 x = transformer_block(
                     hidden_states=x,
                     attention_mask=attn_mask,
                     timestep=t,
+                    cross_attention_kwargs=(
+                        attention_kwargs
+                        if type(transformer_block.attn1.processor)
+                        is MossCfmAttnProcessor
+                        else {}
+                    ),
                 )
             x = rearrange(x, "b t c -> b c t").contiguous()
             x = upsample(x * mask_up)
         x = self.final_block(x, mask_up)
         output = self.final_proj(x * mask_up)
         return output * mask
+
+
+# Preserve the native constructor identity if an instance/class is customized.
+_NATIVE_CAUSAL_ATTENTION_BIAS = CausalConditionalDecoder._attention_bias
+
+_NATIVE_MASK_TO_BIAS = mask_to_bias
+_NATIVE_ADD_OPTIONAL_CHUNK_MASK = add_optional_chunk_mask

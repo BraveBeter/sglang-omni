@@ -42,11 +42,13 @@ from safetensors.torch import load_file
 from torch import nn
 from transformers import PreTrainedModel, WhisperFeatureExtractor
 
+from ..cosyvoice_flow.cfm_attention import install_cfm_processors
 from ..cosyvoice_flow.decoder import CausalConditionalDecoder
 from ..cosyvoice_flow.flow import CausalMaskedDiffWithXvec
 from ..cosyvoice_flow.flow_matching import CausalConditionalCFM
 from ..cosyvoice_flow.hifigan_f0_predictor import ConvRNNF0Predictor
 from ..cosyvoice_flow.hifigan_generator import HiFTGenerator
+from ..cosyvoice_flow.transformer.attention import RelPositionMultiHeadedAttention
 from ..cosyvoice_flow.transformer.upsample_encoder import UpsampleConformerEncoder
 from ..matcha_components.audio import mel_spectrogram
 from .configuration import MossSpeechCodecConfig
@@ -80,8 +82,12 @@ def _scoped_global_rng():
 
 
 def _build_flow_decoder(
-    token_frame_rate: float = 12.5, chunk_size: int = 5, token_mel_ratio: int = 4
-):
+    token_frame_rate: float = 12.5,
+    chunk_size: int = 5,
+    token_mel_ratio: int = 4,
+    inference_optimizations: bool = False,
+    memory_optimizations: bool = False,
+) -> CausalMaskedDiffWithXvec:
     """Explicit construction of the flow/HiFT stack.
 
     Parameter values are transcribed 1:1 from ``flow/config.yaml`` of the
@@ -135,6 +141,9 @@ def _build_flow_decoder(
         macaron_style=False,
         static_chunk_size=chunk_size,
     )
+    for module in encoder.modules():
+        if isinstance(module, RelPositionMultiHeadedAttention):
+            module.inference_optimizations = memory_optimizations
     flow = CausalMaskedDiffWithXvec(
         input_size=512,
         output_size=80,
@@ -148,6 +157,10 @@ def _build_flow_decoder(
         encoder=encoder,
         decoder=decoder,
     )
+    flow.inference_optimizations = inference_optimizations
+    flow.decoder.inference_optimizations = inference_optimizations
+    if inference_optimizations:
+        install_cfm_processors(estimator)
     return flow
 
 
@@ -192,6 +205,10 @@ class AudioDecoder(nn.Module):
         hift_ckpt_path: Union[str, os.PathLike],
         campplus_model: Union[str, os.PathLike],
         device: Union[str, torch.device] = "cuda",
+        codec_optimizations: bool = False,
+        shared_hift: nn.Module | None = None,
+        load_speaker_encoder: bool = True,
+        codec_memory_optimizations: bool = False,
     ) -> None:
         super().__init__()
         self.device = torch.device(device) if isinstance(device, str) else device
@@ -199,14 +216,22 @@ class AudioDecoder(nn.Module):
         # Construction is RNG-scoped: the flow constructor seeds global RNG
         # (kept verbatim for rand_noise parity); the caller's state is restored.
         with _scoped_global_rng():
-            self.flow = _build_flow_decoder()
+            flow_options = {}
+            if codec_optimizations:
+                flow_options["inference_optimizations"] = True
+            if codec_memory_optimizations:
+                flow_options["memory_optimizations"] = True
+            self.flow = _build_flow_decoder(**flow_options)
             self.flow.load_state_dict(
                 torch.load(flow_ckpt_path, map_location=self.device), strict=False
             )
-            self.hift = _build_hift()
-            self.hift.load_state_dict(
-                torch.load(hift_ckpt_path, map_location=self.device)
-            )
+            if shared_hift is None:
+                self.hift = _build_hift()
+                self.hift.load_state_dict(
+                    torch.load(hift_ckpt_path, map_location=self.device)
+                )
+            else:
+                self.hift = shared_hift
         self.sample_rate = 24000
         self.feat_extractor = lambda x: mel_spectrogram(
             x,
@@ -238,10 +263,14 @@ class AudioDecoder(nn.Module):
             onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
         )
         session_options.intra_op_num_threads = 1
-        self.campplus_session = onnxruntime.InferenceSession(
-            str(campplus_model),
-            sess_options=session_options,
-            providers=["CPUExecutionProvider"],
+        self.campplus_session = (
+            onnxruntime.InferenceSession(
+                str(campplus_model),
+                sess_options=session_options,
+                providers=["CPUExecutionProvider"],
+            )
+            if load_speaker_encoder
+            else None
         )
         self.speech_window = np.hamming(2 * self.source_cache_len)
 

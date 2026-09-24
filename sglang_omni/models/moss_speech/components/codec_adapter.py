@@ -48,6 +48,9 @@ class MossSpeechCodecAdapter:
         dtype: torch.dtype = torch.float32,
         load_encoder: bool = True,
         load_decoder: bool = True,
+        codec_optimizations: bool = False,
+        codec_memory_optimizations: bool = False,
+        shared_hift: torch.nn.Module | None = None,
     ) -> None:
         if dtype is not torch.float32:
             raise NotImplementedError(
@@ -58,6 +61,8 @@ class MossSpeechCodecAdapter:
         self._device = torch.device(device)
         self._dtype = dtype
         self._closed = False
+        self._codec_optimizations = codec_optimizations
+        self._codec_memory_optimizations = codec_memory_optimizations
         self._decode_lock = threading.Lock()
         self._codec_dir = Path(codec_path)
         self._validate_codec_dir(load_encoder=load_encoder, load_decoder=load_decoder)
@@ -71,12 +76,15 @@ class MossSpeechCodecAdapter:
         if load_encoder:
             self._load_encoder()
         if load_decoder:
-            self._load_decoder()
-        # campplus is cheap and needed for voice enrollment on both configs
-        # where decode-side access is unavailable (encoder-only deployments).
-        self._speaker_encoder = CampplusSpeakerEncoder(
-            self._codec_dir / "flow" / "campplus.onnx"
-        )
+            if shared_hift is None:
+                self._load_decoder()
+            else:
+                self._load_decoder(shared_hift=shared_hift)
+        # Only the encoder side can enroll a voice.
+        if load_encoder or not codec_optimizations:
+            self._speaker_encoder = CampplusSpeakerEncoder(
+                self._codec_dir / "flow" / "campplus.onnx"
+            )
 
     # ------------------------------------------------------------------ load
     def _validate_codec_dir(self, *, load_encoder: bool, load_decoder: bool) -> None:
@@ -114,12 +122,16 @@ class MossSpeechCodecAdapter:
             str(self._codec_dir)
         )
 
-    def _load_decoder(self) -> None:
+    def _load_decoder(self, *, shared_hift: torch.nn.Module | None = None) -> None:
         decoder = AudioDecoder(
             flow_ckpt_path=self._codec_dir / "flow" / "flow.pt",
             hift_ckpt_path=self._codec_dir / "flow" / "hift.pt",
             campplus_model=self._codec_dir / "flow" / "campplus.onnx",
             device=self._device,
+            codec_optimizations=self._codec_optimizations,
+            codec_memory_optimizations=self._codec_memory_optimizations,
+            shared_hift=shared_hift,
+            load_speaker_encoder=not self._codec_optimizations,
         ).eval()
         self._decoder = decoder
 
