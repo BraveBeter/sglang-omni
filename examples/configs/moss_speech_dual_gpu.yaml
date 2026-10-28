@@ -1,0 +1,14 @@
+config_cls: MossSpeechPipelineConfig
+model_path: models/MOSS-Speech
+stages:
+  preprocessing:
+    gpu: 1
+    factory:
+      codec_path: models/MOSS-Speech-Codec
+      voice_wav: voice.wav
+  ar_engine:
+    gpu: 0
+  audio_vocoder:
+    gpu: 1
+    factory:
+      codec_path: models/MOSS-Speech-Codec

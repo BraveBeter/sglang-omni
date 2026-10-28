@@ -125,6 +125,10 @@ minicpm-o = [
     "onnx>=1.18.0",
 ]
 
+moss-speech = [
+    "einops>=0.8.1",
+]
+
 # Drama 3 vocoder imports dac and audiotools. These stay out of the base
 # dependencies, so `uv pip install -e .` for other models is unchanged.
 # descript-audiotools pins protobuf<3.20; tool.uv.override-dependencies keeps
@@ -202,4 +206,10 @@ version = {attr = "sglang_omni.__version__"}
 "sglang_omni.models.fishaudio_s2_pro" = ["fish_speech/configs/*.yaml"]
 "sglang_omni.models.higgs_tts" = ["configs/*.json"]
 "sglang_omni.models.minicpm_o.components.token2wav" = ["THIRD_PARTY_NOTICES.md", "licenses/*.txt"]
+"sglang_omni.models.moss_speech" = ["README.md"]
 "sglang_omni.models.zonos2" = ["moe_configs/*/*.json"]
+"sglang_omni.vendor.moss_speech_codec" = ["VENDORED_SOURCES.md"]
+"sglang_omni.vendor.moss_speech_codec.cosyvoice_flow" = ["LICENSE*"]
+"sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.transformer" = ["LICENSE*"]
+"sglang_omni.vendor.moss_speech_codec.hf_codec" = ["LICENSE.note", "LICENSE.Apache-2.0"]
+"sglang_omni.vendor.moss_speech_codec.matcha_components" = ["LICENSE"]
