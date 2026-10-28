@@ -6,9 +6,21 @@ The implementation uses eager execution, a request-owned sampling generator, and
 
 ## Configuration
 
-Download the MOSS-Speech and MOSS-Speech-Codec checkpoints and a reference WAV, then edit the asset paths in the example configuration. Assets are local directories; the AR tokenizer and configuration load without remote Python code.
+Follow the [source installation guide](../../../docs/get_started/installation.md#install-from-source), including its CUDA build prerequisites, then install the model extra from the repository root in the activated environment:
 
-Install this model's additional dependency with uv pip install -e '.[moss-speech]'. The base runtime supplies ONNX Runtime and Diffusers; a second ONNX Runtime distribution is unnecessary.
+```bash
+uv pip install --prerelease=allow -e '.[moss-speech]'
+```
+
+The base runtime supplies ONNX Runtime and Diffusers; a second ONNX Runtime distribution is unnecessary.
+
+Download the checkpoints and a reference WAV, then edit model_path, codec_path, and voice_wav in the example configuration. Assets are local paths; the AR tokenizer and configuration load without remote Python code. The [real-checkpoint smoke](#tests) preparation command below downloads these pinned revisions and produces a resolved configuration that can also be passed directly to sgl-omni serve.
+
+| Asset | Validated revision |
+|---|---|
+| [OpenMOSS-Team/MOSS-Speech](https://huggingface.co/OpenMOSS-Team/MOSS-Speech) | cff025bb41d8459d59abac0b5e44aba7f659ec9e |
+| [OpenMOSS-Team/MOSS-Speech-Codec](https://huggingface.co/OpenMOSS-Team/MOSS-Speech-Codec) | eeec733e4e1dea7da444d332d8e1621ef257414c |
+| [Reference voice WAV](https://github.com/OpenMOSS/MOSS-Speech/blob/1ea408a10d07b9fdc7a27bce19d1211b62067784/assets/prompt-cn.wav) | MOSS-Speech Git revision 1ea408a10d07b9fdc7a27bce19d1211b62067784 |
 
 Activate the installed environment before launch so standard SGLang CUDA kernel compilation can find its ninja executable. These runtime kernels may compile on the first request.
 
@@ -22,13 +34,61 @@ The default placement assigns preprocessing, AR, and audio decoding to GPU 0 in 
 sgl-omni serve --config examples/configs/moss_speech_dual_gpu.yaml
 ```
 
-These examples configure stage placement. Use the real-checkpoint smoke below to validate startup, output contracts, and recovery on the target GPUs. Measure deployment capacity and performance separately with fixed requests and output budgets.
+Both placements use tensor parallel size one: the dual-GPU configuration places the codec stages on a second device and keeps AR on one GPU. The supported base uses BF16 AR weights/KV storage, torch_native attention, eager execution, and FP32 codec computation. Local real-checkpoint validation used one or two A800-SXM4-80GB GPUs. Other device capacities and tensor parallel sizes have not been validated.
+
+Use the real-checkpoint smoke below to validate startup, output contracts, and recovery on the target GPUs. Measure deployment capacity and performance separately with fixed requests and output budgets.
 
 Set deployment values through typed stage configuration, for example preprocessing.factory.voice_wav, preprocessing.factory.codec_path, audio_vocoder.factory.codec_path, and ar_engine.engine.max_running_requests. The streaming codec uses chunk_size=25, declared once in the vocoder factory configuration. Optional optimization flags from the experimental branch are not part of this pipeline.
 
+## Requests
+
+The service defaults to port 8000 and accepts /v1/chat/completions. Input content determines the input modality; modalities selects one output modality, text or audio. For a buffered text response:
+
+```bash
+curl --fail-with-body http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"Hello, introduce yourself briefly."}],"modalities":["text"],"stream":false,"temperature":0,"top_k":1,"seed":42,"max_tokens":200}'
+```
+
+For speech input and a buffered audio response, use a WAV recording of at most 30 seconds. Run this example with a local input.wav:
+
+```python
+import base64
+from pathlib import Path
+
+import requests
+
+input_audio = base64.b64encode(Path("input.wav").read_bytes()).decode("ascii")
+response = requests.post(
+    "http://127.0.0.1:8000/v1/chat/completions",
+    json={
+        "messages": [{"role": "user", "content": [{
+            "type": "input_audio",
+            "input_audio": {"data": input_audio, "format": "wav"},
+        }]}],
+        "modalities": ["audio"],
+        "stream": False,
+        "temperature": 0,
+        "top_k": 1,
+        "seed": 42,
+        "max_tokens": 512,
+    },
+    timeout=300,
+)
+response.raise_for_status()
+audio = response.json()["choices"][0]["message"]["audio"]
+Path("output.wav").write_bytes(base64.b64decode(audio["data"]))
+```
+
+Set modalities to ["text"] in the speech-input example for speech-to-text, or use a text content string with ["audio"] for text-to-speech. Buffered audio is a base64-encoded mono 24 kHz WAV. For streaming audio, set stream=true and audio={"format":"pcm"}; each SSE choice.delta.audio.data contains base64-encoded little-endian signed 16-bit mono PCM at 24 kHz. Concatenate decoded chunks in arrival order and add a WAV header when saving as WAV.
+
+The output budget max_tokens accepts 1–512 and counts generated two-channel grid rows, including delimiters. Length-limited output is retained with finish_reason="length"; increasing the budget also consumes the finite 1,024-row context shared with the encoded prompt. A successful HTTP response does not establish task compliance or audio quality.
+
 ## Validation status
 
-This migration is a work in progress. Structural and CPU checks do not establish GPU correctness, audio quality, latency, throughput, or a release-ready package. Third-party source provenance and distribution contents must be checked before publication.
+The eager base has passed local CPU regressions, native CUDA checks, four-mode streaming/buffered service smoke and strict concurrent-versus-serial comparisons on single- and dual-A800 placements. Wheel/sdist contents and a regular wheel installation were also checked. These are local results; upstream H100 CI has not been executed. Calibrated latency/throughput, maximum concurrency and comprehensive quality evaluation remain separate work.
+
+Third-party source revisions, retained notices and outstanding statement scope are documented in [vendored source provenance](../../vendor/moss_speech_codec/VENDORED_SOURCES.md). Checkpoint terms are separate from source terms; no weights are bundled.
 
 ## Output and comparison contract
 
@@ -36,7 +96,7 @@ Each generated row contains a text token and an audio token. A modality-pad text
 
 Audio decoding keeps every valid active-channel code before the first EOSP. A 512-row audio segment containing EOSP has 511 valid codes; a length-limited segment with 512 valid codes retains all 512. Completion usage counts generated grid rows, including delimiters. Compare both the raw grid and extracted codes, and keep the reported stop or length reason. Do not drop a final valid code to make another decoder agree.
 
-The streaming codec emits 1,920 samples per retained code at 24 kHz. Its final hop flushes held overlap; the sum of emitted chunk samples must equal the final sample ledger. Streaming results contain usage and ledger metadata and do not replay audio already sent in deltas. The complete-utterance and chunk-trained flow checkpoints are different decoder profiles, so waveform equality between those profiles is not assumed.
+The streaming codec emits 1,920 samples per retained code at 24 kHz. Its final hop flushes held overlap; the sum of emitted chunk samples must equal the final sample ledger. The native pipeline result carries usage and sample-ledger metadata and does not replay audio already sent in deltas. The chat SSE interface exposes audio deltas, finish reason, and final usage; it does not expose the internal sample ledger or raw token grid. The complete-utterance and chunk-trained flow checkpoints are different decoder profiles, so waveform equality between those profiles is not assumed.
 
 ## Tests
 
