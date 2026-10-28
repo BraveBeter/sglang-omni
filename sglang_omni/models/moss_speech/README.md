@@ -22,7 +22,7 @@ The default placement assigns preprocessing, AR, and audio decoding to GPU 0 in 
 sgl-omni serve --config examples/configs/moss_speech_dual_gpu.yaml
 ```
 
-These examples configure stage placement. Validate startup, output contracts, and recovery on the target GPUs. Measure deployment capacity and performance separately with fixed requests and output budgets.
+These examples configure stage placement. Use the real-checkpoint smoke below to validate startup, output contracts, and recovery on the target GPUs. Measure deployment capacity and performance separately with fixed requests and output budgets.
 
 Set deployment values through typed stage configuration, for example preprocessing.factory.voice_wav, preprocessing.factory.codec_path, audio_vocoder.factory.codec_path, and ar_engine.engine.max_running_requests. The streaming codec uses chunk_size=25, declared once in the vocoder factory configuration. Optional optimization flags from the experimental branch are not part of this pipeline.
 
@@ -48,3 +48,21 @@ SGLANG_USE_CPU_ENGINE=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
 ```
 
 Set the official CPU platform flag before importing SGLang. GPU cases are selected with -m accelerator and require a supported allocated GPU; collecting or skipping them does not establish a GPU validation result. Full checkpoint and tokenizer parity, four-mode service execution, quality, and performance remain separate integration checks.
+
+The real-checkpoint service smoke consumes a resolved single- or two-GPU configuration and pinned English/Chinese speech inputs. Prepare its assets on a machine with network access, then run inside an allocated GPU environment:
+
+```bash
+python .github/scripts/prepare_moss_speech_ci.py \
+  --output-directory /path/to/moss-smoke --gpu-count 1
+export MOSS_SPEECH_CI_CONFIG=/path/to/moss-smoke/moss_speech.yaml
+export MOSS_SPEECH_CI_AUDIO_EN=/path/to/moss-smoke/input-en.wav
+export MOSS_SPEECH_CI_AUDIO_ZH=/path/to/moss-smoke/input-cn.wav
+export MOSS_SPEECH_CI_OUTPUT_DIR=/path/to/moss-smoke/results
+python -m pytest tests/test_model/test_moss_speech_ci.py -m accelerator -v -s -x
+```
+
+The prepared speech inputs retain the first 20 seconds of each pinned reference recording, with source hashes and selected frame ranges recorded separately. The configured synthesis voice uses the complete Chinese reference WAV. The fixture rejects invalid or overlong input recordings before starting a server.
+
+The smoke covers both languages, all four input/output modes, streaming and non-streaming, natural text EOS, audio length truncation, disconnect recovery, and invalid-request recovery. It retains HTTP responses, generated WAVs, usage, timing observations, asset hashes, and server logs. A first PCM event can contain silence; non-streaming TTFA and TTFT are unobserved. These observations have no calibrated performance or quality thresholds, and the chat API does not expose the native token grid for exact retained-code comparison.
+
+The central Omni workflow selects this dedicated smoke with the run-omni-ci and run-moss-speech labels. It does not add MOSS-Speech to the random model selection. Local checks and workflow wiring do not establish a successful remote CI run.

@@ -19,7 +19,7 @@ In this sense, two kinds of labels exist and they combine: a stage label decides
 | Omni CI: ASR | H100 | Multi-speaker transcription and diarization with MOSS-Transcribe-Diarize, then SeedTTS English and Chinese word error rate and speed on Fun-ASR-Nano-2512, Qwen3-ASR-1.7B or Whisper-large-v3 | `run-asr-ci` or `run-all-ci` |
 | Omni CI: TTS | H100 | Voice cloning on SeedTTS with Higgs-TTS, MOSS-TTS, Qwen3-TTS or Fun-CosyVoice3: non-streaming and streaming speed, word error rate, speaker similarity and UTMOS, streaming consistency, first-audio latency for Qwen3-TTS, and a serving stress test on Higgs-TTS | `run-tts-ci` or `run-all-ci` |
 | Omni CI: MPS | H100 | Two Higgs-TTS or MOSS-TTS workers sharing one H100 through CUDA MPS, with the TTS quality assertions | `run-mps-ci` or `run-all-ci` |
-| Omni CI: Omni | H100 | Qwen3-Omni or MiniCPM-o 4.5: thinker length limits, SeedTTS voice cloning, accuracy and speed on MMMU, MMSU, Video-MME and Video-AMME with text and spoken answers, a tensor parallel thinker, and Qwen3-Omni process replicas | `run-omni-ci` or `run-all-ci` |
+| Omni CI: Omni | H100 | Qwen3-Omni or MiniCPM-o 4.5: thinker length limits, SeedTTS voice cloning, accuracy and speed on MMMU, MMSU, Video-MME and Video-AMME with text and spoken answers, a tensor parallel thinker, and Qwen3-Omni process replicas; MOSS-Speech uses a dedicated four-mode service smoke | `run-omni-ci` or `run-all-ci` |
 | CPU CI | Intel Xeon (`intel-omni-spr`) | Job `intel-cpu-ci (unit_test/cpu)`: `pytest tests/unit_test/cpu/` | `run-intel-cpu-ci` or `run-all-ci` |
 | XPU CI | Intel GPU (`intel-omni-bmg`) | Intel GPU device layer tests | `run-intel-xpu-ci` or `run-all-ci` |
 | Voxt Mac CI | Apple Silicon | MLX native runtime and Voxt app tests | `run-mac-ci` or `run-all-ci` |
@@ -111,7 +111,7 @@ The stage label is `run-mps-ci`. MPS has no model labels of its own. It accepts 
 
 ### Omni
 
-Every job runs the selected model unless noted otherwise. A job named "Talker" asks for text and audio output, and also gates the word error rate between the text answer and an ASR transcript of the spoken answer.
+Qwen3-Omni and MiniCPM-o use the following stage sequence. A job named "Talker" asks for text and audio output, and also gates the word error rate between the text answer and an ASR transcript of the spoken answer.
 
 | Job | What it covers |
 | --- | --- |
@@ -124,12 +124,15 @@ Every job runs the selected model unless noted otherwise. A job named "Talker" a
 | stage 10 - Video-AMME Talker | Video with audio and spoken answers, with the thinker sharded across two GPUs (tensor parallel size 2). |
 | stage 11 - process replicas | A two-GPU deployment with one code2wav replica on each GPU; checks that both replicas start, register and receive requests. Runs only for Qwen3-Omni. |
 
+MOSS-Speech uses a dedicated service smoke instead of the Qwen3-Omni and MiniCPM-o sequence. It checks English and Chinese text/audio inputs and outputs, streaming and non-streaming responses, EOS and length boundaries, disconnect recovery, and invalid-request recovery. The job prepares pinned checkpoints and bounded speech inputs, retains complete request artifacts in a directory unique to the workflow run and attempt, and uploads only that invocation. Timing is recorded without calibrated performance or quality thresholds.
+
 The stage label is `run-omni-ci`. A model label does not name the stage. Combine it with `run-omni-ci` or `run-all-ci` to pick the model:
 
 | Model label | Checkpoint | In the random pool |
 | --- | --- | --- |
 | `run-qwen3-omni-30b-a3b-instruct` | `Qwen/Qwen3-Omni-30B-A3B-Instruct` | Yes |
 | `run-minicpm-o-4.5` | `openbmb/MiniCPM-o-4_5` | Yes |
+| `run-moss-speech` | `OpenMOSS-Team/MOSS-Speech` | No |
 
 ## Hardware workflows
 
@@ -226,7 +229,7 @@ Maintainers with CI permissions can use `/tag-and-rerun-ci` with one or more sho
 /tag-and-rerun-ci mps-higgs
 ```
 
-Stage targets are `lint`, `unit-test`, `asr`, `tts`, `mps`, `omni`, `intel-cpu`, `intel-xpu` and `mac`. `lint` adds `run-lint-only`. Model targets are `fun-asr`, `qwen3-asr`, `whisper-asr`, `higgs`, `moss`, `qwen3-tts`, `qwen3-tts-custom-voice`, `cosyvoice3`, `qwen3-omni`, `minicpmo`, `mps-higgs` and `mps-moss`. `higgs` and `moss` add `run-tts-ci` plus `run-higgs-tts-3-4b` or `run-moss-tts-local-transformer-v1.5`. `mps-higgs` and `mps-moss` add `run-mps-ci` plus that same model label. `qwen3-tts` adds `run-tts-ci` plus `run-qwen3-tts-12hz-1.7b-base`. A short model target adds its stage label and its model label. The model label itself never includes the stage name.
+Stage targets are `lint`, `unit-test`, `asr`, `tts`, `mps`, `omni`, `intel-cpu`, `intel-xpu` and `mac`. `lint` adds `run-lint-only`. Model targets are `fun-asr`, `qwen3-asr`, `whisper-asr`, `higgs`, `moss`, `qwen3-tts`, `qwen3-tts-custom-voice`, `cosyvoice3`, `qwen3-omni`, `minicpmo`, `moss-speech`, `mps-higgs` and `mps-moss`. `higgs` and `moss` add `run-tts-ci` plus `run-higgs-tts-3-4b` or `run-moss-tts-local-transformer-v1.5`. `mps-higgs` and `mps-moss` add `run-mps-ci` plus that same model label. `qwen3-tts` adds `run-tts-ci` plus `run-qwen3-tts-12hz-1.7b-base`. A short model target adds its stage label and its model label. The model label itself never includes the stage name.
 
 Use `/tag-and-rerun-full-ci` to add `run-all-ci` and select all stages. It also accepts short model targets, for example `/tag-and-rerun-full-ci qwen3-tts qwen3-asr qwen3-omni`. `higgs` or `mps-higgs` selects Higgs for every selected stage that accepts it, TTS and MPS included. Model choices not specified by the command keep their existing labels or use the normal random selection. Bare `/tag-and-rerun-ci` and full GitHub label arguments, such as `run-tts-ci` or `run-all-ci`, are not accepted. Manual dispatch still accepts full labels through its `ci_labels` input.
 
