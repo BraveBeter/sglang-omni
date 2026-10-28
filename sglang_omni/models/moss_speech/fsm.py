@@ -155,14 +155,6 @@ def row_selected_token(row: tuple[int, int]) -> int:
     return row[1] if row[0] == MODALITY_PAD else row[0]
 
 
-def selected_token(text_token: int, audio_token: int) -> int:
-    return row_selected_token((text_token, audio_token))
-
-
-def row_is_audio(row: tuple[int, int]) -> bool:
-    return row[0] == MODALITY_PAD
-
-
 def stop_hit(row: tuple[int, int]) -> bool:
     return row[0] in (TEXT_ENDOFTEXT, IM_END)
 
