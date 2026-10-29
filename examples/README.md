@@ -2,6 +2,10 @@
 
 Run these commands from the repository root after installing `sglang-omni`.
 
+## MOSS-Speech
+
+The [MOSS-Speech guide](../sglang_omni/models/moss_speech/README.md) covers eager text/audio chat, pinned checkpoint preparation, single- and dual-GPU stage placement, HTTP examples, and real-checkpoint validation.
+
 ## Full-duplex audio
 
 MiniCPM-o and PersonaPlex launch commands, server settings, and the realtime
