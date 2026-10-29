@@ -61,7 +61,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.2.0" />
-    <meta name="docbuild:last-update" content="Oct 28, 2026"/>
+    <meta name="docbuild:last-update" content="Oct 29, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -218,6 +218,7 @@
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/qwen3_tts.html">Qwen3-TTS</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/moss_tts.html">MOSS-TTS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cookbook/moss_tts_local.html">MOSS-TTS-Local</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/whisper_asr.html">Whisper ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/nemotron3_5_asr.html">Nemotron 3.5 ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/nemotron_transcribe.html">Nemotron Transcribe</a></li>
@@ -232,7 +233,6 @@
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/minicpm_o.html">MiniCPM-o</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/fun_asr.html">Fun-ASR-Nano</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/higgs_tts.html">Higgs TTS</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/moss_tts_local.html">MOSS-TTS-Local</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/nemotron_diarization.html">Nemotron 3 Diarization</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/fishaudio_drama3.html">Fish Audio Drama 3</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/minimax_music3.html">MiniMax Music 3</a></li>
@@ -664,11 +664,8 @@ nothing, insert <code class="docutils literal notranslate"><span class="pre">els
 </section>
 <section id="documentation-checks">
 <h2>Documentation checks<a class="headerlink" href="#documentation-checks" title="Link to this heading">#</a></h2>
-<p>The <code class="docutils literal notranslate"><span class="pre">doc-style</span></code> hook rejects emoji in <code class="docutils literal notranslate"><span class="pre">docs/**/*.md</span></code>, including inline code and URLs,
-while allowing text presentation. Only top-level fences indented by up to three spaces
-are exempt; fences nested in lists or blockquotes are not supported. Unclosed fences
-are reported at their opening line. The checker reports file/line diagnostics without
-modifying files (exit 0: clean, 1: violations).</p>
+<p>The <code class="docutils literal notranslate"><span class="pre">doc-style</span></code> hook rejects emoji in <code class="docutils literal notranslate"><span class="pre">docs/**/*.md</span></code>, including inline code and URLs, while allowing text presentation. Only top-level fences indented by up to three spaces are exempt; fences nested in lists or blockquotes are not supported. Unclosed fences are reported at their opening line. The checker reports file/line diagnostics without modifying files (exit 0: clean, 1: violations).</p>
+<p>Opening code fences must have a non-empty info string, such as <code class="docutils literal notranslate"><span class="pre">python</span></code>, <code class="docutils literal notranslate"><span class="pre">bash</span></code>, <code class="docutils literal notranslate"><span class="pre">text</span></code>, or <code class="docutils literal notranslate"><span class="pre">mermaid</span></code>. Any non-empty value is accepted; there is no language whitelist. This check uses the same top-level fence parsing as the emoji rule and reports missing labels at the opening line.</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>-r<span class="w"> </span>scripts/requirements-doc-lint.txt
 python<span class="w"> </span>scripts/check_doc_style.py
 </pre></div>
@@ -763,7 +760,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Oct 28, 2026.
+  Last updated on Oct 29, 2026.
   <br/>
 </p>
   </div>
