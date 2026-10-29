@@ -38,7 +38,14 @@ Both placements use tensor parallel size one: the dual-GPU configuration places 
 
 Use the real-checkpoint smoke below to validate startup, output contracts, and recovery on the target GPUs. Measure deployment capacity and performance separately with fixed requests and output budgets.
 
-Set deployment values through typed stage configuration, for example preprocessing.factory.voice_wav, preprocessing.factory.codec_path, audio_vocoder.factory.codec_path, and ar_engine.engine.max_running_requests. The streaming codec uses chunk_size=25, declared once in the vocoder factory configuration. Optional optimization flags from the experimental branch are not part of this pipeline.
+Set deployment values through typed stage configuration, for example preprocessing.factory.voice_wav, preprocessing.factory.codec_path, audio_vocoder.factory.codec_path, and ar_engine.engine.max_running_requests. The streaming codec uses chunk_size=25, declared once in the vocoder factory configuration. AR admission groups requests by their requested output modality by default. Set ar_engine.factory.mixed_modalities=true at startup to allow text-output and audio-output requests to be admitted together:
+
+```bash
+sgl-omni serve --config examples/configs/moss_speech.yaml \
+  --ar_engine.factory.mixed_modalities true
+```
+
+The shared engine's max_running_requests and queue limits still control capacity. This option concerns the requested output type, independently of the input type and the current text/audio generation mode. It allows the scheduler to form mixed batches; it does not force requests into the same batch. Measure latency and throughput with the intended mix of requests.
 
 ## Requests
 

@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch, sentinel
 
 import pytest
+import torch
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
@@ -29,6 +30,7 @@ from sglang_omni.models.moss_speech.stages import (
     create_ar_engine_executor,
     create_preprocessing_executor,
 )
+from tests.unit_test.fixtures.moss_speech_model import native_runtime, tiny_model
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DISCOVERY_PROGRAM = """
@@ -147,6 +149,49 @@ def test_cli_overrides_survive_serialization_without_cross_instance_leak() -> No
     )
     assert restored.stage_named("ar_engine").engine.max_running_requests == 2
     assert baseline == MossSpeechPipelineConfig(model_path="model")
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_mixed_admission_cli_roundtrip_is_ar_only_and_instance_local(
+    enabled: bool,
+) -> None:
+    baseline = MossSpeechPipelineConfig(model_path="model")
+    manager = ConfigManager(baseline)
+    updated = manager.merge_config(
+        manager.parse_extra_args(
+            ["--ar_engine.factory.mixed_modalities", "true" if enabled else "false"]
+        )
+    )
+    restored = MossSpeechPipelineConfig.model_validate(updated.model_dump())
+    assert (
+        resolve_stage_typed_kwargs(restored.stage_named("ar_engine"))[
+            "mixed_modalities"
+        ]
+        is enabled
+    )
+    assert (
+        resolve_stage_typed_kwargs(baseline.stage_named("ar_engine"))[
+            "mixed_modalities"
+        ]
+        is False
+    )
+    assert all(
+        "mixed_modalities" not in resolve_stage_typed_kwargs(stage)
+        for stage in restored.stages
+        if stage.name != "ar_engine"
+    )
+
+
+@pytest.mark.parametrize("value", ["true", "false", 0, 1, None])
+def test_mixed_admission_rejects_non_boolean_typed_values(value: object) -> None:
+    document = MossSpeechPipelineConfig(model_path="model").model_dump()
+    next(stage for stage in document["stages"] if stage["name"] == "ar_engine")[
+        "factory"
+    ]["mixed_modalities"] = value
+    with pytest.raises(ValidationError, match="mixed_modalities"):
+        MossSpeechPipelineConfig.model_validate(document)
+    with pytest.raises(ValueError, match="mixed_modalities must be a bool"):
+        MossSpeechEngineBuilder(streaming=True, mixed_modalities=value)
 
 
 def test_public_serve_cli_routes_model_assets_to_typed_stages(tmp_path: Path) -> None:
@@ -282,7 +327,14 @@ def test_typed_config_rejects_obsolete_or_untrained_knobs(
         MossSpeechPipelineConfig.model_validate(document)
 
 
-def test_ar_factory_preflights_and_forwards_placement_budget(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "policy",
+    [{}, {"mixed_modalities": False}, {"mixed_modalities": True}],
+    ids=["default", "disabled", "enabled"],
+)
+def test_ar_factory_preflights_and_forwards_placement_budget(
+    tmp_path: Path, policy: dict[str, bool]
+) -> None:
     MossSpeechConfig(audio_vocab_size=16512).to_json_file(tmp_path / "config.json")
     with patch.object(MossSpeechEngineBuilder, "build", autospec=True) as build:
         build.return_value = sentinel.scheduler
@@ -294,10 +346,18 @@ def test_ar_factory_preflights_and_forwards_placement_budget(tmp_path: Path) -> 
             total_gpu_memory_fraction=0.6,
             process_total_gpu_memory_fraction=0.7,
             server_args_overrides={"max_running_requests": 2},
+            **policy,
         )
         assert scheduler is sentinel.scheduler
         builder = build.call_args.args[0]
         assert builder.context_length == 512
+        with native_runtime(torch.device("cpu")):
+            model = tiny_model(torch.device("cpu"))
+            builder.make_adapters(model)
+            assert builder.request_lifecycle.model is model
+            assert builder.request_lifecycle.mixed_modalities is policy.get(
+                "mixed_modalities", False
+            )
         assert build.call_args.kwargs["gpu_id"] == 1
         assert build.call_args.kwargs["total_gpu_memory_fraction"] == 0.7
         assert build.call_args.kwargs["server_args_overrides"] == {

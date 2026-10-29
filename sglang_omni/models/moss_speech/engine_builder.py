@@ -46,9 +46,20 @@ class MossSpeechEngineBuilder(
     model_arch_override = "MossSpeechForCausalLM"
     supports_context_length_override = True
 
-    def __init__(self, context_length: int | None = None, *, streaming: bool) -> None:
+    def __init__(
+        self,
+        context_length: int | None = None,
+        *,
+        streaming: bool,
+        mixed_modalities: bool = False,
+    ) -> None:
+        if not isinstance(mixed_modalities, bool):
+            raise ValueError("mixed_modalities must be a bool")
+        else:
+            pass
         super().__init__()
         self.streaming = streaming
+        self.mixed_modalities = mixed_modalities
         self.request_lifecycle: MossSpeechRequestLifecycle | None = None
         if context_length is None:
             pass
@@ -179,7 +190,9 @@ class MossSpeechEngineBuilder(
         self, model: torch.nn.Module
     ) -> tuple[RequestBuilder, ResultAdapter]:
         assert isinstance(model, MossSpeechSGLangModel)
-        self.request_lifecycle = MossSpeechRequestLifecycle(model=model)
+        self.request_lifecycle = MossSpeechRequestLifecycle(
+            model=model, mixed_modalities=self.mixed_modalities
+        )
         return make_moss_speech_scheduler_adapters(lifecycle=self.request_lifecycle)
 
     def extra_scheduler_kwargs(self) -> SchedulerExtras[MossSpeechSGLangRequestData]:
