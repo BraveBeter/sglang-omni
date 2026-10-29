@@ -21,10 +21,17 @@ def cleanup_ar_request_state(request_data: MossSpeechSGLangRequestData) -> None:
 
 
 class MossSpeechRequestLifecycle:
-    """Prevent mixed-modality batches while keeping admission nonblocking."""
+    """Own requests with grouped admission or optional mixed-output admission."""
 
-    def __init__(self, model: MossSpeechSGLangModel) -> None:
+    def __init__(
+        self, model: MossSpeechSGLangModel, *, mixed_modalities: bool = False
+    ) -> None:
+        if not isinstance(mixed_modalities, bool):
+            raise ValueError("mixed_modalities must be a bool")
+        else:
+            pass
         self.model = model
+        self.mixed_modalities = mixed_modalities
         self.lock = threading.RLock()
         self.requests: dict[str, MossSpeechSGLangRequestData] = {}
         self.active: dict[str, OutputModality] = {}
@@ -44,8 +51,9 @@ class MossSpeechRequestLifecycle:
                 raise ValueError(f"Request {request_id} already exists")
             else:
                 self.requests[request_id] = request_data
-            if not self.pending and (
-                not self.active or modality in self.active.values()
+            if self.mixed_modalities or (
+                not self.pending
+                and (not self.active or modality in self.active.values())
             ):
                 self.active[request_id] = modality
                 return request_data
