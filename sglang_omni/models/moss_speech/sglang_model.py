@@ -25,6 +25,7 @@ from sglang_omni.models.moss_speech.model_layers import (
     request_linear,
     request_norm,
 )
+from sglang_omni.models.moss_speech.projection_graphs import MossSpeechProjectionGraphs
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,7 @@ class MossSpeechSGLangModel(torch.nn.Module):
             pass
         assert config.audio_vocab_size is not None
         self.config = config
+        self.projection_graphs: MossSpeechProjectionGraphs | None = None
         self.dtype = torch.bfloat16
         self.hidden_size = config.hidden_size
         self.text_vocab_size = config.vocab_size
@@ -136,21 +138,44 @@ class MossSpeechSGLangModel(torch.nn.Module):
             assert forward_batch.extend_seq_lens_cpu is not None
             token_lengths = list(forward_batch.extend_seq_lens_cpu)
         assert sum(token_lengths) == hidden_states.shape[0]
+        projection_runner = self.projection_graphs
+        if projection_runner is not None and not projection_runner.can_replay(
+            hidden_states, positions, is_decode=is_decode
+        ):
+            projection_runner.fallbacks += 2 * self.total_attention_layers
+            projection_runner = None
+        else:
+            pass
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(
-                positions, hidden_states, forward_batch, token_lengths, residual
+                positions,
+                hidden_states,
+                forward_batch,
+                token_lengths,
+                residual,
+                projection_runner,
             )
         text_hidden, text_residual = hidden_states, residual
         audio_hidden = hidden_states.clone()
         audio_residual = residual.clone() if residual is not None else None
         for layer in self.text_block:
             text_hidden, text_residual = layer(
-                positions, text_hidden, forward_batch, token_lengths, text_residual
+                positions,
+                text_hidden,
+                forward_batch,
+                token_lengths,
+                text_residual,
+                projection_runner,
             )
         for layer in self.audio_block:
             audio_hidden, audio_residual = layer(
-                positions, audio_hidden, forward_batch, token_lengths, audio_residual
+                positions,
+                audio_hidden,
+                forward_batch,
+                token_lengths,
+                audio_residual,
+                projection_runner,
             )
         if text_residual is None or audio_residual is None:
             raise RuntimeError("MOSS-Speech requires nonempty modality tails")

@@ -35,6 +35,9 @@ class MossSpeechEngineArgs(FactoryArgs):
     model_config = ConfigDict(extra="forbid")
 
     dtype: str = "bfloat16"
+    projection_graph_batch_size: int | None = Field(
+        default=None, ge=1, le=4, strict=True
+    )
     context_length: int = Field(default=1024, ge=1, le=1024)
 
 

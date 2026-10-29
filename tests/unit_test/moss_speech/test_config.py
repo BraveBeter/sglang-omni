@@ -322,3 +322,51 @@ def test_missing_voice_fails_before_loading_codec(tmp_path: Path) -> None:
                 voice_wav=str(tmp_path / "missing.wav"),
             )
         codec.assert_not_called()
+
+
+@pytest.mark.parametrize("batch_size", [0, 5, True, 1.0, "2"])
+def test_projection_batch_profile_rejects_invalid_values(
+    batch_size: int | float | str,
+) -> None:
+    document = MossSpeechPipelineConfig(model_path="unused").model_dump()
+    for stage in document["stages"]:
+        if stage["name"] == "ar_engine":
+            stage["factory"]["projection_graph_batch_size"] = batch_size
+        else:
+            pass
+    with pytest.raises(ValidationError):
+        MossSpeechPipelineConfig.model_validate(document)
+
+
+@pytest.mark.parametrize("batch_size", [None, 1, 4])
+def test_projection_profile_reaches_actual_ar_factory(
+    batch_size: int | None, tmp_path: Path
+) -> None:
+    MossSpeechConfig(audio_vocab_size=16512).to_json_file(tmp_path / "config.json")
+    baseline = MossSpeechPipelineConfig(model_path=str(tmp_path))
+    manager = ConfigManager(baseline)
+    if batch_size is None:
+        updated = baseline
+    else:
+        updated = manager.merge_config(
+            manager.parse_extra_args(
+                ["--ar_engine.factory.projection_graph_batch_size", str(batch_size)]
+            )
+        )
+    restored = MossSpeechPipelineConfig.model_validate(updated.model_dump())
+    factory_keywords = resolve_stage_typed_kwargs(restored.stage_named("ar_engine"))
+    with patch.object(MossSpeechEngineBuilder, "build", autospec=True) as build:
+        build.return_value = sentinel.scheduler
+        assert (
+            create_ar_engine_executor(str(tmp_path), **factory_keywords)
+            is sentinel.scheduler
+        )
+        assert build.call_args.args[0].projection_graph_batch_size == batch_size
+    assert baseline.stage_named("ar_engine").factory.projection_graph_batch_size is None
+    assert "projection_graph_batch_size" not in resolve_stage_typed_kwargs(
+        baseline.stage_named("ar_engine")
+    )
+    for stage_name in ("preprocessing", "audio_vocoder", "text_decode"):
+        assert "projection_graph_batch_size" not in resolve_stage_typed_kwargs(
+            restored.stage_named(stage_name)
+        )

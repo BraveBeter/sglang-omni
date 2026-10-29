@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Protocol
 
 import torch
 from sglang.srt.layers.layernorm import RMSNorm
@@ -92,6 +93,23 @@ def request_norm(
         )
 
 
+class ProjectionRunner(Protocol):
+    def prepare(
+        self,
+        layer: MossSpeechDecoderLayer,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None: ...
+
+    def finish(
+        self,
+        layer: MossSpeechDecoderLayer,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None: ...
+
+
 class MossSpeechDecoderLayer(torch.nn.Module):
     """Reuse native weights, attention, and KV storage with eager dual-tail math."""
 
@@ -138,14 +156,14 @@ class MossSpeechDecoderLayer(torch.nn.Module):
             config.head_dim, eps=config.rms_norm_eps
         )
 
-    def forward(
+    def prepare_projection(
         self,
-        positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        forward_batch: ForwardBatch,
+        residual: torch.Tensor | None,
+        positions: torch.Tensor,
         token_lengths: list[int],
-        residual: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        inverse_frequencies: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if residual is None:
             residual = hidden_states
             hidden_states = request_norm(
@@ -172,9 +190,12 @@ class MossSpeechDecoderLayer(torch.nn.Module):
             k.reshape(-1, attention.num_kv_heads, attention.head_dim),
             token_lengths,
         )
-        inverse_frequencies = reference_rope_frequencies(
-            attention.head_dim, attention.rope_theta
-        ).to(positions.device)
+        if inverse_frequencies is None:
+            inverse_frequencies = reference_rope_frequencies(
+                attention.head_dim, attention.rope_theta
+            ).to(positions.device)
+        else:
+            pass
         with torch.autocast(device_type=positions.device.type, enabled=False):
             frequencies = (
                 inverse_frequencies[None, :, None] @ positions[None, None, :].float()
@@ -190,9 +211,16 @@ class MossSpeechDecoderLayer(torch.nn.Module):
         k = (k * cosine + torch.cat((-key_right, key_left), dim=-1) * sine).reshape(
             -1, attention.kv_size
         )
-        hidden_states = attention.attn(q, k, v, forward_batch)
+        return q, k, v, residual
+
+    def finish_projection(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        token_lengths: list[int],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         hidden_states = request_linear(
-            hidden_states, attention.o_proj.weight, token_lengths
+            hidden_states, self.self_attn.o_proj.weight, token_lengths
         )
         hidden_states, residual = request_norm(
             self.post_attention_layernorm, hidden_states, token_lengths, residual
@@ -206,3 +234,34 @@ class MossSpeechDecoderLayer(torch.nn.Module):
             token_lengths,
         )
         return hidden_states, residual
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        token_lengths: list[int],
+        residual: torch.Tensor | None = None,
+        projection_runner: ProjectionRunner | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        prepared = (
+            None
+            if projection_runner is None
+            else projection_runner.prepare(self, hidden_states, residual, positions)
+        )
+        if prepared is None:
+            q, k, v, residual = self.prepare_projection(
+                hidden_states, residual, positions, token_lengths
+            )
+        else:
+            q, k, v, residual = prepared
+        hidden_states = self.self_attn.attn(q, k, v, forward_batch)
+        finished = (
+            None
+            if projection_runner is None
+            else projection_runner.finish(self, hidden_states, residual)
+        )
+        if finished is None:
+            return self.finish_projection(hidden_states, residual, token_lengths)
+        else:
+            return finished

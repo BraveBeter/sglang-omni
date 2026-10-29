@@ -17,6 +17,7 @@ from sglang_omni.models.moss_speech.hf_config import (
     ensure_moss_speech_config_registered,
 )
 from sglang_omni.models.moss_speech.model_runner import MossSpeechModelRunner
+from sglang_omni.models.moss_speech.projection_graphs import MossSpeechProjectionGraphs
 from sglang_omni.models.moss_speech.request_builders import (
     RequestBuilder,
     ResultAdapter,
@@ -34,6 +35,10 @@ from sglang_omni.scheduling.engine_factory import (
 from sglang_omni.scheduling.sglang_backend.output_processor import SGLangOutputProcessor
 
 
+class RequestShutdown(Protocol):
+    def __call__(self) -> None: ...
+
+
 class RequestCallback(Protocol):
     def __call__(self, request_id: str) -> None: ...
 
@@ -46,9 +51,27 @@ class MossSpeechEngineBuilder(
     model_arch_override = "MossSpeechForCausalLM"
     supports_context_length_override = True
 
-    def __init__(self, context_length: int | None = None, *, streaming: bool) -> None:
+    def __init__(
+        self,
+        context_length: int | None = None,
+        *,
+        streaming: bool,
+        projection_graph_batch_size: int | None = None,
+    ) -> None:
         super().__init__()
         self.streaming = streaming
+        if projection_graph_batch_size is not None and (
+            type(projection_graph_batch_size) is not int
+            or not 1 <= projection_graph_batch_size <= 4
+        ):
+            raise ValueError(
+                "projection_graph_batch_size must be None or an integer in 1..4"
+            )
+        else:
+            pass
+        self.projection_graph_batch_size = projection_graph_batch_size
+        self.projection_graphs: MossSpeechProjectionGraphs | None = None
+        self.projection_model: MossSpeechSGLangModel | None = None
         self.request_lifecycle: MossSpeechRequestLifecycle | None = None
         if context_length is None:
             pass
@@ -169,6 +192,54 @@ class MossSpeechEngineBuilder(
         model.decode_input_embedding = model.decode_input_embedding.to(
             torch.device(device)
         )
+
+    def setup_model_resources(
+        self,
+        model: torch.nn.Module,
+        server_args: ServerArgs,
+        *,
+        generation_cuda_graph_enabled: bool,
+    ) -> None:
+        del server_args
+        if self.projection_graph_batch_size is None:
+            return
+        elif generation_cuda_graph_enabled or not isinstance(
+            model, MossSpeechSGLangModel
+        ):
+            raise ValueError("Projection graphs require the native eager MOSS model")
+        elif model.projection_graphs is not None:
+            raise ValueError("MOSS model already owns projection graphs")
+        else:
+            self.projection_model = model
+            self.projection_graphs = MossSpeechProjectionGraphs(
+                [*model.layers, *model.text_block, *model.audio_block],
+                batch_size=self.projection_graph_batch_size,
+            )
+            model.projection_graphs = self.projection_graphs
+
+    def extra_scheduler_callbacks(self) -> dict[str, RequestShutdown | None]:
+        if self.projection_graph_batch_size is None:
+            return {}
+        else:
+            return {"shutdown_callback": self.cleanup_build_failure}
+
+    def cleanup_build_failure(self) -> None:
+        projection_graphs = self.projection_graphs
+        try:
+            if projection_graphs is not None:
+                projection_graphs.close()
+            else:
+                pass
+        finally:
+            if (
+                self.projection_model is not None
+                and self.projection_model.projection_graphs is projection_graphs
+            ):
+                self.projection_model.projection_graphs = None
+            else:
+                pass
+            self.projection_graphs = None
+            self.projection_model = None
 
     def make_model_runner(
         self, model_worker: ModelWorker, output_proc: SGLangOutputProcessor
