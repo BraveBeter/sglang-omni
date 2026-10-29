@@ -46,7 +46,9 @@ Set ar_engine.factory.projection_graph_batch_size to an integer from 1 through 4
 
 Startup prepares two graphs per decoder layer: normalization/QKV/RoPE before attention, and output projection/normalization/MLP after attention. The attention operation, both KV tails, final heads, sampling and request state remain eager. Enabled execution also reuses an owned GPU copy of the original CPU reference RoPE frequencies. Any measured effect includes that transfer reuse, graph dispatch, input copies and owned output copies; it cannot be attributed to graph dispatch alone.
 
-Graph preparation adds startup time and device memory, with 80 graphs for the published 40-layer checkpoint. Graphs belong to the loaded model and are released on shutdown; they cache no voice, request history or KV. Changes to captured weights or layer arithmetic invalidate replay until a new startup. Calls must retain the prepared gradient/autocast/numerical context and CUDA stream. This optional implementation requires separate correctness and performance validation on the deployment; no latency, throughput or capacity gain is established by enabling it.
+Graph preparation adds startup time and device memory, with 80 graphs across 32 shared layers and two four-layer modality tails in the published checkpoint (36 layers per output path). Graphs belong to the loaded model and are released on shutdown; they cache no voice, request history or KV. Changes to captured weights or layer arithmetic invalidate replay until a new startup. Calls must retain the prepared gradient/autocast/numerical context and CUDA stream.
+
+Local checks covered native CUDA replay and full-checkpoint four-mode service regressions on single- and dual-A800 placements. This option remains disabled by default. Measure completion time and first-event latency separately, and validate performance, concurrency and quality on the target deployment.
 
 ## Requests
 
