@@ -2,16 +2,22 @@
 """Native weight-loading, numerical, and dual-tail attention contracts."""
 
 import os
+import threading
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
 from sglang.srt.configs.model_config import ModelConfig
+from sglang.srt.layers.attention.torch_native_backend import TorchNativeAttnBackend
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
 from transformers import Qwen3Config
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm, Qwen3RotaryEmbedding
 
 from sglang_omni.model_runner.model_worker import ModelWorker
+from sglang_omni.models.moss_speech.engine_builder import MossSpeechEngineBuilder
 from sglang_omni.models.moss_speech.hf_config import (
     MossSpeechConfig,
     ensure_moss_speech_config_registered,
@@ -21,7 +27,14 @@ from sglang_omni.models.moss_speech.model_layers import (
     reference_rope_frequencies,
     request_linear,
 )
-from sglang_omni.models.moss_speech.sglang_model import MossSpeechSGLangModel
+from sglang_omni.models.moss_speech.projection_graphs import (
+    MossSpeechProjectionGraphs,
+    PreparedSection,
+)
+from sglang_omni.models.moss_speech.sglang_model import (
+    MossSpeechModelOutput,
+    MossSpeechSGLangModel,
+)
 from tests.unit_test.fixtures.accelerator import require_cuda
 from tests.unit_test.fixtures.moss_speech_model import (
     checkpoint_weights,
@@ -296,3 +309,458 @@ def test_native_cuda_prefill_decode_keep_requests_and_tail_kv_independent() -> N
         pytest.skip("Run the accelerator lane without the CPU engine override")
     else:
         assert_native_request_isolation(torch.device("cuda", 0))
+
+
+@NATIVE_CPU
+@pytest.mark.parametrize("with_residual", [False, True])
+def test_projection_sections_preserve_independent_hf_math(with_residual: bool) -> None:
+    with native_runtime(torch.device("cpu")), torch.no_grad():
+        model = tiny_model(torch.device("cpu"))
+        layer = model.layers[0]
+        generator = torch.Generator().manual_seed(731)
+        hidden_states = torch.randn(3, 128, generator=generator).bfloat16()
+        residual = (
+            torch.randn(3, 128, generator=generator).bfloat16()
+            if with_residual
+            else None
+        )
+        token_lengths = [1, 2]
+        positions = torch.tensor([2, 6, 9])
+
+        def normalize(
+            values: torch.Tensor, normalization: MossSpeechRMSNorm
+        ) -> torch.Tensor:
+            reference = Qwen3RMSNorm(
+                normalization.weight.numel(), eps=normalization.variance_epsilon
+            ).bfloat16()
+            reference.weight.copy_(normalization.weight)
+            return torch.cat(
+                [reference(chunk) for chunk in values.split(token_lengths)], dim=0
+            )
+
+        def linear(values: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+            return torch.cat(
+                [
+                    torch.nn.functional.linear(chunk, weight)
+                    for chunk in values.split(token_lengths)
+                ],
+                dim=0,
+            )
+
+        expected_residual = (
+            hidden_states if residual is None else hidden_states + residual
+        )
+        normalized = normalize(expected_residual, layer.input_layernorm)
+        attention = layer.self_attn
+        query_weight, key_weight, value_weight = attention.qkv_proj.weight.split(
+            [attention.q_size, attention.kv_size, attention.kv_size], dim=0
+        )
+        query = normalize(
+            linear(normalized, query_weight).reshape(
+                -1, attention.num_heads, attention.head_dim
+            ),
+            attention.q_norm,
+        )
+        key = normalize(
+            linear(normalized, key_weight).reshape(
+                -1, attention.num_kv_heads, attention.head_dim
+            ),
+            attention.k_norm,
+        )
+        reference_rope = Qwen3RotaryEmbedding(
+            Qwen3Config(head_dim=attention.head_dim, rope_theta=attention.rope_theta)
+        )
+        cosine, sine = reference_rope(hidden_states, positions.unsqueeze(0))
+        rotated = []
+        for values in (query, key):
+            left, right = values.chunk(2, dim=-1)
+            rotated.append(
+                (
+                    values * cosine[0, :, None, :]
+                    + torch.cat((-right, left), dim=-1) * sine[0, :, None, :]
+                ).flatten(1)
+            )
+        prepared = layer.prepare_projection(
+            hidden_states, residual, positions, token_lengths
+        )
+        for actual, expected in zip(
+            prepared,
+            (*rotated, linear(normalized, value_weight), expected_residual),
+        ):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        attention_output = torch.randn(
+            3, attention.q_size, generator=generator
+        ).bfloat16()
+        rounded_residual = (
+            linear(attention_output, attention.o_proj.weight) + expected_residual
+        )
+        normalized = normalize(rounded_residual, layer.post_attention_layernorm)
+        gate_weight, up_weight = layer.mlp.gate_up_proj.weight.chunk(2, dim=0)
+        expected_hidden = linear(
+            torch.nn.functional.silu(linear(normalized, gate_weight))
+            * linear(normalized, up_weight),
+            layer.mlp.down_proj.weight,
+        )
+        actual_hidden, actual_residual = layer.finish_projection(
+            attention_output, expected_residual, token_lengths
+        )
+        torch.testing.assert_close(actual_hidden, expected_hidden, rtol=0, atol=0)
+        torch.testing.assert_close(actual_residual, rounded_residual, rtol=0, atol=0)
+
+
+@NATIVE_CPU
+def test_projection_startup_rejects_cpu_before_cuda_allocation() -> None:
+    with native_runtime(torch.device("cpu")):
+        model = tiny_model(torch.device("cpu"))
+        with patch.object(torch.cuda, "CUDAGraph") as graph:
+            with pytest.raises(ValueError, match="CUDA"):
+                MossSpeechProjectionGraphs(
+                    [*model.layers, *model.text_block, *model.audio_block], batch_size=1
+                )
+            graph.assert_not_called()
+        assert model.projection_graphs is None
+
+
+@NATIVE_CPU
+@pytest.mark.parametrize("failure", ["stream", "reset"])
+def test_projection_cleanup_attempts_all_graphs_and_detaches_owner(
+    failure: str,
+) -> None:
+    with native_runtime(torch.device("cpu")):
+        model = tiny_model(torch.device("cpu"))
+        layers = [*model.layers, *model.text_block, *model.audio_block]
+        owner = MossSpeechProjectionGraphs.__new__(MossSpeechProjectionGraphs)
+        owner.lock = threading.RLock()
+        owner.owner_stream = Mock(spec=["synchronize"])
+        owner.capture_stream = Mock(spec=["synchronize"])
+        owner.layers = tuple(layers)
+        owner.closed = False
+        buffers = torch.ones(1)
+        sections = [
+            PreparedSection(
+                graph=Mock(spec=["reset"]),
+                inputs=(buffers, buffers, None),
+                outputs=(buffers, buffers),
+            )
+            for _ in range(2 * len(layers))
+        ]
+        owner.sections = {
+            (layer, section): prepared
+            for (layer, section), prepared in zip(
+                [
+                    (layer, section)
+                    for layer in layers
+                    for section in ("prepare", "finish")
+                ],
+                sections,
+            )
+        }
+        owner.inverse_frequencies = {layer: buffers for layer in layers}
+        first_error = RuntimeError("First projection cleanup failure")
+        if failure == "stream":
+            owner.owner_stream.synchronize.side_effect = first_error
+        else:
+            sections[0].graph.reset.side_effect = first_error
+        sections[-1].graph.reset.side_effect = RuntimeError("Later reset failure")
+        with patch(
+            "sglang_omni.models.moss_speech.engine_builder.MossSpeechProjectionGraphs",
+            autospec=True,
+            return_value=owner,
+        ) as prepare:
+            disabled = MossSpeechEngineBuilder(streaming=True)
+            disabled.setup_model_resources(
+                model, Mock(), generation_cuda_graph_enabled=False
+            )
+            prepare.assert_not_called()
+            builder = MossSpeechEngineBuilder(
+                streaming=True, projection_graph_batch_size=2
+            )
+            builder.setup_model_resources(
+                model, Mock(), generation_cuda_graph_enabled=False
+            )
+            prepare.assert_called_once_with(layers, batch_size=2)
+        shutdown = builder.extra_scheduler_callbacks()["shutdown_callback"]
+        assert shutdown is not None
+        with pytest.raises(RuntimeError) as caught:
+            shutdown()
+        assert caught.value is first_error
+        owner.owner_stream.synchronize.assert_called_once_with()
+        owner.capture_stream.synchronize.assert_called_once_with()
+        for prepared in sections:
+            prepared.graph.reset.assert_called_once_with()
+            assert prepared.inputs is None and prepared.outputs is None
+        assert not owner.sections and not owner.inverse_frequencies
+        assert model.projection_graphs is None
+        assert builder.projection_graphs is None and builder.projection_model is None
+        shutdown()
+
+
+def projection_decode(
+    model: MossSpeechSGLangModel,
+    backend: TorchNativeAttnBackend,
+    request_indices: list[int],
+    token_lengths: list[int],
+    token_slots: list[int],
+    feedback_embeddings: torch.Tensor,
+    request_ids: list[str],
+) -> MossSpeechModelOutput:
+    device = feedback_embeddings.device
+    for request_index, token_length, token_slot in zip(
+        request_indices, token_lengths, token_slots
+    ):
+        backend.req_to_token_pool.req_to_token[request_index, token_length] = token_slot
+    model.decode_input_embedding.weight[: len(request_indices)].copy_(
+        feedback_embeddings
+    )
+    batch = ForwardBatch(
+        forward_mode=ForwardMode.DECODE,
+        batch_size=len(request_indices),
+        input_ids=torch.arange(len(request_indices), device=device),
+        req_pool_indices=torch.tensor(request_indices, device=device),
+        seq_lens=torch.tensor(
+            [length + 1 for length in token_lengths], dtype=torch.int32, device=device
+        ),
+        out_cache_loc=torch.tensor(token_slots, device=device),
+        seq_lens_sum=sum(token_lengths) + len(request_indices),
+        positions=torch.tensor(token_lengths, device=device),
+        rids=request_ids,
+    )
+    backend.init_forward_metadata(batch)
+    with forward_context(ForwardContext(attn_backend=backend)):
+        return model(batch.input_ids, batch.positions, batch)
+
+
+def assert_projection_outputs_and_kv(
+    actual: MossSpeechModelOutput,
+    expected: MossSpeechModelOutput,
+    model: MossSpeechSGLangModel,
+    backend: TorchNativeAttnBackend,
+    reference_backend: TorchNativeAttnBackend,
+    written_slots: set[int],
+) -> None:
+    for actual_logits, expected_logits in (
+        (actual.text_logits, expected.text_logits),
+        (actual.audio_logits, expected.audio_logits),
+        (actual.hidden_states, expected.hidden_states),
+    ):
+        assert actual_logits is not None and expected_logits is not None
+        torch.testing.assert_close(actual_logits, expected_logits, rtol=0, atol=0)
+    used_slots = torch.tensor(
+        sorted(written_slots), device=model.embed_tokens.weight.device
+    )
+    for layer_id in model.attention_layer_ids():
+        for actual_cache, expected_cache in (
+            (
+                backend.token_to_kv_pool.get_key_buffer(layer_id),
+                reference_backend.token_to_kv_pool.get_key_buffer(layer_id),
+            ),
+            (
+                backend.token_to_kv_pool.get_value_buffer(layer_id),
+                reference_backend.token_to_kv_pool.get_value_buffer(layer_id),
+            ),
+        ):
+            torch.testing.assert_close(
+                actual_cache[used_slots], expected_cache[used_slots], rtol=0, atol=0
+            )
+
+
+@pytest.mark.accelerator
+@pytest.mark.parametrize("batch_size", [1, 2, 3, 4])
+def test_projection_cuda_replays_full_model_and_all_kv_exactly(batch_size: int) -> None:
+    require_cuda()
+    if os.environ.get("SGLANG_USE_CPU_ENGINE") == "1":
+        pytest.skip("Run the accelerator lane without the CPU engine override")
+    else:
+        pass
+    device = torch.device("cuda", 0)
+    with native_runtime(device):
+        model = tiny_model(device, decode_batch_capacity=4).eval()
+        reference = tiny_model(device, decode_batch_capacity=4).eval()
+        reference.load_state_dict(model.state_dict())
+        generator = torch.Generator(device=device).manual_seed(731)
+        request_count = max(batch_size, 2)
+        prompts = [
+            torch.randn(2 + index % 2, 128, generator=generator, device=device)
+            for index in range(request_count)
+        ]
+        request_ids = [f"request-{index}" for index in range(1, request_count + 1)]
+        layers = [*model.layers, *model.text_block, *model.audio_block]
+        with torch.no_grad():
+            cpu_rng = torch.get_rng_state().clone()
+            cuda_rng = torch.cuda.get_rng_state(device).clone()
+            owner = MossSpeechProjectionGraphs(layers, batch_size=batch_size)
+            model.projection_graphs = owner
+            assert torch.equal(cpu_rng, torch.get_rng_state())
+            assert torch.equal(cuda_rng, torch.cuda.get_rng_state(device))
+            try:
+                actual_prefill, backend = prefill(model, prompts, request_ids)
+                expected_prefill, reference_backend = prefill(
+                    reference, prompts, request_ids
+                )
+                assert owner.replays == 0
+                assert actual_prefill.text_logits is not None
+                assert expected_prefill.text_logits is not None
+                assert actual_prefill.audio_logits is not None
+                assert expected_prefill.audio_logits is not None
+                torch.testing.assert_close(
+                    actual_prefill.text_logits,
+                    expected_prefill.text_logits,
+                    rtol=0,
+                    atol=0,
+                )
+                torch.testing.assert_close(
+                    actual_prefill.audio_logits,
+                    expected_prefill.audio_logits,
+                    rtol=0,
+                    atol=0,
+                )
+                token_lengths = {
+                    index: len(prompt) for index, prompt in enumerate(prompts, 1)
+                }
+                next_slot = sum(token_lengths.values()) + 1
+                written_slots = set(range(1, next_slot))
+                eligible = list(range(1, batch_size + 1))
+                other_batch = [1, 2] if batch_size == 1 else eligible[:-1]
+                schedules = [eligible, list(reversed(eligible)), other_batch, eligible]
+                last_slots: dict[int, int] = {}
+                for request_indices in schedules:
+                    feedback = torch.randn(
+                        len(request_indices), 128, generator=generator, device=device
+                    )
+                    slots = list(range(next_slot, next_slot + len(request_indices)))
+                    next_slot += len(request_indices)
+                    lengths = [token_lengths[index] for index in request_indices]
+                    identifiers = [request_ids[index - 1] for index in request_indices]
+                    previous_replays = owner.replays
+                    previous_embedding_version = (
+                        model.decode_input_embedding.weight._version  # note (Codex): The external Tensor mutation counter proves staging updates; noqa: leading-underscore.
+                    )
+                    actual = projection_decode(
+                        model,
+                        backend,
+                        request_indices,
+                        lengths,
+                        slots,
+                        feedback,
+                        identifiers,
+                    )
+                    expected = projection_decode(
+                        reference,
+                        reference_backend,
+                        request_indices,
+                        lengths,
+                        slots,
+                        feedback,
+                        identifiers,
+                    )
+                    assert (
+                        model.decode_input_embedding.weight._version  # note (Codex): The external Tensor mutation counter proves staging updates; noqa: leading-underscore.
+                        > previous_embedding_version
+                    )
+                    if len(request_indices) == batch_size:
+                        assert owner.replays > previous_replays
+                    else:
+                        assert owner.replays == previous_replays
+                    written_slots.update(slots)
+                    assert_projection_outputs_and_kv(
+                        actual,
+                        expected,
+                        model,
+                        backend,
+                        reference_backend,
+                        written_slots,
+                    )
+                    for index, slot in zip(request_indices, slots):
+                        token_lengths[index] += 1
+                        last_slots[index] = slot
+                reusable_slot = last_slots[1]
+                for attention_backend in (backend, reference_backend):
+                    attention_backend.req_to_token_pool.req_to_token[1].copy_(
+                        attention_backend.req_to_token_pool.req_to_token[2]
+                    )
+                token_lengths[1] = token_lengths[2]
+                slots = [reusable_slot, *range(next_slot, next_slot + batch_size - 1)]
+                feedback = torch.randn(
+                    batch_size, 128, generator=generator, device=device
+                )
+                lengths = [token_lengths[index] for index in eligible]
+                identifiers = ["replacement", *request_ids[1:batch_size]]
+                previous_replays = owner.replays
+                actual = projection_decode(
+                    model, backend, eligible, lengths, slots, feedback, identifiers
+                )
+                expected = projection_decode(
+                    reference,
+                    reference_backend,
+                    eligible,
+                    lengths,
+                    slots,
+                    feedback,
+                    identifiers,
+                )
+                assert owner.replays > previous_replays
+                written_slots.update(slots)
+                assert_projection_outputs_and_kv(
+                    actual, expected, model, backend, reference_backend, written_slots
+                )
+                positions = torch.tensor(lengths, device=device)
+                assert owner.can_replay(feedback, positions, is_decode=True)
+                for layer, residual in (
+                    (model.layers[0], None),
+                    (
+                        model.layers[1],
+                        torch.randn(
+                            batch_size, 128, generator=generator, device=device
+                        ),
+                    ),
+                ):
+                    retained = owner.prepare(layer, feedback, residual, positions)
+                    assert retained is not None
+                    saved = tuple(value.clone() for value in retained)
+                    fresh = torch.randn(
+                        batch_size, 128, generator=generator, device=device
+                    )
+                    fresh_residual = (
+                        None
+                        if residual is None
+                        else torch.randn(
+                            batch_size, 128, generator=generator, device=device
+                        )
+                    )
+                    replayed = owner.prepare(
+                        layer, fresh, fresh_residual, positions + 1
+                    )
+                    assert replayed is not None
+                    expected_sections = layer.prepare_projection(
+                        fresh, fresh_residual, positions + 1, [1] * batch_size
+                    )
+                    for value, snapshot, current, reference_value in zip(
+                        retained, saved, replayed, expected_sections
+                    ):
+                        torch.testing.assert_close(value, snapshot, rtol=0, atol=0)
+                        torch.testing.assert_close(
+                            current, reference_value, rtol=0, atol=0
+                        )
+                    finished = owner.finish(layer, feedback, retained[-1])
+                    assert finished is not None
+                    finished_snapshot = tuple(value.clone() for value in finished)
+                    fresh_finished = owner.finish(layer, fresh, replayed[-1])
+                    assert fresh_finished is not None
+                    expected_finished = layer.finish_projection(
+                        fresh, replayed[-1], [1] * batch_size
+                    )
+                    for value, snapshot, current, reference_value in zip(
+                        finished, finished_snapshot, fresh_finished, expected_finished
+                    ):
+                        torch.testing.assert_close(value, snapshot, rtol=0, atol=0)
+                        torch.testing.assert_close(
+                            current, reference_value, rtol=0, atol=0
+                        )
+                with torch.enable_grad():
+                    assert not owner.can_replay(feedback, positions, is_decode=True)
+                model.layers[0].self_attn.qkv_proj.weight.add_(0)
+                assert not owner.can_replay(feedback, positions, is_decode=True)
+            finally:
+                owner.close()
+                owner.close()
+            assert not owner.can_replay(feedback, positions, is_decode=True)

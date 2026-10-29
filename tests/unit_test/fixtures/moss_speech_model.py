@@ -72,7 +72,7 @@ def native_runtime(device: torch.device) -> Iterator[None]:
 
 
 def tiny_model(
-    device: torch.device, *, audio_vocab_size: int = 64
+    device: torch.device, *, audio_vocab_size: int = 64, decode_batch_capacity: int = 2
 ) -> MossSpeechSGLangModel:
     configuration = MossSpeechConfig(
         vocab_size=256,
@@ -86,7 +86,7 @@ def tiny_model(
         num_modality_layers=1,
         num_hidden_layers=3,
         max_position_embeddings=16,
-        moss_decode_buffer_bs=2,
+        moss_decode_buffer_bs=decode_batch_capacity,
     )
     model = MossSpeechSGLangModel(configuration, init_device=device)
     generator = torch.Generator(device=device).manual_seed(183)

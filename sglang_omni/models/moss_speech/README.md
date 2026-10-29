@@ -38,7 +38,15 @@ Both placements use tensor parallel size one: the dual-GPU configuration places 
 
 Use the real-checkpoint smoke below to validate startup, output contracts, and recovery on the target GPUs. Measure deployment capacity and performance separately with fixed requests and output budgets.
 
-Set deployment values through typed stage configuration, for example preprocessing.factory.voice_wav, preprocessing.factory.codec_path, audio_vocoder.factory.codec_path, and ar_engine.engine.max_running_requests. The streaming codec uses chunk_size=25, declared once in the vocoder factory configuration. Optional optimization flags from the experimental branch are not part of this pipeline.
+Set deployment values through typed stage configuration, for example preprocessing.factory.voice_wav, preprocessing.factory.codec_path, audio_vocoder.factory.codec_path, and ar_engine.engine.max_running_requests. The streaming codec uses chunk_size=25, declared once in the vocoder factory configuration.
+
+### Optional decode projection graphs
+
+Set ar_engine.factory.projection_graph_batch_size to an integer from 1 through 4 to prepare one decode batch profile. The default is null, which retains eager execution. Only decode batches with exactly that many requests use the graphs; prefill, different batch sizes and unsupported tensor or execution contexts use the original eager sections. Tensor parallelism remains one, with BF16 weights and native attention/KV storage.
+
+Startup prepares two graphs per decoder layer: normalization/QKV/RoPE before attention, and output projection/normalization/MLP after attention. The attention operation, both KV tails, final heads, sampling and request state remain eager. Enabled execution also reuses an owned GPU copy of the original CPU reference RoPE frequencies. Any measured effect includes that transfer reuse, graph dispatch, input copies and owned output copies; it cannot be attributed to graph dispatch alone.
+
+Graph preparation adds startup time and device memory, with 80 graphs for the published 40-layer checkpoint. Graphs belong to the loaded model and are released on shutdown; they cache no voice, request history or KV. Changes to captured weights or layer arithmetic invalidate replay until a new startup. Calls must retain the prepared gradient/autocast/numerical context and CUDA stream. This optional implementation requires separate correctness and performance validation on the deployment; no latency, throughput or capacity gain is established by enabling it.
 
 ## Requests
 
