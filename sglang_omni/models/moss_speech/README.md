@@ -42,7 +42,8 @@ Set deployment values through typed stage configuration, for example preprocessi
 
 ```bash
 sgl-omni serve --config examples/configs/moss_speech.yaml \
-  --ar_engine.factory.mixed_modalities true
+  --ar_engine.factory.mixed_modalities true \
+  --ar_engine.engine.max_running_requests 2
 ```
 
 The shared engine's max_running_requests and queue limits still control capacity. This option concerns the requested output type, independently of the input type and the current text/audio generation mode. It allows the scheduler to form mixed batches; it does not force requests into the same batch. Measure latency and throughput with the intended mix of requests.
@@ -93,9 +94,26 @@ The output budget max_tokens accepts 1–512 and counts generated two-channel gr
 
 ## Validation status
 
-The eager base has passed local CPU regressions, native CUDA checks, four-mode streaming/buffered service smoke and strict concurrent-versus-serial comparisons on single- and dual-A800 placements. Wheel/sdist contents and a regular wheel installation were also checked. These are local results; upstream H100 CI has not been executed. Calibrated latency/throughput, maximum concurrency and comprehensive quality evaluation remain separate work.
+The eager base has passed local CPU regressions, native CUDA checks, four-mode streaming/buffered service smoke and strict concurrent-versus-serial comparisons on single- and dual-A800 placements. Wheel/sdist contents and a regular wheel installation were also checked. These are local results; upstream H100 CI has not been executed. Broader deployment capacity and comprehensive quality evaluation remain separate work.
 
 Third-party source revisions, retained notices and outstanding statement scope are documented in [vendored source provenance](../../vendor/moss_speech_codec/VENDORED_SOURCES.md). Checkpoint terms are separate from source terms; no weights are bundled.
+
+### Mixed-output admission measurements
+
+Local single- and dual-A800 checks covered serial/concurrent text and audio outputs, streaming/buffered responses, cancellation, and recovery. Complete outputs matched across the admission settings and placements. The measured configuration uses BF16 AR, FP32 codec, chunk size 25, and max_running_requests=2. Higher concurrency has not been evaluated for this option.
+
+The following mixed-C2 workload pairs one text-output request with one audio-output request. Both use the listed input and response mode, temperature=0, top_k=1, seed=42, and a 128-row output budget. Disabled and enabled settings run on the same code in B-E-E-B order, with four fresh service starts per placement. Each median uses six formal groups per policy/profile from two starts × three groups. Pair completion is measured from the first POST to the last response close, including client response logging.
+
+| Input / response mode | One GPU: disabled → enabled seconds | Two GPUs: disabled → enabled seconds |
+|---|---:|---:|
+| English text / buffered | 15.187 → 12.806 (-15.68%) | 14.479 → 12.780 (-11.74%) |
+| English text / streamed | 19.761 → 17.419 (-11.85%) | 14.199 → 12.961 (-8.72%) |
+| Chinese speech / buffered | 15.420 → 13.171 (-14.59%) | 15.506 → 13.016 (-16.06%) |
+| Chinese speech / streamed | 20.044 → 17.785 (-11.27%) | 14.377 → 13.309 (-7.43%) |
+
+These pair-completion gains come with substantial individual-request costs: **10 of 16 output-specific completion medians increased**. On one GPU, buffered audio elapsed time/RTF increased about 46%, and streamed text completion increased up to 128%. On two GPUs, Chinese-speech buffered text completion increased about 62%; streamed audio TTFA increased 39–41% and RTF increased 50–52%. Some first-event measures improved, including dual-GPU text TTFT, so this option is a workload and latency tradeoff. It remains **disabled by default**.
+
+All 192 formal benchmark fingerprints matched across settings and placements; all 256 warmup/formal requests ended at the length limit, and each audio output lasted 10.24 seconds. These results do not establish natural-EOS behavior, perceptual quality, or open-loop service capacity. TTFT denotes the first nonempty public text delta, and TTFA the first nonempty PCM chunk, which can contain silence; buffered first-event timings are unobserved.
 
 ## Output and comparison contract
 
