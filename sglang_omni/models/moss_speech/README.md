@@ -92,6 +92,8 @@ The eager base has passed local CPU regressions, native CUDA checks, four-mode s
 
 Third-party source revisions, retained notices and outstanding statement scope are documented in [vendored source provenance](../../vendor/moss_speech_codec/VENDORED_SOURCES.md). Checkpoint terms are separate from source terms; no weights are bundled.
 
+The serving vocoder factory shares one read-only, same-device HiFT module between streaming and whole-utterance decoders and serializes access with the same lock. Flow models, request RNG, mel/source overlap and session state remain separate. Component construction loads only missing modules; closing one decoder does not invalidate the other decoder's HiFT reference. Local real-checkpoint checks preserved complete PCM and reduced post-factory allocated memory by about 80 MiB; service latency and peak service memory were not measured.
+
 ## Output and comparison contract
 
 Each generated row contains a text token and an audio token. A modality-pad text token selects the audio channel; text-channel end-of-text and message-end tokens terminate generation. EOSP closes the audio segment and returns the finite-state machine to text mode; EOSP in an inactive channel does not terminate the request.
