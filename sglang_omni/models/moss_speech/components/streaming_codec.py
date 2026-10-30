@@ -95,26 +95,32 @@ class MossSpeechStreamingCodec:
                 pass
             flow_directory = Path(codec_path) / "flow"
             with scoped_global_rng():
-                flow = build_flow_decoder(chunk_size=chunk_size)
-                load_flow_weights(
-                    flow,
-                    torch.load(
-                        flow_directory / f"flow-chunk-{chunk_size}.pt",
-                        map_location="cpu",
-                        weights_only=True,
-                    ),
-                )
-                hift = build_hift()
-                hift.load_state_dict(
-                    torch.load(
-                        flow_directory / "hift.pt",
-                        map_location="cpu",
-                        weights_only=True,
-                    ),
-                    strict=True,
-                )
-            flow = flow.to(self.device).eval()
-            hift = hift.to(self.device).eval()
+                if flow is None:
+                    flow = build_flow_decoder(chunk_size=chunk_size)
+                    load_flow_weights(
+                        flow,
+                        torch.load(
+                            flow_directory / f"flow-chunk-{chunk_size}.pt",
+                            map_location="cpu",
+                            weights_only=True,
+                        ),
+                    )
+                    flow = flow.to(self.device).eval()
+                else:
+                    pass
+                if hift is None:
+                    hift = build_hift()
+                    hift.load_state_dict(
+                        torch.load(
+                            flow_directory / "hift.pt",
+                            map_location="cpu",
+                            weights_only=True,
+                        ),
+                        strict=True,
+                    )
+                    hift = hift.to(self.device).eval()
+                else:
+                    pass
         else:
             pass
         self.flow = flow

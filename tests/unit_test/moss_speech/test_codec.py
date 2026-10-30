@@ -15,7 +15,9 @@ import soundfile
 import torch
 from safetensors.torch import load_file, save_file
 
+import sglang_omni.models.moss_speech.components.streaming_codec as streaming_codec_module
 import sglang_omni.models.moss_speech.components.voice as voice_module
+import sglang_omni.models.moss_speech.stages as stages_module
 from sglang_omni.models.moss_speech.components.codec_adapter import (
     CodecAdapterError,
     MossSpeechCodecAdapter,
@@ -37,6 +39,7 @@ from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.decoder import (
 from sglang_omni.vendor.moss_speech_codec.hf_codec.modeling import scoped_global_rng
 from sglang_omni.vendor.moss_speech_codec.hf_codec.whisper import WhisperVQEncoder
 from tests.unit_test.fixtures.moss_speech_codec import (
+    TinyFlow,
     TinyHiFT,
     TinyOfflineDecoder,
     audio_payload,
@@ -409,3 +412,64 @@ def test_nonstream_audio_accepts_full_torch_seed_range_and_restores_rng(
         assert torch.equal(torch.get_rng_state(), caller_rng)
     finally:
         scheduler.stop()
+
+
+def test_streaming_codec_loads_only_missing_component(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "flow").mkdir()
+    torch.save({}, tmp_path / "flow/flow-chunk-5.pt")
+    shared_hift = TinyHiFT().eval()
+    monkeypatch.setattr(
+        streaming_codec_module, "build_flow_decoder", lambda chunk_size: TinyFlow()
+    )
+    forbidden_hift_load = Mock(side_effect=AssertionError("HiFT must be shared"))
+    monkeypatch.setattr(streaming_codec_module, "build_hift", forbidden_hift_load)
+    with scoped_global_rng():
+        codec = streaming_codec_module.MossSpeechStreamingCodec(
+            tmp_path, chunk_size=5, device="cpu", hift=shared_hift
+        )
+        assert codec.hift is shared_hift
+        codec.begin("r", voice_tensors(), seed=7)
+        waveform = torch.cat(codec.push("r", [2] * 31, final=True))
+        assert waveform.numel() == 31 * 1920 and not codec.sessions
+        codec.close()
+    forbidden_hift_load.assert_not_called()
+
+
+@pytest.mark.parametrize("fail_loading", [False, True])
+def test_vocoder_factory_shares_hift_with_serial_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_loading: bool
+) -> None:
+    adapter = Mock()
+    adapter.decoder.hift = TinyHiFT().eval()
+    monkeypatch.setattr(
+        stages_module, "MossSpeechCodecAdapter", Mock(return_value=adapter)
+    )
+
+    def build(
+        codec_path: str | Path, *, chunk_size: int, device: str, hift: TinyHiFT
+    ) -> streaming_codec_module.MossSpeechStreamingCodec:
+        if fail_loading:
+            raise RuntimeError("flow load failed")
+        return streaming_codec_module.MossSpeechStreamingCodec(
+            None, chunk_size=chunk_size, device=device, flow=TinyFlow(), hift=hift
+        )
+
+    monkeypatch.setattr(stages_module, "MossSpeechStreamingCodec", build)
+    if fail_loading:
+        with pytest.raises(RuntimeError, match="flow load failed"):
+            stages_module.create_audio_vocoder_executor(
+                "unused", chunk_size=5, codec_path=str(tmp_path), device="cpu"
+            )
+        adapter.close.assert_called_once()
+    else:
+        executor = stages_module.create_audio_vocoder_executor(
+            "unused", chunk_size=5, codec_path=str(tmp_path), device="cpu"
+        )
+        assert executor.codec.hift is adapter.decoder.hift
+        assert adapter.decode_lock is executor.codec.lock
+        executor.codec.close()
+        assert not adapter.decoder.hift.should_fail
+        executor.stop()
+        adapter.close.assert_called_once()
