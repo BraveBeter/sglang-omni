@@ -24,6 +24,7 @@ from sglang_omni.models.qwen3_tts.reference_encoder_cuda_graph import (
     DEFAULT_QWEN3_TTS_REFERENCE_ENCODER_BUCKET_FRAMES,
     Qwen3TTSReferenceEncoderCudaGraphRunner,
     ReferenceEncoderGraphStats,
+    exact_length_encode,
 )
 from sglang_omni.models.qwen3_tts.sglang_model import Qwen3TTSPromptConstants
 from sglang_omni.platforms import current_platform
@@ -1002,6 +1003,7 @@ class Qwen3TTSRefCodeBatcher:
         param = next(self.encoder.parameters())
         self.encoder_device = param.device
         self.encoder_dtype = param.dtype
+        self.clip_samples = torch.zeros((), dtype=torch.long, device=param.device)
         self.max_batch_size = max(int(max_batch_size), 1)
         self.max_batch_wait_s = max(float(max_batch_wait_ms), 0.0) / 1000.0
         self.encode_stream = new_encode_stream(self.encoder_device)
@@ -1107,7 +1109,10 @@ class Qwen3TTSRefCodeBatcher:
             [waveform], sr=sample_rate
         )
         samples = torch.from_numpy(audio[0])
-        if self.graph_runner is not None:
+        if samples.numel() == 0:
+            # note (ratish): the encoder's tail padding repeats a clip's last step, which an empty clip does not have.
+            raise ValueError("Qwen3-TTS reference audio has no samples")
+        elif self.graph_runner is not None:
             codes = self.graph_runner.encode(samples)
             if codes is not None:
                 return codes
@@ -1116,9 +1121,7 @@ class Qwen3TTSRefCodeBatcher:
         else:
             pass
         frames = -(-samples.numel() // self.hop)
-        # note(ratish): whole frames, so every conv layer's own tail padding is
-        # zero and the eager encode has the shape the graphs capture; past the ladder a new
-        # length costs cuDNN a plan per conv, so lengths round up to the largest bucket.
+        # note (ratish): whole frames, so the eager encode has the shape the graphs capture; past the ladder a new length costs cuDNN a plan per conv, so lengths round up to the largest bucket.
         if (
             current_platform.is_cuda()
             and self.graph_runner is not None
@@ -1134,9 +1137,11 @@ class Qwen3TTSRefCodeBatcher:
             dtype=self.encoder_dtype,
         )
         values[0, 0, : samples.numel()].copy_(samples)
-        codes = self.encoder.encode(
-            values, num_quantizers=self.num_quantizers, return_dict=True
-        ).audio_codes
+        self.clip_samples.fill_(samples.numel())
+        with exact_length_encode(self.encoder, self.clip_samples):
+            codes = self.encoder.encode(
+                values, num_quantizers=self.num_quantizers, return_dict=True
+            ).audio_codes
         return codes[0, :, :frames].transpose(0, 1)
 
     def run(self) -> None:

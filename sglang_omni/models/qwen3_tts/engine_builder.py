@@ -383,11 +383,17 @@ class Qwen3TtsEngineBuilder(TtsEngineBuilder[Qwen3TTSSGLangRequestData]):
             device=device,
             dtype=self.dtype,
             attn_implementation=self.attn_implementation,
+            float32_encoder=model.tts_model_type == "base",
         )
         model.load_speech_tokenizer(speech_tokenizer)
         # note (luojiaxuan): only Base checkpoints serve x-vector clones, so the
         # other variants skip the probe and the per-step mask.
         if self.leading_silence_mask_frames > 0 and model.tts_model_type == "base":
+            # note (ratish): the probe runs this thread's first GEMM on the device, and a cuBLAS workspace made inside its float32 activations keeps them reserved when the KV pool is sized.
+            if current_platform.is_cuda():
+                torch.cuda.current_blas_handle()
+            else:
+                pass
             self.silence_codec_ids = derive_silence_codec_ids(speech_tokenizer, device)
             logger.info(
                 f"Qwen3-TTS masks {self.silence_codec_ids.numel()} silence codec ids "

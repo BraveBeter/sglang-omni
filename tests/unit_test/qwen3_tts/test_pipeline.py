@@ -406,19 +406,39 @@ def test_qwen3_tts_speech_tokenizer_is_loaded_once_per_process_key(
     monkeypatch.setattr(qwen3_stages, "_SPEECH_TOKENIZERS", {})
 
     vocoder_copy = qwen3_stages.load_qwen3_tts_tokenizer(
-        "/ckpt", device="cuda:0", dtype="bfloat16", attn_implementation=None
+        "/ckpt",
+        device="cuda:0",
+        dtype="bfloat16",
+        attn_implementation=None,
+        float32_encoder=False,
     )
     engine_copy = qwen3_stages.load_qwen3_tts_tokenizer(
-        "/ckpt", device="cuda:0", dtype="bfloat16", attn_implementation=None
+        "/ckpt",
+        device="cuda:0",
+        dtype="bfloat16",
+        attn_implementation=None,
+        float32_encoder=False,
     )
     other_device = qwen3_stages.load_qwen3_tts_tokenizer(
-        "/ckpt", device="cuda:1", dtype="bfloat16", attn_implementation=None
+        "/ckpt",
+        device="cuda:1",
+        dtype="bfloat16",
+        attn_implementation=None,
+        float32_encoder=False,
     )
     other_attention = qwen3_stages.load_qwen3_tts_tokenizer(
-        "/ckpt", device="cuda:0", dtype="bfloat16", attn_implementation="sdpa"
+        "/ckpt",
+        device="cuda:0",
+        dtype="bfloat16",
+        attn_implementation="sdpa",
+        float32_encoder=False,
     )
     other_checkpoint = qwen3_stages.load_qwen3_tts_tokenizer(
-        "/other", device="cuda:0", dtype="bfloat16", attn_implementation=None
+        "/other",
+        device="cuda:0",
+        dtype="bfloat16",
+        attn_implementation=None,
+        float32_encoder=False,
     )
 
     assert engine_copy is vocoder_copy
@@ -439,9 +459,28 @@ def test_qwen3_tts_speech_tokenizer_is_loaded_once_per_process_key(
     ]
 
 
-@pytest.mark.parametrize("disable_cuda_graph", [False, True])
-def test_qwen3_tts_engine_attaches_the_vocoder_speech_tokenizer_before_the_pool(
-    monkeypatch: pytest.MonkeyPatch, disable_cuda_graph: bool
+@pytest.mark.parametrize(
+    (
+        "disable_cuda_graph",
+        "model_type",
+        "vocoder_attn_implementation",
+        "shares_engine_speech_tokenizer",
+    ),
+    [
+        (False, "base", None, True),
+        (True, "base", None, True),
+        (False, "custom_voice", None, True),
+        (False, "base", "eager", False),
+        (False, "custom_voice", "eager", False),
+        (False, "base", None, False),
+    ],
+)
+def test_qwen3_tts_engine_attaches_its_process_speech_tokenizer_before_the_pool(
+    monkeypatch: pytest.MonkeyPatch,
+    disable_cuda_graph: bool,
+    model_type: str,
+    vocoder_attn_implementation: str | None,
+    shares_engine_speech_tokenizer: bool,
 ) -> None:
     from transformers import AutoProcessor
 
@@ -449,10 +488,18 @@ def test_qwen3_tts_engine_attaches_the_vocoder_speech_tokenizer_before_the_pool(
 
     loads: list[str] = []
     predictor_captures: list[tuple] = []
+    float32_encoders: list[tuple[object, str]] = []
+
+    def record_float32_encoder(tokenizer, checkpoint_dir: str) -> None:
+        tokenizer.model.encoder.to(torch.float32)
+        float32_encoders.append((tokenizer, checkpoint_dir))
 
     class FakeQwen3TTSTokenizer:
         feature_extractor = SimpleNamespace(sampling_rate=24000)
-        model = fake_speech_tokenizer().model
+
+        def __init__(self) -> None:
+            self.model = fake_speech_tokenizer().model
+            self.model.encoder.to(torch.bfloat16)
 
         @classmethod
         def from_pretrained(cls, path, **kwargs):
@@ -486,6 +533,7 @@ def test_qwen3_tts_engine_attaches_the_vocoder_speech_tokenizer_before_the_pool(
         model = SimpleNamespace(codec_embedding=torch.nn.Embedding(1, 4))
         speech_tokenizer = None
         speaker_encoder_graph_runner = None
+        tts_model_type = model_type
 
         def build_prompt_constants(self):
             return placeholder_prompt_constants()
@@ -512,9 +560,12 @@ def test_qwen3_tts_engine_attaches_the_vocoder_speech_tokenizer_before_the_pool(
     )
     monkeypatch.setattr(qwen3_stages, "_SPEECH_TOKENIZERS", {})
     monkeypatch.setattr(
+        qwen3_stages, "load_float32_encoder_weights", record_float32_encoder
+    )
+    monkeypatch.setattr(
         qwen3_stages,
         "load_qwen3_tts_checkpoint_config",
-        lambda model_path: {"tts_model_type": "base"},
+        lambda model_path: {"tts_model_type": model_type},
     )
     monkeypatch.setattr(
         qwen3_stages, "Qwen3TTSStreamingVocoderScheduler", FakeScheduler
@@ -526,7 +577,12 @@ def test_qwen3_tts_engine_attaches_the_vocoder_speech_tokenizer_before_the_pool(
     )
     qwen3_request_builders.clear_qwen3_tts_preprocessing_context()
 
-    vocoder = qwen3_stages.create_vocoder_executor("/ckpt", device="cpu")
+    vocoder = qwen3_stages.create_vocoder_executor(
+        "/ckpt",
+        device="cpu",
+        attn_implementation=vocoder_attn_implementation,
+        shares_engine_speech_tokenizer=shares_engine_speech_tokenizer,
+    )
     talker = FakeTalker()
     builder = Qwen3TtsEngineBuilder(leading_silence_mask_frames=0)
     builder.dtype = "bfloat16"
@@ -541,8 +597,15 @@ def test_qwen3_tts_engine_attaches_the_vocoder_speech_tokenizer_before_the_pool(
     finally:
         qwen3_request_builders.clear_qwen3_tts_preprocessing_context()
 
-    assert talker.speech_tokenizer is vocoder.tokenizer
-    assert loads == ["/ckpt/speech_tokenizer"]
+    assert (talker.speech_tokenizer is vocoder.tokenizer) is (
+        vocoder_attn_implementation is None
+    )
+    assert loads == ["/ckpt/speech_tokenizer"] * (
+        1 if vocoder_attn_implementation is None else 2
+    )
+    assert float32_encoders == (
+        [(talker.speech_tokenizer, "/ckpt")] if model_type == "base" else []
+    )
     expected = qwen3_request_builders.resolve_subtalker_sampling({})
     assert predictor_captures == (
         []
@@ -2972,6 +3035,7 @@ def test_qwen3_tts_vocoder_batches_decode_requests(
         max_batch_size=2,
         max_batch_wait_ms=3,
         enable_stateful_codec_decoder=False,
+        shares_engine_speech_tokenizer=False,
     )
     assert warmed_schedulers == [scheduler]
     assert scheduler.create_stream_state("request").initial_chunk_frames == 1
@@ -3049,6 +3113,7 @@ def test_qwen3_tts_vocoder_factory_forwards_incremental_graph_config(
         incremental_codec_cuda_graph_cold_frames=(24, 32),
         incremental_codec_cuda_graph_window_frames=(8, 16),
         incremental_codec_cuda_graph_min_free_gb=1.5,
+        shares_engine_speech_tokenizer=False,
     )
 
     assert isinstance(scheduler, FakeScheduler)
@@ -3100,7 +3165,9 @@ def vocoder_factory_capture(
             "tts_model_size": tts_model_size,
         },
     )
-    qwen3_stages.create_vocoder_executor("model", device=device, **factory_kwargs)
+    qwen3_stages.create_vocoder_executor(
+        "model", device=device, shares_engine_speech_tokenizer=False, **factory_kwargs
+    )
     return captured
 
 
@@ -3204,6 +3271,7 @@ def test_vocoder_factory_scopes_npu_internal_format_to_capture(
             async_decode=async_decode,
             incremental_codec_cuda_graph=codec_graph,
             enable_deterministic_inference=deterministic,
+            shares_engine_speech_tokenizer=False,
         )
 
     assert observed_internal_formats == [
@@ -3233,6 +3301,7 @@ def test_qwen3_tts_config_starts_a_declining_platform_decoding_synchronously(
         "running_stream_count": config.generation_admission_defaults()[
             "max_running_requests"
         ],
+        "shares_engine_speech_tokenizer": True,
     }
     assert config.stage_factory_kwargs("tts_engine") == {}
 
@@ -3251,7 +3320,8 @@ def test_qwen3_tts_config_leaves_a_measured_platform_alone(
     assert config.stage_factory_kwargs("vocoder") == {
         "running_stream_count": config.generation_admission_defaults()[
             "max_running_requests"
-        ]
+        ],
+        "shares_engine_speech_tokenizer": True,
     }
     assert config.stage_factory_kwargs("tts_engine") == {}
 
@@ -6080,6 +6150,7 @@ def test_qwen3_tts_vocoder_factory_forwards_chunk_ramp(
         device="cpu",
         stream_chunk_ramp=[2, 4, 8],
         enable_stateful_codec_decoder=False,
+        shares_engine_speech_tokenizer=False,
     )
     payload = make_payload(inputs="target", params={"stream": True})
     scheduler.handle_streaming_new_request(payload.request_id, payload)
@@ -9445,6 +9516,7 @@ def test_qwen3_tts_engine_accepts_64_batch_policy_and_enables_cuda_graph(
         vocab_size = 3072
         model = SimpleNamespace(codec_embedding=torch.nn.Embedding(1, 4))
         speaker_encoder_graph_runner = None
+        tts_model_type = "base"
 
         def build_prompt_constants(self):
             return placeholder_prompt_constants()
@@ -10406,8 +10478,9 @@ def test_qwen3_tts_config_loads_frontend_only_outside_engine_process(
     }
 
 
+@pytest.mark.parametrize("model_type", ["base", "custom_voice"])
 def test_qwen3_tts_split_preprocessing_loads_the_frontend_on_the_placed_gpu(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, model_type: str
 ) -> None:
     """The split recipe's `load_frontend=True` path is the only caller of the
     standalone frontend loader; the default topology never reaches it."""
@@ -10420,6 +10493,7 @@ def test_qwen3_tts_split_preprocessing_loads_the_frontend_on_the_placed_gpu(
 
     class FakeFrontend:
         speaker_encoder_graph_runner = None
+        tts_model_type = model_type
 
         def load_speech_tokenizer(self, tokenizer) -> None:
             seen["tokenizer"] = tokenizer
@@ -10436,7 +10510,9 @@ def test_qwen3_tts_split_preprocessing_loads_the_frontend_on_the_placed_gpu(
     monkeypatch.setattr(
         qwen3_stages,
         "load_qwen3_tts_tokenizer",
-        lambda checkpoint_dir, *, device, dtype, attn_implementation: ("tok", device),
+        lambda checkpoint_dir, *, device, dtype, attn_implementation, float32_encoder: (
+            seen.update(float32_encoder=float32_encoder) or ("tok", device)
+        ),
     )
     monkeypatch.setattr(
         qwen3_stages, "load_qwen3_tts_generate_defaults", lambda ckpt: {}
@@ -10461,6 +10537,7 @@ def test_qwen3_tts_split_preprocessing_loads_the_frontend_on_the_placed_gpu(
     assert seen["dtype"] is torch.bfloat16
     assert seen["tokenizer"] == ("tok", "cuda:1")
     assert seen["context"]["standalone"] is True
+    assert seen["float32_encoder"] is (model_type == "base")
 
 
 def test_qwen3_tts_shared_gpu_layout_demands_no_preprocessing_fraction() -> None:
@@ -10971,7 +11048,11 @@ def test_real_small_base_chunked_vocoder_matches_tokenizer_decode(
     assert checkpoint_config["tts_model_size"] == "0b6"
     assert checkpoint_config["tts_model_type"] == "base"
     tokenizer = qwen3_stages.load_qwen3_tts_tokenizer(
-        checkpoint, device="cuda:0", dtype="bfloat16", attn_implementation="sdpa"
+        checkpoint,
+        device="cuda:0",
+        dtype="bfloat16",
+        attn_implementation="sdpa",
+        float32_encoder=False,
     )
     scheduler = Qwen3TTSStreamingVocoderScheduler(
         tokenizer, device="cuda:0", tts_model_size="0b6"
@@ -11042,7 +11123,11 @@ def test_real_base_padded_decoder_graph_matches_padded_eager(
     else:
         pass
     tokenizer = qwen3_stages.load_qwen3_tts_tokenizer(
-        checkpoint, device="cuda:0", dtype="bfloat16", attn_implementation="sdpa"
+        checkpoint,
+        device="cuda:0",
+        dtype="bfloat16",
+        attn_implementation="sdpa",
+        float32_encoder=False,
     )
     scheduler = Qwen3TTSStreamingVocoderScheduler(
         tokenizer, device="cuda:0", tts_model_size=model_size
