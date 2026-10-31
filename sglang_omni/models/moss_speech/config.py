@@ -12,6 +12,7 @@ from sglang_omni.config import (
     PipelineConfig,
     StageConfig,
 )
+from sglang_omni.models.moss_speech.hf_config import MAX_CONTEXT_TOKENS
 
 PACKAGE = "sglang_omni.models.moss_speech"
 
@@ -22,7 +23,7 @@ class MossSpeechPreprocessingArgs(FactoryArgs):
     codec_path: str | None = None
     voice_wav: str | None = None
     encode_batch_size: int = Field(default=4, ge=1)
-    context_limit: int = Field(default=512, ge=1, le=512)
+    context_limit: int = Field(default=MAX_CONTEXT_TOKENS, ge=1, le=MAX_CONTEXT_TOKENS)
 
 
 class MossSpeechPreprocessingStage(StageConfig):
@@ -35,7 +36,7 @@ class MossSpeechEngineArgs(FactoryArgs):
     model_config = ConfigDict(extra="forbid")
 
     dtype: str = "bfloat16"
-    context_length: int = Field(default=1024, ge=1, le=1024)
+    context_length: int = Field(default=MAX_CONTEXT_TOKENS, ge=1, le=MAX_CONTEXT_TOKENS)
 
 
 class MossSpeechEngineStage(EngineStageConfig):
@@ -83,7 +84,7 @@ class MossSpeechPipelineConfig(PipelineConfig):
             engine=EngineArgs(
                 max_running_requests=4,
                 max_queued_requests=20,
-                max_total_tokens=4096,
+                max_total_tokens=MAX_CONTEXT_TOKENS,
                 disable_cuda_graph=True,
             ),
             gpu=0,

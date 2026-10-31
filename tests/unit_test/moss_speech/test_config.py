@@ -265,7 +265,7 @@ def test_engine_rejects_unsupported_execution_policy(
         ("ar_engine", "decode_full_graphs", True),
         ("audio_vocoder", "codec_optimizations", True),
         ("audio_vocoder", "chunk_size", 7),
-        ("preprocessing", "context_limit", 513),
+        ("preprocessing", "context_limit", 40961),
     ],
 )
 def test_typed_config_rejects_obsolete_or_untrained_knobs(
@@ -322,3 +322,19 @@ def test_missing_voice_fails_before_loading_codec(tmp_path: Path) -> None:
                 voice_wav=str(tmp_path / "missing.wav"),
             )
         codec.assert_not_called()
+
+
+def test_context_window_defaults_and_explicit_overrides() -> None:
+    config = MossSpeechPipelineConfig(model_path="unused")
+    assert config.stage_named("preprocessing").factory.context_limit == 40960
+    assert config.stage_named("ar_engine").factory.context_length == 40960
+    assert config.stage_named("ar_engine").engine.max_total_tokens == 40960
+    assert MossSpeechConfig().max_position_embeddings == 40960
+    document = config.model_dump()
+    for stage in document["stages"]:
+        if stage["name"] == "ar_engine":
+            stage["factory"]["context_length"] = 40961
+        else:
+            pass
+    with pytest.raises(ValidationError):
+        MossSpeechPipelineConfig.model_validate(document)

@@ -34,10 +34,6 @@ from sglang_omni.scheduling.types import DeferredAdmission
 
 TEXT_TERMINAL = "text_decode"
 AUDIO_TERMINAL = "audio_vocoder"
-CONTEXT_PRECHECK_TOKENS = 10240
-PRECHECK_CHARACTERS_PER_TOKEN = 2.0
-PRECHECK_TEMPLATE_TOKENS = 64
-AUDIO_CODES_PER_SECOND = 12.5
 
 
 class RequestBuilder(Protocol):
@@ -230,24 +226,6 @@ def normalize_and_validate(
     else:
         pass
     turns, decoded_audio = normalize_turns(generation.messages or [], metadata)
-    estimated_tokens = (
-        PRECHECK_TEMPLATE_TOKENS
-        + sum(
-            max(len(turn["text"] or "") / PRECHECK_CHARACTERS_PER_TOKEN, 1.0)
-            for turn in turns
-        )
-        + sum(
-            waveform.numel() / sample_rate * AUDIO_CODES_PER_SECOND
-            for waveform, sample_rate, fingerprint in decoded_audio
-        )
-    )
-    if estimated_tokens > CONTEXT_PRECHECK_TOKENS:
-        raise RequestValidationError(
-            f"estimated context length exceeds {CONTEXT_PRECHECK_TOKENS}",
-            reason="context_too_long",
-        )
-    else:
-        pass
     seed = sampling.seed
     if seed is None:
         digest = hashlib.blake2b(request_id.encode("utf-8"), digest_size=8).digest()

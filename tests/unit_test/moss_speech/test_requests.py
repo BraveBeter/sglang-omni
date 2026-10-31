@@ -321,7 +321,7 @@ def test_chat_request_cannot_replace_configured_voice(stream: bool) -> None:
         SamplingParams(stop=["stop"]),
         SamplingParams(stop_token_ids=[1]),
         SamplingParams(max_new_tokens=0),
-        SamplingParams(max_new_tokens=513),
+        SamplingParams(max_new_tokens=1001),
         SamplingParams(seed=2**64),
     ],
 )
@@ -396,3 +396,47 @@ def test_native_grid_removes_left_padding_and_rejects_bad_ids() -> None:
         state.input_grid, state.attention_mask = bad_grid, []
         with pytest.raises(RequestValidationError, match="out-of-vocabulary"):
             build_sglang_moss_request(state, payload=payload)
+
+
+@pytest.mark.parametrize(
+    "prompt_length,budget,allowed",
+    [(40959, 1, True), (40960, 1, False), (39960, 1000, True), (39961, 1000, False)],
+)
+def test_context_window_reserves_generation_slot(
+    prompt_length: int, budget: int, allowed: bool
+) -> None:
+    state = MossSpeechState(
+        input_grid=[[12, 512]] * prompt_length, max_new_tokens=budget
+    )
+    payload = StagePayload("context", OmniRequest(inputs=None), {})
+    if allowed:
+        native = build_sglang_moss_request(state, payload=payload)
+        assert len(native.req.origin_input_ids) == prompt_length
+    else:
+        with pytest.raises(RequestValidationError, match="40960"):
+            build_sglang_moss_request(state, payload=payload)
+
+
+def test_long_text_is_checked_after_canonical_tokenization() -> None:
+    text = "hello " * 20000
+    state = normalize_and_validate(
+        OmniRequest(inputs=GenerateRequest(messages=[Message("user", text)])),
+        request_id="long-text",
+        allow_streaming=True,
+    )
+    assert state.turns[0]["text"] == text
+
+
+@pytest.mark.parametrize("budget", [513, 1000])
+def test_hf_generation_budget_reaches_native_request(budget: int) -> None:
+    generation = GenerateRequest(
+        messages=[Message("user", "Hello.")],
+        sampling=SamplingParams(max_new_tokens=budget),
+    )
+    request = OmniRequest(inputs=generation)
+    state = normalize_and_validate(request, request_id="budget")
+    state.input_grid = [[12, 512]]
+    native = build_sglang_moss_request(
+        state, payload=StagePayload("budget", request, {})
+    )
+    assert state.max_new_tokens == native.max_new_tokens == budget
