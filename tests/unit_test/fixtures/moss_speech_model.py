@@ -324,6 +324,25 @@ def assert_full_prefill_graph(model: MossSpeechSGLangModel, lengths=(3, 7)) -> d
         torch.testing.assert_close(
             again.text_logits, expected.text_logits, atol=0, rtol=0
         )
+        observed = []
+        handle = model.layers[0].register_forward_pre_hook(
+            lambda module, args: observed.append(len(args))
+        )
+        previous_hits = manager.hits
+        try:
+            with forward_context(ForwardContext(attn_backend=backend)):
+                hooked = model(
+                    batch.input_ids,
+                    batch.positions,
+                    batch,
+                    input_embeds=prompt[:length],
+                )
+            torch.testing.assert_close(
+                hooked.text_logits, expected.text_logits, rtol=0, atol=0
+            )
+            assert observed == [5] and manager.hits == previous_hits
+        finally:
+            handle.remove()
         manager.close()
         manager.close()
         assert (

@@ -224,6 +224,10 @@ class PrefillGraphs:
                 or type(self.backend) is not TorchNativeAttnBackend
                 or self.backend.use_sliding_window_kv_pool
                 or self.model.training
+                or any(
+                    m._forward_hooks or m._forward_pre_hooks
+                    for m in self.model.modules()
+                )  # noqa: leading-underscore
                 or torch.__version__ != "2.14.1+cu130"
                 or torch.version.cuda != "13.0"
                 or torch.cuda.get_device_capability(self.device) != (8, 0)
@@ -280,6 +284,8 @@ class PrefillGraphs:
                 positions.shape != (entry.length,)
                 or positions.dtype != torch.int64
                 or positions.device != self.device
+                or positions.stride() != entry.positions.stride()
+                or input_embeds.stride() != entry.embeds.stride()
                 or input_embeds.shape != entry.embeds.shape
                 or input_embeds.dtype != entry.embeds.dtype
                 or input_embeds.device != self.device
