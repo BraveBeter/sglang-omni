@@ -24,6 +24,7 @@ from sglang_omni.models.moss_speech.model_layers import (
 from sglang_omni.models.moss_speech.sglang_model import MossSpeechSGLangModel
 from tests.unit_test.fixtures.accelerator import require_cuda
 from tests.unit_test.fixtures.moss_speech_model import (
+    assert_full_decode_graph,
     checkpoint_weights,
     decode,
     native_runtime,
@@ -296,3 +297,11 @@ def test_native_cuda_prefill_decode_keep_requests_and_tail_kv_independent() -> N
         pytest.skip("Run the accelerator lane without the CPU engine override")
     else:
         assert_native_request_isolation(torch.device("cuda", 0))
+
+
+@pytest.mark.accelerator
+def test_full_decode_graph_matches_eager_and_owns_outputs() -> None:
+    require_cuda()
+    with native_runtime(torch.device("cuda", 0)), torch.no_grad():
+        model = tiny_model(torch.device("cuda", 0)).eval()
+        assert_full_decode_graph(model)

@@ -4,6 +4,7 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from time import perf_counter
 
 import torch
 from sglang.srt.layers.attention.torch_native_backend import TorchNativeAttnBackend
@@ -12,6 +13,7 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMo
 from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
 from sglang.srt.runtime_context import get_context, get_parallel
 
+from sglang_omni.models.moss_speech.decode_graphs import DecodeGraph
 from sglang_omni.models.moss_speech.hf_config import MossSpeechConfig
 from sglang_omni.models.moss_speech.model_runner import MossSpeechModelRunner
 from sglang_omni.models.moss_speech.sglang_model import (
@@ -145,18 +147,20 @@ def prefill(
     model: MossSpeechSGLangModel,
     prompt_embeddings: list[torch.Tensor],
     request_ids: list[str],
+    *,
+    max_context_len: int = 16,
 ) -> tuple[MossSpeechModelOutput, TorchNativeAttnBackend]:
     device = model.embed_tokens.weight.device
     token_lengths = [embeddings.shape[0] for embeddings in prompt_embeddings]
     token_count = sum(token_lengths)
     request_pool = ReqToTokenPool(
         size=len(token_lengths),
-        max_context_len=16,
+        max_context_len=max_context_len,
         device=str(device),
         enable_memory_saver=False,
     )
     kv_pool = MHATokenToKVPool(
-        size=32,
+        size=max(32, 2 * max_context_len),
         page_size=1,
         dtype=torch.bfloat16,
         head_num=model.config.num_key_value_heads,
@@ -238,6 +242,9 @@ def decode(
             [length + 1 for length in prompt_lengths], dtype=torch.int32, device=device
         ),
         out_cache_loc=token_slots,
+        seq_lens_cpu=torch.tensor(
+            [length + 1 for length in prompt_lengths], device="cpu"
+        ),
         seq_lens_sum=sum(prompt_lengths) + batch_size,
         positions=torch.tensor(prompt_lengths, device=device),
         rids=request_ids,
@@ -245,3 +252,110 @@ def decode(
     backend.init_forward_metadata(batch)
     with forward_context(ForwardContext(attn_backend=backend)):
         return model(batch.input_ids, batch.positions, batch)
+
+
+def assert_full_decode_graph(model: MossSpeechSGLangModel, *, capacity=16) -> dict:
+    """Replay full dual heads and all KV layers, including output reuse and close."""
+    device = model.embed_tokens.weight.device
+    prompt = model.embed_tokens(torch.tensor([1, 2, 3], device=device))
+    _, backend = prefill(model, [prompt], ["prompt"], max_context_len=capacity)
+    graph_lengths = tuple(range(1, min(capacity, 512) + 1))
+    manager = DecodeGraph(model, backend, lengths=graph_lengths)
+    model.decode_graph = manager
+    try:
+        memory_before = {
+            "allocated": torch.cuda.memory_allocated(device),
+            "reserved": torch.cuda.memory_reserved(device),
+        }
+        started = perf_counter()
+        manager.initialize()
+        startup_seconds = perf_counter() - started
+        memory_after = {
+            "allocated": torch.cuda.memory_allocated(device),
+            "reserved": torch.cuda.memory_reserved(device),
+        }
+        assert len(manager.entries) == len(graph_lengths), manager.reason
+        snapshots = []
+        generator = torch.Generator(device=device).manual_seed(9901)
+        lengths = ((512, 1023) if capacity > 512 else ()) + tuple(
+            n - 1 for n in graph_lengths
+        )
+        for length in lengths:
+            # Fill all earlier KV rows deterministically, including unused-gap rows.
+            backend.req_to_token_pool.req_to_token[1, :length] = torch.arange(
+                1, length + 1, device=device
+            )
+            for cache in (
+                *backend.token_to_kv_pool.k_buffer,
+                *backend.token_to_kv_pool.v_buffer,
+            ):
+                cache[1 : length + 1].normal_(mean=0.0, std=0.125, generator=generator)
+            feedback = model.embed_tokens(torch.tensor([length], device=device))
+            model.decode_graph = None
+            expected = decode(model, backend, [length], feedback, ["eager"])
+            expected_kv = [
+                t.clone()
+                for t in (
+                    *backend.token_to_kv_pool.k_buffer,
+                    *backend.token_to_kv_pool.v_buffer,
+                )
+            ]
+            model.decode_graph = manager
+            actual = decode(model, backend, [length], feedback, ["graph"])
+            for name in ("text_logits", "audio_logits", "hidden_states"):
+                torch.testing.assert_close(
+                    getattr(actual, name), getattr(expected, name), rtol=0, atol=0
+                )
+            for actual_kv, reference in zip(
+                (
+                    *backend.token_to_kv_pool.k_buffer,
+                    *backend.token_to_kv_pool.v_buffer,
+                ),
+                expected_kv,
+            ):
+                torch.testing.assert_close(
+                    actual_kv[1 : length + 2], reference[1 : length + 2], rtol=0, atol=0
+                )
+            snapshots.append((actual, actual.text_logits.clone()))
+        assert manager.hits == len(graph_lengths)
+        for actual, saved in snapshots:
+            torch.testing.assert_close(actual.text_logits, saved, rtol=0, atol=0)
+        # Sampling may mutate an owned output without poisoning the next replay.
+        snapshots[-1][0].text_logits.fill_(float("-inf"))
+        again = decode(model, backend, [lengths[-1]], feedback, ["reuse"])
+        torch.testing.assert_close(
+            again.text_logits, expected.text_logits, rtol=0, atol=0
+        )
+        observed = []
+        handle = model.layers[0].register_forward_pre_hook(
+            lambda module, args: observed.append(len(args))
+        )
+        previous_hits = manager.hits
+        try:
+            hooked = decode(model, backend, [lengths[-1]], feedback, ["hooked"])
+            torch.testing.assert_close(
+                hooked.text_logits, expected.text_logits, rtol=0, atol=0
+            )
+            assert observed == [5] and manager.hits == previous_hits
+        finally:
+            handle.remove()
+        manager.close()
+        manager.close()
+        after = decode(model, backend, [lengths[-1]], feedback, ["closed"])
+        torch.testing.assert_close(
+            after.audio_logits, expected.audio_logits, rtol=0, atol=0
+        )
+        return {
+            "captures": len(graph_lengths),
+            "startup_seconds": startup_seconds,
+            "memory_before_bytes": memory_before,
+            "memory_after_bytes": memory_after,
+            "replays": manager.hits,
+            "complete_heads_exact": True,
+            "kv_layers": model.total_attention_layers,
+            "owned_output_and_close": True,
+        }
+    finally:
+        manager.close()
+        model.decode_graph = None
+        model.dual_logits_by_request_id.clear()
