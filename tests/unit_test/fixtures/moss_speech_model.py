@@ -5,7 +5,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from time import perf_counter
+from unittest.mock import patch
 
+import pytest
 import torch
 from sglang.srt.layers.attention.torch_native_backend import TorchNativeAttnBackend
 from sglang.srt.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
@@ -13,7 +15,7 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMo
 from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
 from sglang.srt.runtime_context import get_context, get_parallel
 
-from sglang_omni.models.moss_speech.decode_graphs import DecodeGraph
+from sglang_omni.models.moss_speech.decode_graphs import DecodeEntry, DecodeGraph
 from sglang_omni.models.moss_speech.hf_config import MossSpeechConfig
 from sglang_omni.models.moss_speech.model_runner import MossSpeechModelRunner
 from sglang_omni.models.moss_speech.sglang_model import (
@@ -345,6 +347,23 @@ def assert_full_decode_graph(model: MossSpeechSGLangModel, *, capacity=16) -> di
         torch.testing.assert_close(
             after.audio_logits, expected.audio_logits, rtol=0, atol=0
         )
+        original_body = DecodeEntry.body
+
+        def fail_warmup(entry: DecodeEntry) -> MossSpeechModelOutput:
+            original_body(entry)
+            raise RuntimeError("injected warmup failure")
+
+        failed = DecodeGraph(model, backend, lengths=(1,))
+        with (
+            patch.object(DecodeEntry, "body", fail_warmup),
+            patch(
+                "torch.cuda.synchronize", wraps=torch.cuda.synchronize
+            ) as synchronize,
+            pytest.raises(RuntimeError, match="injected warmup failure"),
+        ):
+            failed.initialize()
+        assert synchronize.call_count > 0
+        assert failed.closed and not failed.entries
         return {
             "captures": len(graph_lengths),
             "startup_seconds": startup_seconds,
@@ -354,6 +373,8 @@ def assert_full_decode_graph(model: MossSpeechSGLangModel, *, capacity=16) -> di
             "complete_heads_exact": True,
             "kv_layers": model.total_attention_layers,
             "owned_output_and_close": True,
+            "partial_warmup_failure_synchronized": True,
+            "failed_warmup_synchronize_calls": synchronize.call_count,
         }
     finally:
         manager.close()

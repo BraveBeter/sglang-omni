@@ -140,8 +140,9 @@ class DecodeEntry:
         )
 
     def close(self):
+        # note (Codex): Warmup may fail before a graph exists while work is in flight.
+        torch.cuda.synchronize(self.device)
         if self.graph is not None:
-            torch.cuda.synchronize(self.device)
             self.graph.reset()
             self.graph = self.output = None
         else:
