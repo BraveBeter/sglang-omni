@@ -7,6 +7,7 @@ from transformers import AutoConfig, PretrainedConfig
 
 MAX_CONTEXT_TOKENS = 40960
 MAX_GENERATION_TOKENS = 1000
+KV_RESERVE_TOKENS = 2
 
 
 class MossSpeechConfig(PretrainedConfig):
