@@ -6,7 +6,6 @@ from __future__ import annotations
 from transformers import AutoConfig, PretrainedConfig
 
 MAX_CONTEXT_TOKENS = 40960
-MAX_GENERATION_TOKENS = 1000
 KV_RESERVE_TOKENS = 2
 
 
