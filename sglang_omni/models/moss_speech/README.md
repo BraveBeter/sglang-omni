@@ -84,7 +84,7 @@ Set modalities to ["text"] in the speech-input example for speech-to-text, or us
 
 The output budget max_tokens accepts 1–1000 and counts generated two-channel grid rows, including delimiters. Length-limited output is retained with finish_reason="length"; increasing the budget also consumes the 40,960-row total context shared with the encoded prompt. The 1000-row output ceiling follows the checkpoint README generation example; generation_config.json does not declare it as an architectural maximum. A successful HTTP response does not establish task compliance or audio quality.
 
-The checkpoint supports a total context of 40,960 two-channel rows. Preprocessing uses exact canonical token counts rather than character estimates; the default engine context and shared KV token pool are both 40,960. Prompt plus requested generation budget must fit that window. The independent output budget is 1–1000 rows (default 200); it is not the model context size. Raising the total context increases KV memory and does not guarantee four simultaneous full-window requests.
+The checkpoint supports a total context of 40,960 two-channel rows. Preprocessing uses exact canonical token counts rather than character estimates; the default engine context is 40,960; the shared KV pool has 40,962 physical slots, including two allocator/admission guards. The model-specific scheduler sentinel accounts for upstream clipping without reducing the logical window. Prompt plus requested generation budget must fit that window. The independent output budget is 1–1000 rows (default 200); it is not the model context size. Raising the total context increases KV memory and does not guarantee four simultaneous full-window requests.
 
 ## Validation status
 
