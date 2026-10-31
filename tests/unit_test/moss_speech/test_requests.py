@@ -38,7 +38,7 @@ from tests.unit_test.fixtures.moss_speech_requests import (
 @pytest.mark.parametrize(
     "sampling,expected",
     [
-        (SamplingParams(), (0.6, 0.95, 20, 1.1, 200)),
+        (SamplingParams(), (0.6, 0.95, 20, 1.1, None)),
         (
             SamplingParams(
                 temperature=0.0,
@@ -61,7 +61,7 @@ from tests.unit_test.fixtures.moss_speech_requests import (
         ),
         (
             SamplingParams(temperature=1.0, top_p=1.0, top_k=-1),
-            (1.0, 1.0, -1, 1.1, 200),
+            (1.0, 1.0, -1, 1.1, None),
         ),
         (
             SamplingParams(top_k=0, max_new_tokens=1),
@@ -69,14 +69,14 @@ from tests.unit_test.fixtures.moss_speech_requests import (
         ),
         (
             SamplingParams(top_k=1),
-            (0.6, 0.95, 1, 1.1, 200),
+            (0.6, 0.95, 1, 1.1, None),
         ),
     ],
 )
 def test_sampling_presence_reaches_native_parameters(
     entry: str,
     sampling: SamplingParams,
-    expected: tuple[float, float, int, float, int],
+    expected: tuple[float, float, int, float, int | None],
 ) -> None:
     """Unmarked explicit scalar parameters previously disappeared at native admission."""
     generation = GenerateRequest(
@@ -103,6 +103,10 @@ def test_sampling_presence_reaches_native_parameters(
     state, native = native_request(request)
     assert state.output_modality == "text"
     assert state.stop == []
+    expected = (
+        *expected[:4],
+        expected[4] if expected[4] is not None else 40960 - len(native.prompt_rows),
+    )
     actual = native.params
     assert (
         actual.temperature,
@@ -321,7 +325,7 @@ def test_chat_request_cannot_replace_configured_voice(stream: bool) -> None:
         SamplingParams(stop=["stop"]),
         SamplingParams(stop_token_ids=[1]),
         SamplingParams(max_new_tokens=0),
-        SamplingParams(max_new_tokens=1001),
+        SamplingParams(max_new_tokens=40960),
         SamplingParams(seed=2**64),
     ],
 )
@@ -383,6 +387,7 @@ def test_native_grid_removes_left_padding_and_rejects_bad_ids() -> None:
     native = build_sglang_moss_request(state, payload=payload)
     assert native.prompt_rows.tolist() == [[151667, 8], [1234, 512]]
     assert list(native.req.origin_input_ids) == [8, 1234]
+    assert native.max_new_tokens == native.req.sampling_params.max_new_tokens == 40958
     assert native.mode == 0
     state.input_grid = [[151644, 512], [151646, 512], [151667, 500]]
     state.attention_mask = []
@@ -400,10 +405,20 @@ def test_native_grid_removes_left_padding_and_rejects_bad_ids() -> None:
 
 @pytest.mark.parametrize(
     "prompt_length,budget,allowed",
-    [(40959, 1, True), (40960, 1, False), (39960, 1000, True), (39961, 1000, False)],
+    [
+        (40959, 1, True),
+        (40960, 1, False),
+        (39960, 1000, True),
+        (39961, 1000, False),
+        (40959, None, True),
+        (40960, None, False),
+        (5, None, True),
+        (39959, 1001, True),
+        (39960, 1001, False),
+    ],
 )
 def test_context_window_reserves_generation_slot(
-    prompt_length: int, budget: int, allowed: bool
+    prompt_length: int, budget: int | None, allowed: bool
 ) -> None:
     state = MossSpeechState(
         input_grid=[[12, 512]] * prompt_length, max_new_tokens=budget
@@ -412,6 +427,10 @@ def test_context_window_reserves_generation_slot(
     if allowed:
         native = build_sglang_moss_request(state, payload=payload)
         assert len(native.req.origin_input_ids) == prompt_length
+        assert native.max_new_tokens == (
+            40960 - prompt_length if budget is None else budget
+        )
+        assert native.req.sampling_params.max_new_tokens == native.max_new_tokens
     else:
         with pytest.raises(RequestValidationError, match="40960"):
             build_sglang_moss_request(state, payload=payload)
@@ -427,7 +446,7 @@ def test_long_text_is_checked_after_canonical_tokenization() -> None:
     assert state.turns[0]["text"] == text
 
 
-@pytest.mark.parametrize("budget", [513, 1000])
+@pytest.mark.parametrize("budget", [513, 1000, 1001, 40959])
 def test_hf_generation_budget_reaches_native_request(budget: int) -> None:
     generation = GenerateRequest(
         messages=[Message("user", "Hello.")],

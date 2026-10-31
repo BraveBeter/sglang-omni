@@ -56,7 +56,9 @@ def test_speech_endpoints_preserve_input_and_parameter_presence(
     assert generation.to_dict() == original
     assert state.output_modality == expected_modality
     assert native.params.temperature == expected_temperature
-    assert native.params.max_new_tokens == (23 if explicit else 200)
+    assert native.params.max_new_tokens == (
+        23 if explicit else 40960 - len(native.prompt_rows)
+    )
     assert state.turns[0]["role"] == "system"
     if endpoint == "tts":
         assert (
@@ -90,7 +92,7 @@ def test_chat_metadata_does_not_select_a_speech_endpoint(task: str) -> None:
         ("tts", {"speed": 1.5}),
         ("tts", {"language": "English"}),
         ("tts", {"instructions": "whisper"}),
-        ("tts", {"max_new_tokens": 1001}),
+        ("tts", {"max_new_tokens": 40960}),
         ("asr", {"language": "en"}),
         ("asr", {"prompt": "hint"}),
         ("asr", {"task": "translate"}),

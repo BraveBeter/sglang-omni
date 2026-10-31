@@ -32,7 +32,7 @@ class MossSamplingParams:
     top_k: int = -1
     repetition_penalty: float = 1.0
     min_new_tokens: int = 0
-    max_new_tokens: int = 200
+    max_new_tokens: int | None = None
 
 
 def initial_mode(prompt_rows: torch.Tensor) -> Mode:

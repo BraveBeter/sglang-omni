@@ -18,13 +18,13 @@ from sglang_omni.models.moss_speech.audio_tasks import (
     normalize_turns,
     restore_audio_task_request,
 )
+from sglang_omni.models.moss_speech.hf_config import MAX_CONTEXT_TOKENS
 from sglang_omni.models.moss_speech.payload_types import (
     EOSP_TOKEN_ID,
     MODALITY_PAD_TOKEN_ID,
     MossSpeechState,
 )
 from sglang_omni.models.moss_speech.request_data import (
-    MAX_GENERATION_TOKENS,
     MossSpeechSGLangRequestData,
     build_sglang_moss_request,
 )
@@ -185,9 +185,9 @@ def normalize_and_validate(
         if generation.max_tokens is not None
         else sampling.max_new_tokens
     )
-    if max_new_tokens is not None and not 1 <= max_new_tokens <= MAX_GENERATION_TOKENS:
+    if max_new_tokens is not None and not 1 <= max_new_tokens < MAX_CONTEXT_TOKENS:
         raise RequestValidationError(
-            f"max_new_tokens must be within [1, {MAX_GENERATION_TOKENS}]"
+            f"max_new_tokens must be within [1, {MAX_CONTEXT_TOKENS - 1}]"
         )
     elif stream and not allow_streaming:
         raise RequestValidationError(

@@ -183,7 +183,7 @@ def test_duplicate_eos_does_not_restore_completed_pending_state(
 
 @pytest.mark.parametrize(
     "finish_reason,code_count",
-    [("stop", 511), ("length", 512), ("stop", 999), ("length", 1000)],
+    [("stop", 511), ("length", 512), ("stop", 999), ("length", 1000), ("length", 1001)],
 )
 def test_terminal_audio_preserves_natural_eos_and_length_code_counts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finish_reason: str, code_count: int
@@ -312,7 +312,7 @@ def test_stream_rejects_malformed_chunks_before_consuming_codes(
         elif invalid_kind == "dtype":
             chunk.data = torch.tensor([3.0])
         else:
-            chunk.data = torch.zeros(1001, dtype=torch.long)
+            chunk.data = torch.zeros(40961, dtype=torch.long)
         with pytest.raises(ValueError):
             scheduler.handle_stream_chunk("bad", chunk)
         scheduler.abort("bad")
@@ -434,3 +434,35 @@ def test_decoder_failure_emits_error_and_followup_request_recovers(
         serving_thread.join(timeout=10)
         assert not serving_thread.is_alive()
     assert not scheduler.codec.sessions and not scheduler.stream_states
+
+
+def test_text_stream_accepts_more_than_1000_and_rejects_context_overflow() -> None:
+    """A valid text continuation must not retain the old fixed output ceiling."""
+    scheduler = MossSpeechStreamingText(Utf8Tokenizer())
+    try:
+        metadata = {"stream": True, "modality": "text_tokens", "row_index": 0}
+        messages = scheduler.on_stream_chunk(
+            "long", StreamItem(0, torch.full((1001,), 97), "ar_engine", metadata)
+        )
+        assert messages[0].data == {"text": "a" * 1001}
+        metadata = {**metadata, "row_index": 1001}
+        with pytest.raises(ValueError, match="budget"):
+            scheduler.on_stream_chunk(
+                "long", StreamItem(1, torch.full((39960,), 97), "ar_engine", metadata)
+            )
+    finally:
+        scheduler.stop()
+
+
+def test_codec_rejects_context_overflow_and_releases_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Codec retains a finite bound after removing its 1000-code ceiling."""
+    scheduler = vocoder(tmp_path, monkeypatch)
+    try:
+        scheduler.codec.begin("overflow", voice_tensors(), seed=42)
+        with pytest.raises(ValueError, match="40960"):
+            scheduler.codec.push("overflow", [0] * 40961)
+        assert not scheduler.codec.sessions
+    finally:
+        scheduler.stop()
