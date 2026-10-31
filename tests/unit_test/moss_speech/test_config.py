@@ -364,7 +364,9 @@ def test_context_window_survives_upstream_generation_and_kv_guards(
     scheduler.token_to_kv_pool_allocator = TokenToKVPoolAllocator(
         size=40962, dtype=torch.bfloat16, device="cpu", kvcache=None, need_sort=False
     )
-    MossSpeechEngineBuilder().post_scheduler_setup(scheduler, scheduler.model_runner)
+    MossSpeechEngineBuilder(streaming=True).post_scheduler_setup(
+        scheduler, scheduler.model_runner
+    )
     state = MossSpeechState(
         input_grid=[[12, 512]] * prompt_tokens, max_new_tokens=budget
     )
