@@ -4,7 +4,9 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from unittest.mock import patch
 
+import pytest
 import torch
 from sglang.srt.layers.attention.torch_native_backend import TorchNativeAttnBackend
 from sglang.srt.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
@@ -14,7 +16,7 @@ from sglang.srt.runtime_context import get_context, get_parallel
 
 from sglang_omni.models.moss_speech.hf_config import MossSpeechConfig
 from sglang_omni.models.moss_speech.model_runner import MossSpeechModelRunner
-from sglang_omni.models.moss_speech.prefill_graphs import PrefillGraphs
+from sglang_omni.models.moss_speech.prefill_graphs import PrefillEntry, PrefillGraphs
 from sglang_omni.models.moss_speech.sglang_model import (
     MossSpeechModelOutput,
     MossSpeechSGLangModel,
@@ -349,6 +351,23 @@ def assert_full_prefill_graph(model: MossSpeechSGLangModel, lengths=(3, 7)) -> d
             manager.try_replay(batch.input_ids, batch.positions, batch, prompt[:length])
             is None
         )
+        original_body = PrefillEntry.body
+
+        def fail_warmup(entry: PrefillEntry) -> MossSpeechModelOutput:
+            original_body(entry)
+            raise RuntimeError("injected warmup failure")
+
+        failed = PrefillGraphs(model, backend, (lengths[0],))
+        with (
+            patch.object(PrefillEntry, "body", fail_warmup),
+            patch(
+                "torch.cuda.synchronize", wraps=torch.cuda.synchronize
+            ) as synchronize,
+            pytest.raises(RuntimeError, match="injected warmup failure"),
+        ):
+            failed.initialize()
+        assert synchronize.call_count > 0
+        assert failed.closed and not failed.entries
         return {
             "captures": len(lengths),
             "replays": manager.hits,
@@ -356,6 +375,8 @@ def assert_full_prefill_graph(model: MossSpeechSGLangModel, lengths=(3, 7)) -> d
             "kv_layers": model.total_attention_layers,
             "complete_heads_and_scattered_kv_exact": True,
             "owned_outputs_and_close": True,
+            "partial_warmup_failure_synchronized": True,
+            "failed_warmup_synchronize_calls": synchronize.call_count,
         }
     finally:
         manager.close()
