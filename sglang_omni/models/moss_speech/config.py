@@ -36,6 +36,7 @@ class MossSpeechEngineArgs(FactoryArgs):
 
     dtype: str = "bfloat16"
     context_length: int = Field(default=1024, ge=1, le=1024)
+    native_norm_library: str | None = None
 
 
 class MossSpeechEngineStage(EngineStageConfig):

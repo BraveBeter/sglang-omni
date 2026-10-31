@@ -13,10 +13,13 @@ from sglang.srt.models.qwen2 import Qwen2MLP
 from sglang.srt.models.qwen3 import Qwen3Attention
 
 from sglang_omni.models.moss_speech.hf_config import MossSpeechConfig
+from sglang_omni.models.moss_speech.native_norm import NativeNorm
 
 
 class MossSpeechRMSNorm(RMSNorm):
     """Round residual addition and normalization before multiplying BF16 weights."""
+
+    native_norm: NativeNorm | None = None
 
     def forward(
         self,
@@ -28,6 +31,14 @@ class MossSpeechRMSNorm(RMSNorm):
         else:
             x = x + residual
             residual = x
+        if self.native_norm is not None and not self.training:
+            normalized = self.native_norm.apply(x, self.weight, self.variance_epsilon)
+            if normalized is not None:
+                return normalized if residual is None else (normalized, residual)
+            else:
+                pass
+        else:
+            pass
         original_dtype = x.dtype
         normalized = x.float()
         normalized = normalized * torch.rsqrt(

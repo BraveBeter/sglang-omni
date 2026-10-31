@@ -126,3 +126,10 @@ The prepared speech inputs retain the first 20 seconds of each pinned reference 
 The smoke covers both languages, all four input/output modes, streaming and non-streaming, natural text EOS, audio length truncation, disconnect recovery, and invalid-request recovery. It retains HTTP responses, generated WAVs, usage, timing observations, asset hashes, and server logs. A first PCM event can contain silence; non-streaming TTFA and TTFT are unobserved. These observations have no calibrated performance or quality thresholds, and the chat API does not expose the native token grid for exact retained-code comparison.
 
 The central Omni workflow selects this dedicated smoke with the run-omni-ci and run-moss-speech labels. It does not add MOSS-Speech to the random model selection. Local checks and workflow wiring do not establish a successful remote CI run.
+
+
+### Optional native norm pointwise arithmetic
+
+Set ar_engine.factory.native_norm_library to an explicitly built shared library to enable the SM80 BF16 pointwise experiment. The default is None. Attention, KV, projection and the mean reduction remain eager Torch. The finite single-token geometries are (1,4096), (1,32,128) and (1,8,128); other shapes, dtype, device or gradient modes use the original norm. Residual addition and BF16 rounding before multiplication by the weight are preserved. Each output owns its storage. No complete-decode graph or old binary is required.
+
+Build kernels/decode_norm_native.cu with the matching CUDA toolkit: nvcc -shared -Xcompiler=-fPIC -O3 -std=c++17 -arch=sm_80 --fmad=false -o /your/output/native_norm.so kernels/decode_norm_native.cu. Record the compiler, source and library hashes in the deployment manifest. No compilation occurs during module import or request processing. This optional library must be rebuilt for the runtime CUDA major/minor; qualification and service results are recorded separately before recommending the experiment.

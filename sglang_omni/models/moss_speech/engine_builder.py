@@ -16,7 +16,9 @@ from sglang_omni.model_runner.model_worker import ModelWorker
 from sglang_omni.models.moss_speech.hf_config import (
     ensure_moss_speech_config_registered,
 )
+from sglang_omni.models.moss_speech.model_layers import MossSpeechRMSNorm
 from sglang_omni.models.moss_speech.model_runner import MossSpeechModelRunner
+from sglang_omni.models.moss_speech.native_norm import NativeNorm
 from sglang_omni.models.moss_speech.request_builders import (
     RequestBuilder,
     ResultAdapter,
@@ -46,8 +48,15 @@ class MossSpeechEngineBuilder(
     model_arch_override = "MossSpeechForCausalLM"
     supports_context_length_override = True
 
-    def __init__(self, context_length: int | None = None, *, streaming: bool) -> None:
+    def __init__(
+        self,
+        context_length: int | None = None,
+        *,
+        streaming: bool,
+        native_norm_library: str | None = None,
+    ) -> None:
         super().__init__()
+        self.native_norm_library = native_norm_library
         self.streaming = streaming
         self.request_lifecycle: MossSpeechRequestLifecycle | None = None
         if context_length is None:
@@ -156,6 +165,15 @@ class MossSpeechEngineBuilder(
         model = model_worker.model_runner.model
         assert isinstance(model, MossSpeechSGLangModel)
         model.assert_heads_independent()
+        if self.native_norm_library is not None:
+            native_norm = NativeNorm(self.native_norm_library)
+            for module in model.modules():
+                if isinstance(module, MossSpeechRMSNorm):
+                    module.native_norm = native_norm
+                else:
+                    pass
+        else:
+            pass
         configuration = resolved_view(server_args)
         if (
             configuration.max_running_requests
