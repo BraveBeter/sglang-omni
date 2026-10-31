@@ -130,7 +130,7 @@ The central Omni workflow selects this dedicated smoke with the run-omni-ci and 
 
 ## Exact-length prefill graph experiment
 
-Set `ar_engine.factory.prefill_graph_lengths: [34, 41, 372]` to prepare up to
+Set `ar_engine.factory.prefill_graph_lengths: [34, 41, 61, 64, 72, 74, 276, 277]` to prepare up to
 eight explicit, unique prompt lengths from 1 to 512. The default `null` disables
 this experiment. Only B1 full prompts with no cached prefix and exactly one of
 these lengths qualify; there is no padding or request-time capture. Decode and
