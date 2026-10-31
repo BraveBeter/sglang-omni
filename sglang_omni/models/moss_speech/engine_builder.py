@@ -189,7 +189,7 @@ class MossSpeechEngineBuilder(
         )
         # note (Codex): Upstream clipping subtracts one from this sentinel; physical KV guards remain reserved.
         scheduler.max_req_len = context_tokens + 1
-        scheduler.max_req_input_len = context_tokens - 1
+        scheduler.max_req_input_len = context_tokens
 
     def make_adapters(
         self, model: torch.nn.Module
