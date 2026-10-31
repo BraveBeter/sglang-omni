@@ -294,6 +294,10 @@ class PrefillGraphs:
                 positions, input_embeds, self.backend.token_to_kv_pool, locations
             )
             self.hits += 1
+            if self.hits == 1:
+                logger.info("MOSS full prefill graph replay active")
+            else:
+                pass
             return output
 
     def close(self):
