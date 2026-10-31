@@ -127,9 +127,18 @@ The smoke covers both languages, all four input/output modes, streaming and non-
 
 The central Omni workflow selects this dedicated smoke with the run-omni-ci and run-moss-speech labels. It does not add MOSS-Speech to the random model selection. Local checks and workflow wiring do not establish a successful remote CI run.
 
-
 ### Optional native norm pointwise arithmetic
 
-Set ar_engine.factory.native_norm_library to an explicitly built shared library to enable the SM80 BF16 pointwise experiment. The default is None. Attention, KV, projection and the mean reduction remain eager Torch. The finite single-token geometries are (1,4096), (1,32,128) and (1,8,128); other shapes, dtype, device or gradient-enabled modes use the original norm. Both no_grad (the default scheduler mode) and inference_mode are qualified. Residual addition and BF16 rounding before multiplication by the weight are preserved. Each output owns its storage. No complete-decode graph or old binary is required.
+Set `ar_engine.factory.native_norm_library` to an explicitly built shared library. The default is `None`. This SM80 experiment supports BF16 tensors of shapes `(1, 4096)`, `(1, 32, 128)` and `(1, 8, 128)`. It retains the original Torch mean reduction, residual addition and BF16 rounding before multiplication by the weight. Both `no_grad` (the default scheduler mode) and `inference_mode` are supported. Training, gradients and unsupported shapes, types, devices or layouts use the original Torch norm. Every output owns its storage.
 
-Build kernels/decode_norm_native.cu with the matching CUDA toolkit: nvcc -shared -Xcompiler=-fPIC -O3 -std=c++17 -arch=sm_80 --fmad=false -o /your/output/native_norm.so kernels/decode_norm_native.cu. Record the compiler, source and library hashes in the deployment manifest. No compilation occurs during module import or request processing. This optional library must be rebuilt for the runtime CUDA major/minor; qualification and service results are recorded separately before recommending the experiment.
+From this model directory, build the CUDA source and record its hashes:
+
+```bash
+nvcc -shared -Xcompiler=-fPIC -O3 -std=c++17 -arch=sm_80 --fmad=false \
+  -o /path/to/native_norm.so kernels/decode_norm_native.cu
+sha256sum kernels/decode_norm_native.cu /path/to/native_norm.so
+```
+
+The loader compares the library's compile-time `CUDART_VERSION` with `torch.version.cuda`; this checks the CUDA runtime headers, rather than the NVCC release string. The tested stack used Torch `2.14.1+cu130`, CUDA runtime/headers `13.0.96`, NVCC `13.4.92` and an A800 SM80. Other stacks require fresh qualification. No library compilation occurs during import or request processing. The wheel and sdist contain the CUDA source, and the operator builds the optional library separately.
+
+Use benchmark-client with an explicit candidate SHA and pinned library hash for correctness before comparing service performance. Attention, KV and projection remain eager Torch. Combining this option with another optimization requires its own validation.
