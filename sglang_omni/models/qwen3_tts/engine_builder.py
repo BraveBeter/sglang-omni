@@ -546,10 +546,12 @@ class Qwen3TtsEngineBuilder(TtsEngineBuilder[Qwen3TTSSGLangRequestData]):
     def extra_scheduler_kwargs(self) -> SchedulerExtras[Qwen3TTSSGLangRequestData]:
         # note (ratish): requests build on the scheduler thread: preprocessing already did the
         # model work, and a pooled build that misses the pass waits a whole engine step for admission.
+        # note (ratish): on the default stream the talker's steps run in order with the vocoder's whole-utterance decodes, so the talker takes a stream of its own, above the vocoder's.
         return {
             "stream_output_builder": self.stream_output_builder,
             "prefill_coalesce_requests": self.prefill_coalesce_requests,
             "prefill_coalesce_wait_ms": self.prefill_coalesce_wait_ms,
+            "should_run_top_priority_stream": current_platform.is_cuda(),
         }
 
     def make_abort_callback(self) -> Callable[[str], None]:

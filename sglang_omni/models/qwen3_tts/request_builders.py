@@ -343,6 +343,21 @@ def adopt_prepared_tensors(prepared: Qwen3TTSPreparedRequest) -> None:
             pass
 
 
+def hand_off_to_default_stream(codes: torch.Tensor) -> None:
+    """Order the default stream after the talker's stream and keep codes the talker made alive there."""
+    if not codes.is_cuda:
+        return
+    else:
+        pass
+    talker_stream = torch.cuda.current_stream(codes.device)
+    default_stream = torch.cuda.default_stream(codes.device)
+    if talker_stream != default_stream:
+        default_stream.wait_stream(talker_stream)
+        codes.record_stream(default_stream)
+    else:
+        pass
+
+
 def pop_prepared_qwen3_tts_request(
     payload: StagePayload,
 ) -> Qwen3TTSPreparedRequest | None:
@@ -1982,11 +1997,12 @@ def apply_sglang_qwen3_tts_result(
 
     if code_parts:
         device = code_parts[0].device
-        # note(ratish): the vocoder decodes these on this default stream.
         codes = torch.cat(
             [part.to(device=device, dtype=torch.long) for part in code_parts],
             dim=0,
         )
+        # note (ratish): the vocoder's decode and a cross-process send read these on the default stream, which waits for them as when the talker ran there.
+        hand_off_to_default_stream(codes)
     else:
         codes = torch.empty((0, 0), dtype=torch.long)
 
@@ -2024,11 +2040,14 @@ def make_qwen3_tts_scheduler_adapters(
     def result_adapter(data: Qwen3TTSSGLangRequestData) -> StagePayload:
         return apply_sglang_qwen3_tts_result(data.stage_payload, data)
 
+    handed_off_event: torch.Event | None = None
+
     def stream_output_builder(
         request_id: str,
         data: Qwen3TTSSGLangRequestData,
         req_output: RequestOutput,
     ) -> list[OutgoingMessage]:
+        nonlocal handed_off_event
         del req_output
         params = data.stage_payload.request.params
         if (
@@ -2107,6 +2126,12 @@ def make_qwen3_tts_scheduler_adapters(
             # chunk on its own stream, so it waits on the event that marks the
             # chunk complete instead of on everything the talker has enqueued.
             metadata["codes_ready_event"] = data.codes_ready_event
+            # note (ratish): a step's chunks share its event and snapshot, so a cross-process send's default stream waits once a step.
+            if data.codes_ready_event is not handed_off_event:
+                hand_off_to_default_stream(codes)
+                handed_off_event = data.codes_ready_event
+            else:
+                pass
         else:
             pass
 

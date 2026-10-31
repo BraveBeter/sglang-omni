@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import multiprocessing
 import os
 import sys
 import threading
@@ -14,6 +15,7 @@ import types
 from collections import deque
 from collections.abc import Iterable, Iterator
 from concurrent.futures import Future
+from multiprocessing.connection import Connection
 from pathlib import Path
 from queue import Empty, Queue
 from types import SimpleNamespace
@@ -42,6 +44,7 @@ from sglang.srt.model_executor.forward_context import ForwardContext, forward_co
 from sglang.srt.runtime_context import get_context, override_platform
 from sglang.srt.server_args import ServerArgs
 
+from sglang_omni.comm import stage_io
 from sglang_omni.config.manager import ConfigManager
 from sglang_omni.config.runtime import resolve_stage_factory_kwargs
 from sglang_omni.model_runner.prefill_inputs import get_omni_prefill_inputs
@@ -7699,6 +7702,149 @@ def test_qwen3_tts_result_adapter_leaves_device_codes_on_the_device() -> None:
 
     assert result.data["audio_codes"].device == device
     assert result.data["audio_codes"].tolist() == [[9, 9], [1, 2], [3, 4]]
+
+
+@pytest.mark.accelerator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_qwen3_tts_vocoder_reads_final_codes_finished_on_the_talker_stream() -> None:
+    device = torch.device("cuda", torch.cuda.current_device())
+
+    class Tokenizer(FakeQwen3TTSSpeechTokenizer):
+        def decode(self, encoded):
+            return super().decode(
+                [{"audio_codes": item["audio_codes"].cpu()} for item in encoded]
+            )
+
+    scheduler = Qwen3TTSStreamingVocoderScheduler(Tokenizer(), device=device)
+    talker_stream = torch.cuda.Stream(device)
+    payload = make_payload(inputs="target")
+    talker_stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(talker_stream):
+        warm_codes = [torch.ones(2, dtype=torch.long, device=device) for _ in range(3)]
+        torch.cat([torch.stack(warm_codes, dim=0)], dim=0)
+        torch.cuda.synchronize(device)
+        torch.cuda._sleep(1_000_000_000)  # noqa: leading-underscore  # upstream name
+        talker_result = apply_sglang_qwen3_tts_result(
+            payload,
+            Qwen3TTSSGLangRequestData(
+                req=SimpleNamespace(output_ids=[]),
+                output_codes=[
+                    torch.full((2,), 7, dtype=torch.long, device=device)
+                    for _ in range(3)
+                ],
+                stage_payload=payload,
+            ),
+        )
+
+    (vocoder_result,) = asyncio.run(scheduler.vocode_payloads([talker_result]))
+
+    waveform = np.frombuffer(vocoder_result.data["audio_waveform"], dtype=np.float32)
+    assert waveform.size > 0
+    assert set(waveform.tolist()) == {7.0}
+
+
+@pytest.mark.accelerator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_qwen3_tts_default_stream_reads_complete_stream_codes() -> None:
+    device = torch.device("cuda", torch.cuda.current_device())
+    payload = make_payload(inputs="target", params={"stream": True})
+    _, _, stream_output_builder = (
+        qwen3_request_builders.make_qwen3_tts_scheduler_adapters(
+            model=None,
+            wrapper=None,
+        )
+    )
+    talker_stream = torch.cuda.Stream(device)
+    talker_stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(talker_stream):
+        torch.ones((2, 2), dtype=torch.long, device=device)
+        torch.cuda.synchronize(device)
+        torch.cuda._sleep(1_000_000_000)  # noqa: leading-underscore  # upstream name
+        step_codes = torch.full((2, 2), 7, dtype=torch.long, device=device)
+        codes_ready = torch.cuda.Event()
+        codes_ready.record()
+        messages = [
+            stream_output_builder(
+                payload.request_id,
+                Qwen3TTSSGLangRequestData(
+                    latest_stream_code_chunk=step_codes[row],
+                    codes_ready_event=codes_ready,
+                    stream_codec_output=True,
+                    stream_ref_sent=True,
+                    stage_payload=payload,
+                ),
+                None,
+            )[0]
+            for row in range(2)
+        ]
+
+    assert [message.data.cpu().tolist() for message in messages] == [
+        [[7, 7]],
+        [[7, 7]],
+    ]
+
+
+def read_final_codes_in_another_process(
+    connection: Connection, device_index: int
+) -> None:
+    torch.cuda.set_device(device_index)
+    torch.ones(1, device="cuda").cpu()
+    connection.send(None)
+    payload = stage_io.deserialize_direct_cuda_ipc_payload(connection.recv())
+    connection.send(payload.data["audio_codes"].cpu().tolist())
+    connection.close()
+
+
+@pytest.mark.accelerator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_qwen3_tts_another_process_reads_complete_final_codes() -> None:
+    device = torch.device("cuda", torch.cuda.current_device())
+    context = multiprocessing.get_context("spawn")
+    connection, reader_connection = context.Pipe()
+    reader = context.Process(
+        target=read_final_codes_in_another_process,
+        args=(reader_connection, device.index),
+    )
+    reader.start()
+    reader_connection.close()
+    payload = make_payload(inputs="target")
+    talker_stream = torch.cuda.Stream(device)
+    talker_stream.wait_stream(torch.cuda.current_stream(device))
+    try:
+        assert connection.poll(120)
+        connection.recv()
+        with torch.cuda.stream(talker_stream):
+            warm_codes = [
+                torch.ones(2, dtype=torch.long, device=device) for _ in range(3)
+            ]
+            torch.cat([torch.stack(warm_codes, dim=0)], dim=0)
+            torch.cuda.synchronize(device)
+            torch.cuda._sleep(10**9)  # noqa: leading-underscore  # upstream name
+            result = apply_sglang_qwen3_tts_result(
+                payload,
+                Qwen3TTSSGLangRequestData(
+                    req=SimpleNamespace(output_ids=[]),
+                    output_codes=[
+                        torch.full((2,), 7, dtype=torch.long, device=device)
+                        for _ in range(3)
+                    ],
+                    stage_payload=payload,
+                ),
+            )
+        connection.send(stage_io.serialize_direct_cuda_ipc_payload(result))
+        assert connection.poll(120)
+        codes = connection.recv()
+        reader.join(120)
+    finally:
+        if reader.is_alive():
+            reader.kill()
+            reader.join()
+        else:
+            pass
+        connection.close()
+
+    assert codes == [[7, 7]] * 3
+    assert reader.exitcode == 0
 
 
 def test_qwen3_tts_result_adapter_preserves_length_finish_reason() -> None:
