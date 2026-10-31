@@ -17,6 +17,7 @@ from sglang_omni.models.moss_speech.components.streaming_codec import (
     MossSpeechStreamingCodec,
 )
 from sglang_omni.models.moss_speech.components.voice import VoiceConditioning
+from sglang_omni.models.moss_speech.hf_config import MAX_CONTEXT_TOKENS
 from sglang_omni.models.moss_speech.payload_types import (
     EOSP_TOKEN_ID,
     MODALITY_PAD_TOKEN_ID,
@@ -27,10 +28,7 @@ from sglang_omni.models.moss_speech.request_builders import (
     state_from_payload,
     terminal_result,
 )
-from sglang_omni.models.moss_speech.request_data import (
-    MAX_GENERATION_TOKENS,
-    MossSpeechSGLangRequestData,
-)
+from sglang_omni.models.moss_speech.request_data import MossSpeechSGLangRequestData
 from sglang_omni.models.moss_speech.voice_transport import (
     state_voice_payload,
     unpack_voice_payload,
@@ -234,7 +232,7 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[AudioStreamState, None]):
             or codes.dtype not in (torch.int32, torch.int64)
             or not codes.numel()
             or ((codes < 0) | (codes >= EOSP_TOKEN_ID)).any()
-            or len(state.codes) + codes.numel() > MAX_GENERATION_TOKENS
+            or len(state.codes) + codes.numel() > MAX_CONTEXT_TOKENS
         ):
             raise ValueError(
                 "Audio chunk must contain valid codes within the generation budget"
@@ -369,7 +367,7 @@ class MossSpeechStreamingText(StreamingSimpleScheduler):
             or tokens.ndim != 1
             or tokens.dtype not in (torch.int32, torch.int64)
             or ((tokens < 0) | (tokens >= 151680)).any()
-            or len(state.tokens) + tokens.numel() > MAX_GENERATION_TOKENS
+            or len(state.tokens) + tokens.numel() > MAX_CONTEXT_TOKENS
         ):
             raise ValueError("Text chunk contains invalid tokens or exceeds the budget")
         else:

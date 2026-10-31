@@ -20,10 +20,7 @@ from sglang_omni.models.moss_speech.fsm import (
     MossSamplingParams,
     initial_mode,
 )
-from sglang_omni.models.moss_speech.hf_config import (
-    MAX_CONTEXT_TOKENS,
-    MAX_GENERATION_TOKENS,
-)
+from sglang_omni.models.moss_speech.hf_config import MAX_CONTEXT_TOKENS
 from sglang_omni.models.moss_speech.payload_types import (
     AUDIO_VOCAB,
     MODALITY_PAD_TOKEN_ID,
@@ -33,7 +30,6 @@ from sglang_omni.models.moss_speech.payload_types import (
 from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.sglang_backend.request_data import SGLangARRequestData
 
-DEFAULT_MAX_NEW_TOKENS = 200
 DEFAULT_TEMPERATURE = 0.6
 DEFAULT_TOP_P = 0.95
 DEFAULT_TOP_K = 20
@@ -84,29 +80,17 @@ def build_sglang_moss_request(
         if state.repetition_penalty is None
         else state.repetition_penalty
     )
-    max_new_tokens = (
-        DEFAULT_MAX_NEW_TOKENS if state.max_new_tokens is None else state.max_new_tokens
-    )
     if (
         not all(math.isfinite(value) for value in (temperature, top_p, penalty))
         or temperature < 0
         or not 0 < top_p <= 1
         or top_k < -1
         or penalty <= 0
-        or not 1 <= max_new_tokens <= MAX_GENERATION_TOKENS
         or state.stop
     ):
         raise RequestValidationError("invalid native sampling parameters")
     else:
         pass
-    parameters = MossSamplingParams(
-        do_sample=temperature > 0 and top_k != 1,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-        repetition_penalty=penalty,
-        max_new_tokens=max_new_tokens,
-    )
     prompt_rows = torch.as_tensor(state.input_grid, dtype=torch.long)
     if prompt_rows.ndim != 2 or prompt_rows.shape[1] != 2 or not len(prompt_rows):
         raise RequestValidationError("native input_grid must have shape (L, 2)")
@@ -138,13 +122,25 @@ def build_sglang_moss_request(
         )
     else:
         pass
-    if len(prompt_rows) + max_new_tokens > MAX_CONTEXT_TOKENS:
+    remaining_tokens = MAX_CONTEXT_TOKENS - len(prompt_rows)
+    max_new_tokens = (
+        remaining_tokens if state.max_new_tokens is None else state.max_new_tokens
+    )
+    if not 1 <= max_new_tokens <= remaining_tokens:
         raise RequestValidationError(
             f"Prompt plus generation budget exceeds {MAX_CONTEXT_TOKENS} tokens",
             reason="context_too_long",
         )
     else:
         pass
+    parameters = MossSamplingParams(
+        do_sample=temperature > 0 and top_k != 1,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        repetition_penalty=penalty,
+        max_new_tokens=max_new_tokens,
+    )
     selected_tokens = [
         audio_token if text_token == MODALITY_PAD_TOKEN_ID else text_token
         for text_token, audio_token in prompt_rows.tolist()
