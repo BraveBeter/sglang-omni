@@ -3,7 +3,7 @@
 
 from typing import ClassVar, Literal
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, StrictBool
 
 from sglang_omni.config import (
     EngineArgs,
@@ -36,6 +36,7 @@ class MossSpeechEngineArgs(FactoryArgs):
 
     dtype: str = "bfloat16"
     context_length: int = Field(default=1024, ge=1, le=1024)
+    decode_graph: StrictBool = False
 
 
 class MossSpeechEngineStage(EngineStageConfig):

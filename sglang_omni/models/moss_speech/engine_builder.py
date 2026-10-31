@@ -13,6 +13,7 @@ from sglang.srt.arg_groups.model_override_base import (
 from sglang.srt.server_args import ServerArgs
 
 from sglang_omni.model_runner.model_worker import ModelWorker
+from sglang_omni.models.moss_speech.decode_graphs import DecodeGraph
 from sglang_omni.models.moss_speech.hf_config import (
     ensure_moss_speech_config_registered,
 )
@@ -46,8 +47,20 @@ class MossSpeechEngineBuilder(
     model_arch_override = "MossSpeechForCausalLM"
     supports_context_length_override = True
 
-    def __init__(self, context_length: int | None = None, *, streaming: bool) -> None:
+    def __init__(
+        self,
+        context_length: int | None = None,
+        *,
+        streaming: bool,
+        decode_graph: bool = False,
+    ) -> None:
         super().__init__()
+        if type(decode_graph) is not bool:
+            raise ValueError("decode_graph must be a boolean")
+        else:
+            pass
+        self.decode_graph_enabled = decode_graph
+        self.decode_graph = None
         self.streaming = streaming
         self.request_lifecycle: MossSpeechRequestLifecycle | None = None
         if context_length is None:
@@ -169,6 +182,27 @@ class MossSpeechEngineBuilder(
         model.decode_input_embedding = model.decode_input_embedding.to(
             torch.device(device)
         )
+        if self.decode_graph_enabled:
+            self.decode_graph = DecodeGraph(
+                model, model_worker.model_runner.attn_backend
+            )
+            self.decode_graph.initialize()
+            model.decode_graph = self.decode_graph
+        else:
+            pass
+
+    def extra_scheduler_callbacks(self) -> dict[str, object]:
+        return (
+            {"shutdown_callback": self.decode_graph.close}
+            if self.decode_graph is not None
+            else {}
+        )
+
+    def cleanup_build_failure(self) -> None:
+        if self.decode_graph is not None:
+            self.decode_graph.close()
+        else:
+            pass
 
     def make_model_runner(
         self, model_worker: ModelWorker, output_proc: SGLangOutputProcessor

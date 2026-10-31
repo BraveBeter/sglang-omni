@@ -126,3 +126,18 @@ The prepared speech inputs retain the first 20 seconds of each pinned reference 
 The smoke covers both languages, all four input/output modes, streaming and non-streaming, natural text EOS, audio length truncation, disconnect recovery, and invalid-request recovery. It retains HTTP responses, generated WAVs, usage, timing observations, asset hashes, and server logs. A first PCM event can contain silence; non-streaming TTFA and TTFT are unobserved. These observations have no calibrated performance or quality thresholds, and the chat API does not expose the native token grid for exact retained-code comparison.
 
 The central Omni workflow selects this dedicated smoke with the run-omni-ci and run-moss-speech labels. It does not add MOSS-Speech to the random model selection. Local checks and workflow wiring do not establish a successful remote CI run.
+
+
+## Full decode graph experiment
+
+Set `ar_engine.factory.decode_graph: true` to prepare an exact-length B1 decode bank for
+sequence lengths 1 through 512 on the qualified Torch 2.14.1+cu130 / CUDA 13.0 / SM80 BF16 runtime.
+The default is false. SGLang's generic graph switch remains disabled. Prefill,
+sampling and request cleanup retain their eager paths; other batch sizes, changed
+weights, hooks, attention policy, pools or CUDA stream use eager execution.
+Each graph owns staging and cloned outputs and retains native SDPA shapes. Longer
+sequences use eager execution. Startup and resident graph memory must be measured. It
+writes every shared/text/audio KV layer at the scheduler's allocated locations.
+Startup restores reserved slot zero. Shutdown synchronizes and releases capture
+resources. This candidate requires correctness and service measurement before use;
+local graph speed does not establish an HTTP latency or quality improvement.

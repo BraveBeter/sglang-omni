@@ -123,6 +123,41 @@ class MossSpeechSGLangModel(torch.nn.Module):
         input_embeds: torch.Tensor | None = None,
         omni_prefill_rids: list[str] | None = None,
     ) -> MossSpeechModelOutput:
+        manager = getattr(self, "decode_graph", None)
+        output = (
+            manager.try_replay(input_ids, positions, forward_batch, input_embeds)
+            if manager is not None
+            else None
+        )
+        if output is None:
+            output = self.forward_eager(
+                input_ids, positions, forward_batch, input_embeds, omni_prefill_rids
+            )
+        else:
+            pass
+        request_ids = (
+            forward_batch.rids if omni_prefill_rids is None else omni_prefill_rids
+        )
+        assert len(request_ids) == output.text_logits.shape[0]
+        phase = "decode" if forward_batch.forward_mode.is_decode() else "prefill"
+        for i, request_id in enumerate(request_ids):
+            self.dual_logits_by_request_id[(request_id, phase)] = (
+                output.text_logits[i].clone(),
+                output.audio_logits[i].clone(),
+            )
+        return output
+
+    def forward_eager(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        input_embeds: torch.Tensor | None = None,
+        omni_prefill_rids: list[str] | None = None,
+        *,
+        rope_frequencies: torch.Tensor | None = None,
+        last_token_indices: torch.Tensor | None = None,
+    ) -> MossSpeechModelOutput:
         is_decode = forward_batch.forward_mode.is_decode()
         if input_embeds is not None:
             hidden_states = input_embeds
@@ -136,21 +171,39 @@ class MossSpeechSGLangModel(torch.nn.Module):
             assert forward_batch.extend_seq_lens_cpu is not None
             token_lengths = list(forward_batch.extend_seq_lens_cpu)
         assert sum(token_lengths) == hidden_states.shape[0]
+        layer_kwargs = (
+            {} if rope_frequencies is None else {"rope_frequencies": rope_frequencies}
+        )
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(
-                positions, hidden_states, forward_batch, token_lengths, residual
+                positions,
+                hidden_states,
+                forward_batch,
+                token_lengths,
+                residual,
+                **layer_kwargs,
             )
         text_hidden, text_residual = hidden_states, residual
         audio_hidden = hidden_states.clone()
         audio_residual = residual.clone() if residual is not None else None
         for layer in self.text_block:
             text_hidden, text_residual = layer(
-                positions, text_hidden, forward_batch, token_lengths, text_residual
+                positions,
+                text_hidden,
+                forward_batch,
+                token_lengths,
+                text_residual,
+                **layer_kwargs,
             )
         for layer in self.audio_block:
             audio_hidden, audio_residual = layer(
-                positions, audio_hidden, forward_batch, token_lengths, audio_residual
+                positions,
+                audio_hidden,
+                forward_batch,
+                token_lengths,
+                audio_residual,
+                **layer_kwargs,
             )
         if text_residual is None or audio_residual is None:
             raise RuntimeError("MOSS-Speech requires nonempty modality tails")
@@ -162,25 +215,18 @@ class MossSpeechSGLangModel(torch.nn.Module):
         audio_final, _ = request_norm(
             self.audio_norm, audio_hidden, token_lengths, audio_residual
         )
-        last_token_indices = (
-            torch.tensor(token_lengths, device=text_final.device).cumsum(0) - 1
-        )
+        if last_token_indices is None:
+            last_token_indices = (
+                torch.tensor(token_lengths, device=text_final.device).cumsum(0) - 1
+            )
+        else:
+            pass
         text_logits = request_linear(
             text_final, self.text_lm_head.weight, token_lengths
         )[last_token_indices, : self.text_vocab_size]
         audio_logits = request_linear(
             audio_final, self.audio_lm_head.weight, token_lengths
         )[last_token_indices, : self.audio_vocab_size]
-        request_ids = (
-            forward_batch.rids if omni_prefill_rids is None else omni_prefill_rids
-        )
-        assert len(request_ids) == len(token_lengths)
-        phase = "decode" if is_decode else "prefill"
-        for i, request_id in enumerate(request_ids):
-            self.dual_logits_by_request_id[(request_id, phase)] = (
-                text_logits[i].clone(),
-                audio_logits[i].clone(),
-            )
         return MossSpeechModelOutput(
             next_token_logits=text_logits,
             text_logits=text_logits,
@@ -244,6 +290,11 @@ class MossSpeechSGLangModel(torch.nn.Module):
         }[shard]
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
+        manager = getattr(self, "decode_graph", None)
+        if manager is not None:
+            manager.close()
+        else:
+            pass
         parameters = dict(self.named_parameters())
         shards_seen: dict[str, set[str]] = {}
         direct_seen: set[str] = set()
