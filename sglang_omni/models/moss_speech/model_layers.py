@@ -145,6 +145,7 @@ class MossSpeechDecoderLayer(torch.nn.Module):
         forward_batch: ForwardBatch,
         token_lengths: list[int],
         residual: torch.Tensor | None = None,
+        rope_frequencies: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             residual = hidden_states
@@ -172,9 +173,13 @@ class MossSpeechDecoderLayer(torch.nn.Module):
             k.reshape(-1, attention.num_kv_heads, attention.head_dim),
             token_lengths,
         )
-        inverse_frequencies = reference_rope_frequencies(
-            attention.head_dim, attention.rope_theta
-        ).to(positions.device)
+        inverse_frequencies = (
+            reference_rope_frequencies(attention.head_dim, attention.rope_theta).to(
+                positions.device
+            )
+            if rope_frequencies is None
+            else rope_frequencies
+        )
         with torch.autocast(device_type=positions.device.type, enabled=False):
             frequencies = (
                 inverse_frequencies[None, :, None] @ positions[None, None, :].float()

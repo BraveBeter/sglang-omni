@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Eager MOSS-Speech pipeline configuration."""
 
-from typing import ClassVar, Literal
+from typing import Annotated, ClassVar, Literal
 
 from pydantic import ConfigDict, Field
 
@@ -36,6 +36,9 @@ class MossSpeechEngineArgs(FactoryArgs):
 
     dtype: str = "bfloat16"
     context_length: int = Field(default=1024, ge=1, le=1024)
+    prefill_graph_lengths: (
+        list[Annotated[int, Field(strict=True, ge=1, le=512)]] | None
+    ) = Field(default=None, min_length=1, max_length=8)
 
 
 class MossSpeechEngineStage(EngineStageConfig):

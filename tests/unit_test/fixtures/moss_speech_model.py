@@ -14,6 +14,7 @@ from sglang.srt.runtime_context import get_context, get_parallel
 
 from sglang_omni.models.moss_speech.hf_config import MossSpeechConfig
 from sglang_omni.models.moss_speech.model_runner import MossSpeechModelRunner
+from sglang_omni.models.moss_speech.prefill_graphs import PrefillGraphs
 from sglang_omni.models.moss_speech.sglang_model import (
     MossSpeechModelOutput,
     MossSpeechSGLangModel,
@@ -145,18 +146,20 @@ def prefill(
     model: MossSpeechSGLangModel,
     prompt_embeddings: list[torch.Tensor],
     request_ids: list[str],
+    *,
+    max_context_len: int = 16,
 ) -> tuple[MossSpeechModelOutput, TorchNativeAttnBackend]:
     device = model.embed_tokens.weight.device
     token_lengths = [embeddings.shape[0] for embeddings in prompt_embeddings]
     token_count = sum(token_lengths)
     request_pool = ReqToTokenPool(
         size=len(token_lengths),
-        max_context_len=16,
+        max_context_len=max_context_len,
         device=str(device),
         enable_memory_saver=False,
     )
     kv_pool = MHATokenToKVPool(
-        size=32,
+        size=max(32, 2 * max_context_len),
         page_size=1,
         dtype=torch.bfloat16,
         head_num=model.config.num_key_value_heads,
@@ -245,3 +248,97 @@ def decode(
     backend.init_forward_metadata(batch)
     with forward_context(ForwardContext(attn_backend=backend)):
         return model(batch.input_ids, batch.positions, batch)
+
+
+def assert_full_prefill_graph(model: MossSpeechSGLangModel, lengths=(3, 7)) -> dict:
+    """Full heads/KV exact under graph reuse and noncontiguous allocated slots."""
+    device = model.embed_tokens.weight.device
+    max_length = max(lengths)
+    prompt = model.embed_tokens(torch.arange(1, max_length + 1, device=device))
+    _, backend = prefill(model, [prompt], ["initial"], max_context_len=max_length)
+    manager = PrefillGraphs(model, backend, lengths)
+    model.prefill_graph = manager
+    try:
+        manager.initialize()
+        assert len(manager.entries) == len(lengths), manager.reason
+        snapshots = []
+        for length in (*lengths, lengths[0]):
+            model.prefill_graph = None
+            expected, reference_backend = prefill(
+                model, [prompt[:length]], ["reference"], max_context_len=max_length
+            )
+            locations = torch.arange(2, 2 * length + 1, 2, device=device)
+            backend.req_to_token_pool.req_to_token[1, :length] = locations
+            batch = ForwardBatch(
+                forward_mode=ForwardMode.EXTEND,
+                batch_size=1,
+                input_ids=torch.zeros(length, dtype=torch.long, device=device),
+                positions=torch.arange(length, device=device),
+                req_pool_indices=torch.tensor([1], device=device),
+                seq_lens=torch.tensor([length], dtype=torch.int32, device=device),
+                out_cache_loc=locations,
+                seq_lens_sum=length,
+                extend_seq_lens=torch.tensor(
+                    [length], dtype=torch.int32, device=device
+                ),
+                extend_prefix_lens=torch.zeros(1, dtype=torch.int32, device=device),
+                extend_seq_lens_cpu=[length],
+                extend_prefix_lens_cpu=[0],
+                extend_num_tokens=length,
+                rids=["graph"],
+            )
+            model.prefill_graph = manager
+            with forward_context(ForwardContext(attn_backend=backend)):
+                actual = model(
+                    batch.input_ids,
+                    batch.positions,
+                    batch,
+                    input_embeds=prompt[:length],
+                )
+            for name in ("text_logits", "audio_logits", "hidden_states"):
+                torch.testing.assert_close(
+                    getattr(actual, name), getattr(expected, name), atol=0, rtol=0
+                )
+            for cache, oracle in zip(
+                (
+                    *backend.token_to_kv_pool.k_buffer,
+                    *backend.token_to_kv_pool.v_buffer,
+                ),
+                (
+                    *reference_backend.token_to_kv_pool.k_buffer,
+                    *reference_backend.token_to_kv_pool.v_buffer,
+                ),
+            ):
+                torch.testing.assert_close(
+                    cache[locations], oracle[1 : length + 1], atol=0, rtol=0
+                )
+            snapshots.append((actual, actual.text_logits.clone()))
+        assert manager.hits == len(lengths) + 1
+        for output, saved in snapshots:
+            torch.testing.assert_close(output.text_logits, saved, atol=0, rtol=0)
+        output.text_logits.fill_(float("-inf"))
+        with forward_context(ForwardContext(attn_backend=backend)):
+            again = model(
+                batch.input_ids, batch.positions, batch, input_embeds=prompt[:length]
+            )
+        torch.testing.assert_close(
+            again.text_logits, expected.text_logits, atol=0, rtol=0
+        )
+        manager.close()
+        manager.close()
+        assert (
+            manager.try_replay(batch.input_ids, batch.positions, batch, prompt[:length])
+            is None
+        )
+        return {
+            "captures": len(lengths),
+            "replays": manager.hits,
+            "lengths": list(lengths),
+            "kv_layers": model.total_attention_layers,
+            "complete_heads_and_scattered_kv_exact": True,
+            "owned_outputs_and_close": True,
+        }
+    finally:
+        manager.close()
+        model.prefill_graph = None
+        model.dual_logits_by_request_id.clear()

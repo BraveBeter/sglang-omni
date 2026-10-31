@@ -17,6 +17,10 @@ from sglang_omni.models.moss_speech.hf_config import (
     ensure_moss_speech_config_registered,
 )
 from sglang_omni.models.moss_speech.model_runner import MossSpeechModelRunner
+from sglang_omni.models.moss_speech.prefill_graphs import (
+    PrefillGraphs,
+    validate_lengths,
+)
 from sglang_omni.models.moss_speech.request_builders import (
     RequestBuilder,
     ResultAdapter,
@@ -46,8 +50,16 @@ class MossSpeechEngineBuilder(
     model_arch_override = "MossSpeechForCausalLM"
     supports_context_length_override = True
 
-    def __init__(self, context_length: int | None = None, *, streaming: bool) -> None:
+    def __init__(
+        self,
+        context_length: int | None = None,
+        *,
+        streaming: bool,
+        prefill_graph_lengths: list[int] | None = None,
+    ) -> None:
         super().__init__()
+        self.prefill_graph_lengths = validate_lengths(prefill_graph_lengths)
+        self.prefill_graph = None
         self.streaming = streaming
         self.request_lifecycle: MossSpeechRequestLifecycle | None = None
         if context_length is None:
@@ -169,6 +181,29 @@ class MossSpeechEngineBuilder(
         model.decode_input_embedding = model.decode_input_embedding.to(
             torch.device(device)
         )
+        if self.prefill_graph_lengths:
+            self.prefill_graph = PrefillGraphs(
+                model,
+                model_worker.model_runner.attn_backend,
+                self.prefill_graph_lengths,
+            )
+            self.prefill_graph.initialize()
+            model.prefill_graph = self.prefill_graph
+        else:
+            pass
+
+    def extra_scheduler_callbacks(self) -> dict[str, object]:
+        return (
+            {"shutdown_callback": self.prefill_graph.close}
+            if self.prefill_graph is not None
+            else {}
+        )
+
+    def cleanup_build_failure(self) -> None:
+        if self.prefill_graph is not None:
+            self.prefill_graph.close()
+        else:
+            pass
 
     def make_model_runner(
         self, model_worker: ModelWorker, output_proc: SGLangOutputProcessor

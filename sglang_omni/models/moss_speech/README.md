@@ -126,3 +126,19 @@ The prepared speech inputs retain the first 20 seconds of each pinned reference 
 The smoke covers both languages, all four input/output modes, streaming and non-streaming, natural text EOS, audio length truncation, disconnect recovery, and invalid-request recovery. It retains HTTP responses, generated WAVs, usage, timing observations, asset hashes, and server logs. A first PCM event can contain silence; non-streaming TTFA and TTFT are unobserved. These observations have no calibrated performance or quality thresholds, and the chat API does not expose the native token grid for exact retained-code comparison.
 
 The central Omni workflow selects this dedicated smoke with the run-omni-ci and run-moss-speech labels. It does not add MOSS-Speech to the random model selection. Local checks and workflow wiring do not establish a successful remote CI run.
+
+
+## Exact-length prefill graph experiment
+
+Set `ar_engine.factory.prefill_graph_lengths: [34, 41, 372]` to prepare up to
+eight explicit, unique prompt lengths from 1 to 512. The default `null` disables
+this experiment. Only B1 full prompts with no cached prefix and exactly one of
+these lengths qualify; there is no padding or request-time capture. Decode and
+sampling retain their eager paths. R13, projection graphs and prefix caching are
+independent experiments and are not dependencies.
+
+Each graph owns its KV storage and staging tensors; replay scatters every model
+layer to the scheduler's actual allocated slots and clones published outputs.
+Changed weights, backend, numerical policy, hooks or CUDA stream use eager.
+Capture startup and resident memory are part of the deployment cost. This
+experimental candidate requires correctness and service measurement before use.
