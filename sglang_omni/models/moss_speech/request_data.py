@@ -20,6 +20,10 @@ from sglang_omni.models.moss_speech.fsm import (
     MossSamplingParams,
     initial_mode,
 )
+from sglang_omni.models.moss_speech.hf_config import (
+    MAX_CONTEXT_TOKENS,
+    MAX_GENERATION_TOKENS,
+)
 from sglang_omni.models.moss_speech.payload_types import (
     AUDIO_VOCAB,
     MODALITY_PAD_TOKEN_ID,
@@ -29,7 +33,6 @@ from sglang_omni.models.moss_speech.payload_types import (
 from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.sglang_backend.request_data import SGLangARRequestData
 
-MAX_GENERATION_TOKENS = 512
 DEFAULT_MAX_NEW_TOKENS = 200
 DEFAULT_TEMPERATURE = 0.6
 DEFAULT_TOP_P = 0.95
@@ -132,6 +135,13 @@ def build_sglang_moss_request(
     ).any():
         raise RequestValidationError(
             "native input_grid contains out-of-vocabulary token ids"
+        )
+    else:
+        pass
+    if len(prompt_rows) + max_new_tokens > MAX_CONTEXT_TOKENS:
+        raise RequestValidationError(
+            f"Prompt plus generation budget exceeds {MAX_CONTEXT_TOKENS} tokens",
+            reason="context_too_long",
         )
     else:
         pass

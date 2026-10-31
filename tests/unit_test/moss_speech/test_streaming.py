@@ -181,7 +181,10 @@ def test_duplicate_eos_does_not_restore_completed_pending_state(
         scheduler.stop()
 
 
-@pytest.mark.parametrize("finish_reason,code_count", [("stop", 511), ("length", 512)])
+@pytest.mark.parametrize(
+    "finish_reason,code_count",
+    [("stop", 511), ("length", 512), ("stop", 999), ("length", 1000)],
+)
 def test_terminal_audio_preserves_natural_eos_and_length_code_counts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finish_reason: str, code_count: int
 ) -> None:
@@ -198,7 +201,9 @@ def test_terminal_audio_preserves_natural_eos_and_length_code_counts(
         assert messages[-1].type == "result"
         assert terminal["finish_reason"] == finish_reason
         assert terminal["stream_samples"] == code_count * 1920
-        assert terminal["usage"]["completion_tokens"] == 512
+        assert terminal["usage"]["completion_tokens"] == code_count + (
+            finish_reason == "stop"
+        )
         assert terminal["stream_codec_ledger"][-1]["final"] is True
         assert not scheduler.codec.sessions and not scheduler.stream_states
     finally:
@@ -307,7 +312,7 @@ def test_stream_rejects_malformed_chunks_before_consuming_codes(
         elif invalid_kind == "dtype":
             chunk.data = torch.tensor([3.0])
         else:
-            chunk.data = torch.zeros(513, dtype=torch.long)
+            chunk.data = torch.zeros(1001, dtype=torch.long)
         with pytest.raises(ValueError):
             scheduler.handle_stream_chunk("bad", chunk)
         scheduler.abort("bad")

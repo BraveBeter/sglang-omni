@@ -90,7 +90,7 @@ def test_chat_metadata_does_not_select_a_speech_endpoint(task: str) -> None:
         ("tts", {"speed": 1.5}),
         ("tts", {"language": "English"}),
         ("tts", {"instructions": "whisper"}),
-        ("tts", {"max_new_tokens": 513}),
+        ("tts", {"max_new_tokens": 1001}),
         ("asr", {"language": "en"}),
         ("asr", {"prompt": "hint"}),
         ("asr", {"task": "translate"}),

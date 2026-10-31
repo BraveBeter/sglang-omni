@@ -82,7 +82,9 @@ Path("output.wav").write_bytes(base64.b64decode(audio["data"]))
 
 Set modalities to ["text"] in the speech-input example for speech-to-text, or use a text content string with ["audio"] for text-to-speech. Buffered audio is a base64-encoded mono 24 kHz WAV. For streaming audio, set stream=true and audio={"format":"pcm"}; each SSE choice.delta.audio.data contains base64-encoded little-endian signed 16-bit mono PCM at 24 kHz. Concatenate decoded chunks in arrival order and add a WAV header when saving as WAV.
 
-The output budget max_tokens accepts 1–512 and counts generated two-channel grid rows, including delimiters. Length-limited output is retained with finish_reason="length"; increasing the budget also consumes the finite 1,024-row context shared with the encoded prompt. A successful HTTP response does not establish task compliance or audio quality.
+The output budget max_tokens accepts 1–1000 and counts generated two-channel grid rows, including delimiters. Length-limited output is retained with finish_reason="length"; increasing the budget also consumes the 40,960-row total context shared with the encoded prompt. The 1000-row output ceiling follows the checkpoint README generation example; generation_config.json does not declare it as an architectural maximum. A successful HTTP response does not establish task compliance or audio quality.
+
+The checkpoint supports a total context of 40,960 two-channel rows. Preprocessing uses exact canonical token counts rather than character estimates; the default engine context and shared KV token pool are both 40,960. Prompt plus requested generation budget must fit that window. The independent output budget is 1–1000 rows (default 200); it is not the model context size. Raising the total context increases KV memory and does not guarantee four simultaneous full-window requests.
 
 ## Validation status
 
@@ -94,7 +96,7 @@ Third-party source revisions, retained notices and outstanding statement scope a
 
 Each generated row contains a text token and an audio token. A modality-pad text token selects the audio channel; text-channel end-of-text and message-end tokens terminate generation. EOSP closes the audio segment and returns the finite-state machine to text mode; EOSP in an inactive channel does not terminate the request.
 
-Audio decoding keeps every valid active-channel code before the first EOSP. A 512-row audio segment containing EOSP has 511 valid codes; a length-limited segment with 512 valid codes retains all 512. Completion usage counts generated grid rows, including delimiters. Compare both the raw grid and extracted codes, and keep the reported stop or length reason. Do not drop a final valid code to make another decoder agree.
+Audio decoding keeps every valid active-channel code before the first EOSP. A 1000-row audio segment containing EOSP has 999 valid codes; a length-limited segment with 1000 valid codes retains all 1000. Completion usage counts generated grid rows, including delimiters. Compare both the raw grid and extracted codes, and keep the reported stop or length reason. Do not drop a final valid code to make another decoder agree.
 
 The streaming codec emits 1,920 samples per retained code at 24 kHz. Its final hop flushes held overlap; the sum of emitted chunk samples must equal the final sample ledger. The native pipeline result carries usage and sample-ledger metadata and does not replay audio already sent in deltas. The chat SSE interface exposes audio deltas, finish reason, and final usage; it does not expose the internal sample ledger or raw token grid. The complete-utterance and chunk-trained flow checkpoints are different decoder profiles, so waveform equality between those profiles is not assumed.
 
