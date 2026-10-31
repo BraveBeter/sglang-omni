@@ -65,8 +65,7 @@ class NativeNorm:
         self, hidden_states: torch.Tensor, weight: torch.Tensor, epsilon: float
     ) -> torch.Tensor | None:
         if (
-            not torch.is_inference_mode_enabled()
-            or torch.is_grad_enabled()
+            torch.is_grad_enabled()
             or hidden_states.device.type != "cuda"
             or weight.device != hidden_states.device
             or hidden_states.device.index != torch.cuda.current_device()
