@@ -9,10 +9,13 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import patch, sentinel
+from types import SimpleNamespace
+from unittest.mock import Mock, patch, sentinel
 
 import pytest
+import torch
 from pydantic import ValidationError
+from sglang.srt.mem_cache.allocator.token import TokenToKVPoolAllocator
 from typer.testing import CliRunner
 
 from sglang_omni.cli import app
@@ -25,10 +28,14 @@ from sglang_omni.config.runtime import (
 from sglang_omni.models.moss_speech.config import MossSpeechPipelineConfig
 from sglang_omni.models.moss_speech.engine_builder import MossSpeechEngineBuilder
 from sglang_omni.models.moss_speech.hf_config import MossSpeechConfig
+from sglang_omni.models.moss_speech.payload_types import MossSpeechState
+from sglang_omni.models.moss_speech.request_data import build_sglang_moss_request
 from sglang_omni.models.moss_speech.stages import (
     create_ar_engine_executor,
     create_preprocessing_executor,
 )
+from sglang_omni.proto.request import OmniRequest, StagePayload
+from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DISCOVERY_PROGRAM = """
@@ -36,6 +43,7 @@ import builtins
 import importlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import pkgutil
 import sys
 
@@ -328,7 +336,7 @@ def test_context_window_defaults_and_explicit_overrides() -> None:
     config = MossSpeechPipelineConfig(model_path="unused")
     assert config.stage_named("preprocessing").factory.context_limit == 40960
     assert config.stage_named("ar_engine").factory.context_length == 40960
-    assert config.stage_named("ar_engine").engine.max_total_tokens == 40960
+    assert config.stage_named("ar_engine").engine.max_total_tokens == 40962
     assert MossSpeechConfig().max_position_embeddings == 40960
     document = config.model_dump()
     for stage in document["stages"]:
@@ -338,3 +346,33 @@ def test_context_window_defaults_and_explicit_overrides() -> None:
             pass
     with pytest.raises(ValidationError):
         MossSpeechPipelineConfig.model_validate(document)
+
+
+@pytest.mark.parametrize("prompt_tokens,budget", [(40959, 1), (39960, 1000)])
+def test_context_window_survives_upstream_generation_and_kv_guards(
+    prompt_tokens: int, budget: int
+) -> None:
+    scheduler = object.__new__(OmniScheduler)
+    scheduler.model_config = SimpleNamespace(context_len=40960)
+    scheduler.max_total_num_tokens = 40962
+    scheduler.model_runner = Mock()
+    scheduler.kv_shard_widening = scheduler.page_size = 1
+    scheduler.max_new_tokens_limit = scheduler.sliding_window_size = (
+        scheduler.draft_worker
+    ) = None
+    scheduler.chunked_prefill_size = -1
+    scheduler.token_to_kv_pool_allocator = TokenToKVPoolAllocator(
+        size=40962, dtype=torch.bfloat16, device="cpu", kvcache=None, need_sort=False
+    )
+    MossSpeechEngineBuilder().post_scheduler_setup(scheduler, scheduler.model_runner)
+    state = MossSpeechState(
+        input_grid=[[12, 512]] * prompt_tokens, max_new_tokens=budget
+    )
+    request = build_sglang_moss_request(
+        state, payload=StagePayload("full-window", OmniRequest(inputs=None), {})
+    )
+    assert scheduler.prepare_request_limits(request) is None
+    assert (
+        request.req.sampling_params.max_new_tokens == request.max_new_tokens == budget
+    )
+    assert scheduler.request_kv_capacity_error(request.req) is None

@@ -434,7 +434,7 @@ def test_hf_generation_budget_reaches_native_request(budget: int) -> None:
         sampling=SamplingParams(max_new_tokens=budget),
     )
     request = OmniRequest(inputs=generation)
-    state = normalize_and_validate(request, request_id="budget")
+    state = normalize_and_validate(request, request_id="budget", allow_streaming=True)
     state.input_grid = [[12, 512]]
     native = build_sglang_moss_request(
         state, payload=StagePayload("budget", request, {})

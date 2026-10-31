@@ -12,7 +12,10 @@ from sglang_omni.config import (
     PipelineConfig,
     StageConfig,
 )
-from sglang_omni.models.moss_speech.hf_config import MAX_CONTEXT_TOKENS
+from sglang_omni.models.moss_speech.hf_config import (
+    KV_RESERVE_TOKENS,
+    MAX_CONTEXT_TOKENS,
+)
 
 PACKAGE = "sglang_omni.models.moss_speech"
 
@@ -84,7 +87,7 @@ class MossSpeechPipelineConfig(PipelineConfig):
             engine=EngineArgs(
                 max_running_requests=4,
                 max_queued_requests=20,
-                max_total_tokens=MAX_CONTEXT_TOKENS,
+                max_total_tokens=MAX_CONTEXT_TOKENS + KV_RESERVE_TOKENS,
                 disable_cuda_graph=True,
             ),
             gpu=0,

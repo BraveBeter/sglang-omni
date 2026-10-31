@@ -14,6 +14,7 @@ from sglang.srt.server_args import ServerArgs
 
 from sglang_omni.model_runner.model_worker import ModelWorker
 from sglang_omni.models.moss_speech.hf_config import (
+    KV_RESERVE_TOKENS,
     ensure_moss_speech_config_registered,
 )
 from sglang_omni.models.moss_speech.model_runner import MossSpeechModelRunner
@@ -31,6 +32,7 @@ from sglang_omni.scheduling.engine_factory import (
     SchedulerExtras,
     SGLangGenerationEngineBuilder,
 )
+from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 from sglang_omni.scheduling.sglang_backend.output_processor import SGLangOutputProcessor
 
 
@@ -174,6 +176,20 @@ class MossSpeechEngineBuilder(
         self, model_worker: ModelWorker, output_proc: SGLangOutputProcessor
     ) -> MossSpeechModelRunner:
         return MossSpeechModelRunner(model_worker, output_proc)
+
+    def post_scheduler_setup(
+        self,
+        scheduler: OmniScheduler[MossSpeechSGLangRequestData],
+        model_runner: MossSpeechModelRunner,
+    ) -> None:
+        assert scheduler.model_runner is model_runner
+        context_tokens = min(
+            scheduler.model_config.context_len,
+            scheduler.max_total_num_tokens - KV_RESERVE_TOKENS,
+        )
+        # note (Codex): Upstream clipping subtracts one from this sentinel; physical KV guards remain reserved.
+        scheduler.max_req_len = context_tokens + 1
+        scheduler.max_req_input_len = context_tokens - 1
 
     def make_adapters(
         self, model: torch.nn.Module
