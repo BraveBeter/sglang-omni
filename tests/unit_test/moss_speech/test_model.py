@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import torch
 from sglang.srt.configs.model_config import ModelConfig
+from sglang.srt.utils import DynamicGradMode
 from transformers import Qwen3Config
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm, Qwen3RotaryEmbedding
@@ -313,30 +314,46 @@ def test_native_norm_cuda_rounding_and_fallback() -> None:
     library = os.environ.get("MOSS_NATIVE_NORM_LIBRARY")
     assert library, "Native norm qualification requires the explicitly compiled library"
     native = NativeNorm(library)
-    with torch.inference_mode():
-        for shape in ((1, 4096), (1, 32, 128), (1, 8, 128)):
-            generator = torch.Generator(device="cuda").manual_seed(20261031)
-            hidden = torch.randn(
-                shape, device="cuda", dtype=torch.bfloat16, generator=generator
-            )
-            weight = torch.randn(
-                shape[-1], device="cuda", dtype=torch.bfloat16, generator=generator
-            )
-            for epsilon in (1e-6, 1e-5):
-                reference = hidden.float() * torch.rsqrt(
-                    hidden.float().square().mean(-1, keepdim=True) + epsilon
+    for context in (torch.no_grad, torch.inference_mode):
+        with context():
+            for shape in ((1, 4096), (1, 32, 128), (1, 8, 128)):
+                generator = torch.Generator(device="cuda").manual_seed(20261031)
+                hidden = torch.randn(
+                    shape, device="cuda", dtype=torch.bfloat16, generator=generator
                 )
-                reference = weight * reference.to(hidden.dtype)
-                actual = native.apply(hidden, weight, epsilon)
-                assert actual is not None
-                assert actual.data_ptr() != hidden.data_ptr()
-                assert torch.equal(
-                    actual.view(torch.uint8), reference.view(torch.uint8)
+                weight = torch.randn(
+                    shape[-1], device="cuda", dtype=torch.bfloat16, generator=generator
                 )
-                saved = actual.clone()
-                native.apply(hidden + 1, weight, epsilon)
-                assert torch.equal(actual, saved)
-            assert native.apply(hidden.float(), weight, 1e-6) is None
-            assert native.apply(hidden.expand(2, *shape[1:]), weight, 1e-6) is None
-        assert native.calls == 12
+                for epsilon in (1e-6, 1e-5):
+                    reference = hidden.float() * torch.rsqrt(
+                        hidden.float().square().mean(-1, keepdim=True) + epsilon
+                    )
+                    reference = weight * reference.to(hidden.dtype)
+                    actual = native.apply(hidden, weight, epsilon)
+                    assert actual is not None
+                    assert actual.data_ptr() != hidden.data_ptr()
+                    assert torch.equal(
+                        actual.view(torch.uint8), reference.view(torch.uint8)
+                    )
+                    saved = actual.clone()
+                    native.apply(hidden + 1, weight, epsilon)
+                    assert torch.equal(actual, saved)
+                assert native.apply(hidden.float(), weight, 1e-6) is None
+                assert native.apply(hidden.expand(2, *shape[1:]), weight, 1e-6) is None
     assert native.apply(hidden, weight, 1e-6) is None
+    assert native.calls == 24
+    norm = MossSpeechRMSNorm(4096).to(device="cuda", dtype=torch.bfloat16).eval()
+    norm.native_norm = native
+    with DynamicGradMode():
+        routed = norm(torch.randn(1, 4096, device="cuda", dtype=torch.bfloat16))
+        assert routed.shape == (1, 4096) and native.calls == 25
+        noncontiguous = torch.randn(1, 8192, device="cuda", dtype=torch.bfloat16)[
+            :, ::2
+        ]
+        assert native.apply(noncontiguous, norm.weight, 1e-6) is None
+    hidden = torch.randn(
+        1, 4096, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
+    norm(hidden).float().sum().backward()
+    assert hidden.grad is not None and norm.weight.grad is not None
+    assert native.calls == 25
