@@ -171,6 +171,9 @@ class MossSpeechSGLangModel(torch.nn.Module):
             assert forward_batch.extend_seq_lens_cpu is not None
             token_lengths = list(forward_batch.extend_seq_lens_cpu)
         assert sum(token_lengths) == hidden_states.shape[0]
+        layer_kwargs = (
+            {} if rope_frequencies is None else {"rope_frequencies": rope_frequencies}
+        )
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(
@@ -179,7 +182,7 @@ class MossSpeechSGLangModel(torch.nn.Module):
                 forward_batch,
                 token_lengths,
                 residual,
-                rope_frequencies,
+                **layer_kwargs,
             )
         text_hidden, text_residual = hidden_states, residual
         audio_hidden = hidden_states.clone()
@@ -191,7 +194,7 @@ class MossSpeechSGLangModel(torch.nn.Module):
                 forward_batch,
                 token_lengths,
                 text_residual,
-                rope_frequencies,
+                **layer_kwargs,
             )
         for layer in self.audio_block:
             audio_hidden, audio_residual = layer(
@@ -200,7 +203,7 @@ class MossSpeechSGLangModel(torch.nn.Module):
                 forward_batch,
                 token_lengths,
                 audio_residual,
-                rope_frequencies,
+                **layer_kwargs,
             )
         if text_residual is None or audio_residual is None:
             raise RuntimeError("MOSS-Speech requires nonempty modality tails")
