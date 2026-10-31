@@ -5,6 +5,9 @@ from __future__ import annotations
 
 from transformers import AutoConfig, PretrainedConfig
 
+MAX_CONTEXT_TOKENS = 40960
+MAX_GENERATION_TOKENS = 1000
+
 
 class MossSpeechConfig(PretrainedConfig):
     model_type = "moss_speech"
@@ -20,7 +23,7 @@ class MossSpeechConfig(PretrainedConfig):
         num_key_value_heads: int | None = 8,
         head_dim: int = 128,
         hidden_act: str = "silu",
-        max_position_embeddings: int = 40960,
+        max_position_embeddings: int = MAX_CONTEXT_TOKENS,
         initializer_range: float = 0.02,
         rms_norm_eps: float = 1e-6,
         use_cache: bool = True,

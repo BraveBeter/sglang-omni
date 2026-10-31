@@ -11,6 +11,7 @@ from typing import TypedDict
 import numpy as np
 import torch
 
+from sglang_omni.models.moss_speech.hf_config import MAX_GENERATION_TOKENS
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.flow import (
     CausalMaskedDiffWithXvec,
 )
@@ -197,8 +198,10 @@ class MossSpeechStreamingCodec:
                 else:
                     pass
                 session.codes.extend(codes)
-                if len(session.codes) > 512:
-                    raise ValueError("Streaming audio exceeds 512-code budget")
+                if len(session.codes) > MAX_GENERATION_TOKENS:
+                    raise ValueError(
+                        f"Streaming audio exceeds {MAX_GENERATION_TOKENS}-code budget"
+                    )
                 else:
                     pass
                 session.final_requested = session.final_requested or final
