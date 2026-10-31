@@ -21,6 +21,7 @@ from sglang_omni.models.moss_speech.model_layers import (
     reference_rope_frequencies,
     request_linear,
 )
+from sglang_omni.models.moss_speech.native_norm import NativeNorm
 from sglang_omni.models.moss_speech.sglang_model import MossSpeechSGLangModel
 from tests.unit_test.fixtures.accelerator import require_cuda
 from tests.unit_test.fixtures.moss_speech_model import (
@@ -296,3 +297,46 @@ def test_native_cuda_prefill_decode_keep_requests_and_tail_kv_independent() -> N
         pytest.skip("Run the accelerator lane without the CPU engine override")
     else:
         assert_native_request_isolation(torch.device("cuda", 0))
+
+
+def test_native_norm_cpu_and_grad_fallback() -> None:
+    native = NativeNorm.__new__(NativeNorm)
+    hidden = torch.randn(1, 4096, requires_grad=True)
+    assert native.apply(hidden, torch.ones(4096), 1e-6) is None
+    with torch.inference_mode():
+        assert native.apply(hidden, torch.ones(4096), 1e-6) is None
+
+
+@pytest.mark.accelerator
+def test_native_norm_cuda_rounding_and_fallback() -> None:
+    require_cuda()
+    library = os.environ.get("MOSS_NATIVE_NORM_LIBRARY")
+    assert library, "Native norm qualification requires the explicitly compiled library"
+    native = NativeNorm(library)
+    with torch.inference_mode():
+        for shape in ((1, 4096), (1, 32, 128), (1, 8, 128)):
+            generator = torch.Generator(device="cuda").manual_seed(20261031)
+            hidden = torch.randn(
+                shape, device="cuda", dtype=torch.bfloat16, generator=generator
+            )
+            weight = torch.randn(
+                shape[-1], device="cuda", dtype=torch.bfloat16, generator=generator
+            )
+            for epsilon in (1e-6, 1e-5):
+                reference = hidden.float() * torch.rsqrt(
+                    hidden.float().square().mean(-1, keepdim=True) + epsilon
+                )
+                reference = weight * reference.to(hidden.dtype)
+                actual = native.apply(hidden, weight, epsilon)
+                assert actual is not None
+                assert actual.data_ptr() != hidden.data_ptr()
+                assert torch.equal(
+                    actual.view(torch.uint8), reference.view(torch.uint8)
+                )
+                saved = actual.clone()
+                native.apply(hidden + 1, weight, epsilon)
+                assert torch.equal(actual, saved)
+            assert native.apply(hidden.float(), weight, 1e-6) is None
+            assert native.apply(hidden.expand(2, *shape[1:]), weight, 1e-6) is None
+        assert native.calls == 12
+    assert native.apply(hidden, weight, 1e-6) is None
