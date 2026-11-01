@@ -92,6 +92,12 @@ The eager base has passed local CPU regressions, native CUDA checks, four-mode s
 
 Third-party source revisions, retained notices and outstanding statement scope are documented in [vendored source provenance](../../vendor/moss_speech_codec/VENDORED_SOURCES.md). Checkpoint terms are separate from source terms; no weights are bundled.
 
+The codec releases two local attention-score temporaries before masking and softmax. The arithmetic, tensor contents, relative shift, training behavior, and public configuration remain unchanged; references held by autograd or observers remain valid. No option is required.
+
+Local A800 FP32 checks compared the checkpoint-loaded encoder on chunk 5 and chunk 25 profiles with 36/128/250 generated codes and a 342-code prompt. Across eight fixed cases, peak allocated memory during encoder execution fell by 139–342 MiB (12.5%–18.5%), with flow and HiFT weights resident. Each variant used a separate process, two warmups and three measurements per case. Complete encoder outputs, four streamed PCM cases and one offline PCM case matched the eager baseline exactly. These encoder memory measurements do not establish service latency, maximum concurrency, or a reduction in allocator-reserved memory.
+
+A fixed single-A800 HTTP comparison on English text-to-speech C1/C2 and Chinese speech-to-speech C4 found no latency improvement from score release. Completion-time median point estimates were 0.23%–0.91% higher and TTFA was 0.21%–1.67% higher; full PCM, finish reasons and usage matched the baseline. Each policy had two service starts and three formal groups per profile per start. The verified benefit remains encoder allocated-memory reduction; service peak memory and maximum concurrency were not established.
+
 ## Output and comparison contract
 
 Each generated row contains a text token and an audio token. A modality-pad text token selects the audio channel; text-channel end-of-text and message-end tokens terminate generation. EOSP closes the audio segment and returns the finite-state machine to text mode; EOSP in an inactive channel does not terminate the request.

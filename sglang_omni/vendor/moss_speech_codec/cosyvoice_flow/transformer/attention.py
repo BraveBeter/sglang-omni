@@ -319,5 +319,7 @@ class RelPositionMultiHeadedAttention(MultiHeadedAttention):
         scores = (matrix_ac + matrix_bd) / math.sqrt(
             self.d_k
         )  # (batch, head, time1, time2)
+        # Release quadratic temporaries before masking and softmax allocate more.
+        del matrix_ac, matrix_bd
 
         return self.forward_attention(v, scores, mask), new_cache
