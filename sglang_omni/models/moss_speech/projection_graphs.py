@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import threading
 from collections.abc import Sequence
@@ -17,6 +18,8 @@ from sglang_omni.models.moss_speech.model_layers import (
     MossSpeechDecoderLayer,
     MossSpeechRMSNorm,
 )
+
+logger = logging.getLogger(__name__)
 
 ProjectionSection = Literal["prepare", "finish"]
 ProjectionInputs = tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]
@@ -375,6 +378,10 @@ class MossSpeechProjectionGraphs:
                             static.copy_(actual)
                     prepared.graph.replay()
                     self.replays += 1
+                    if self.replays == 1:
+                        logger.info("MOSS projection graph replay active")
+                    else:
+                        pass
                     if section == "prepare":
                         assert len(prepared.outputs) == 4
                         return (
@@ -457,6 +464,9 @@ class MossSpeechProjectionGraphs:
             self.layers = ()
             self.prepared_model_state = None
             self.prepared_numerical_context = None
+            logger.info(
+                f"MOSS projection graphs closed replays={self.replays} fallbacks={self.fallbacks}"
+            )
             if first_error is not None:
                 raise first_error
             else:
