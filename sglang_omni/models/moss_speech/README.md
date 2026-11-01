@@ -84,7 +84,7 @@ Set modalities to ["text"] in the speech-input example for speech-to-text, or us
 
 The optional output budget max_tokens (or native max_new_tokens) counts generated two-channel grid rows, including delimiters. When omitted or null, the server uses 40,960 minus the actual canonical prompt rows after left-padding removal. An explicit positive budget must fit that same remaining context; there is no separate 200-row default or 1000-row generation ceiling. Generation stops early at the model EOS, or returns finish_reason="length" when the effective budget is exhausted. A prompt filling all 40,960 rows is rejected because at least one generation row is required. Streaming text, audio and Codec accumulation remain bounded by the total context, while the AR scheduler enforces each request's effective budget. A successful HTTP response does not establish task compliance or audio quality.
 
-The checkpoint supports a total context of 40,960 two-channel rows. Preprocessing uses exact canonical token counts rather than character estimates; the default engine context is 40,960; the shared KV pool has 40,962 physical slots, including two allocator/admission guards. The model-specific scheduler sentinel accounts for upstream clipping without reducing the logical window. Prompt plus requested generation budget must fit that window. The independent output budget is 1–1000 rows (default 200); it is not the model context size. Raising the total context increases KV memory and does not guarantee four simultaneous full-window requests.
+The checkpoint supports a total context of 40,960 two-channel rows. Preprocessing uses exact canonical token counts rather than character estimates; the default engine context is 40,960; the shared KV pool has 40,962 physical slots, including two allocator/admission guards. The model-specific scheduler sentinel accounts for upstream clipping without reducing the logical window. Prompt plus requested generation budget must fit that window. Raising the total context increases KV memory and does not guarantee four simultaneous full-window requests.
 
 ## Validation status
 
@@ -133,7 +133,7 @@ The central Omni workflow selects this dedicated smoke with the run-omni-ci and 
 ## Exact-length prefill graph experiment
 
 Set `ar_engine.factory.prefill_graph_lengths: [34, 41, 61, 64, 72, 74, 276, 277]` to prepare up to
-eight explicit, unique prompt lengths from 1 to 512. The default `null` disables
+eight explicit, unique prompt lengths from 1 to 512. The 40,960-row context does not expand this finite graph qualification; longer prompts retain eager execution. The default `null` disables
 this experiment. Only B1 full prompts with no cached prefix and exactly one of
 these lengths qualify; there is no padding or request-time capture. Decode and
 sampling retain their eager paths. R13, projection graphs and prefix caching are

@@ -297,7 +297,7 @@ def test_ar_factory_preflights_and_forwards_placement_budget(tmp_path: Path) -> 
         scheduler = create_ar_engine_executor(
             str(tmp_path),
             dtype="bfloat16",
-            context_length=512,
+            context_length=40960,
             prefill_graph_lengths=[34, 41],
             gpu_id=1,
             total_gpu_memory_fraction=0.6,
@@ -306,7 +306,7 @@ def test_ar_factory_preflights_and_forwards_placement_budget(tmp_path: Path) -> 
         )
         assert scheduler is sentinel.scheduler
         builder = build.call_args.args[0]
-        assert builder.context_length == 512
+        assert builder.context_length == 40960
         assert builder.prefill_graph_lengths == (34, 41)
         for invalid in ([], [True], [0], [513], [3, 3], list(range(1, 10))):
             with pytest.raises(ValueError, match="prefill_graph_lengths"):
