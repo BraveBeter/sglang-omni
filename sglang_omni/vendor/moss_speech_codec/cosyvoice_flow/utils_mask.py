@@ -235,11 +235,15 @@ def add_optional_chunk_mask(
     else:
         chunk_masks = masks
     assert chunk_masks.dtype == torch.bool
-    if (chunk_masks.sum(dim=-1) == 0).sum().item() != 0:
-        print(
-            "get chunk_masks all false at some timestep, force set to true, make sure they are masked in futuer computation!"
-        )
-        chunk_masks[chunk_masks.sum(dim=-1) == 0] = True
+    if chunk_masks.is_cuda and torch.cuda.is_current_stream_capturing():
+        # note (Codex): Preserve mask aliases without a host read during capture.
+        chunk_masks.masked_fill_(chunk_masks.sum(dim=-1, keepdim=True) == 0, True)
+    else:
+        if (chunk_masks.sum(dim=-1) == 0).sum().item() != 0:
+            print(
+                "get chunk_masks all false at some timestep, force set to true, make sure they are masked in futuer computation!"
+            )
+            chunk_masks[chunk_masks.sum(dim=-1) == 0] = True
     return chunk_masks
 
 

@@ -40,6 +40,12 @@ Use the real-checkpoint smoke below to validate startup, output contracts, and r
 
 Set deployment values through typed stage configuration, for example preprocessing.factory.voice_wav, preprocessing.factory.codec_path, audio_vocoder.factory.codec_path, and ar_engine.engine.max_running_requests. The streaming codec uses chunk_size=25, declared once in the vocoder factory configuration. Optional optimization flags from the experimental branch are not part of this pipeline.
 
+### Optional CFM solver graph
+
+The audio_vocoder.factory.cfm_graph_mel_length option defaults to null. Set one total mel-frame length, in multiples of 100 from 100 through 4000, to prepare one CUDA graph at startup with CUDA FP32 eval weights and chunk_size=25. The length includes the complete reference mel and generated mel; choose it explicitly for the configured workload.
+
+Other lengths, final chunks, buffered decoding, changed weights or numerical settings, autocast, and calls on another CUDA stream use the native eager solver. Capture and replay errors propagate. Startup preserves caller RNG, each replay copies all six solver inputs, and returned mel storage remains owned by the request. No additional graph is captured per request. Actual capture and replay must be verified separately from eager fallback and service performance.
+
 ## Requests
 
 The service defaults to port 8000 and accepts /v1/chat/completions. Input content determines the input modality; modalities selects one output modality, text or audio. For a buffered text response:

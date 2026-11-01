@@ -11,6 +11,7 @@ from typing import TypedDict
 import numpy as np
 import torch
 
+from sglang_omni.models.moss_speech.components.cfm_graph import MossSpeechCFMGraph
 from sglang_omni.models.moss_speech.hf_config import MAX_CONTEXT_TOKENS
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.flow import (
     CausalMaskedDiffWithXvec,
@@ -78,6 +79,7 @@ class MossSpeechStreamingCodec:
         device: str | torch.device,
         flow: CausalMaskedDiffWithXvec | None = None,
         hift: HiFTGenerator | None = None,
+        cfm_graph_mel_length: int | None = None,
     ) -> None:
         if chunk_size not in (5, 25):
             raise ValueError("Streaming chunk size must match trained profile 5 or 25")
@@ -85,6 +87,12 @@ class MossSpeechStreamingCodec:
             pass
         self.chunk_size = chunk_size
         self.device = torch.device(device)
+        if cfm_graph_mel_length is not None and (
+            chunk_size != 25 or self.device.type != "cuda"
+        ):
+            raise ValueError("CFM graphs require CUDA and the chunk25 streaming codec")
+        else:
+            pass
         self.lock = threading.RLock()
         self.sessions: dict[str, CodecStreamSession] = {}
         self.speech_window = np.hamming(2 * self.source_cache_len)
@@ -119,6 +127,13 @@ class MossSpeechStreamingCodec:
             pass
         self.flow = flow
         self.hift = hift
+        self.cfm_graph: MossSpeechCFMGraph | None = None
+        if cfm_graph_mel_length is not None:
+            self.cfm_graph = MossSpeechCFMGraph(
+                self.flow.decoder, mel_length=cfm_graph_mel_length
+            )
+        else:
+            pass
 
     def begin(
         self, request_id: str, voice: dict[str, torch.Tensor], *, seed: int
@@ -348,3 +363,10 @@ class MossSpeechStreamingCodec:
     def close(self) -> None:
         with self.lock:
             self.sessions.clear()
+            if self.cfm_graph is not None:
+                try:
+                    self.cfm_graph.close()
+                finally:
+                    self.cfm_graph = None
+            else:
+                pass

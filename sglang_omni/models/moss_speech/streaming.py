@@ -285,8 +285,10 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[AudioStreamState, None]):
         state.session = None
 
     def on_serving_stop(self) -> None:
-        self.codec.close()
-        self.offline_codec.close()
+        try:
+            self.codec.close()
+        finally:
+            self.offline_codec.close()
 
 
 @dataclass(kw_only=True)

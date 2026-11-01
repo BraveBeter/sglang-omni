@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Small neural boundaries for the real MOSS codec and scheduler contracts."""
 
+import hashlib
+import json
+import os
 import queue
 from pathlib import Path
 
 import pytest
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 from transformers import WhisperFeatureExtractor
 
 import sglang_omni.models.moss_speech.components.codec_adapter as codec_adapter_module
@@ -259,3 +262,36 @@ def drain_messages(
             messages.append(scheduler.outbox.get_nowait())
         except queue.Empty:
             return messages
+
+
+def fullweight_streaming_inputs() -> tuple[Path, dict[str, torch.Tensor], list[int]]:
+    """Use the complete independent HF voice and code ledger without trimming."""
+    codec_path = Path(os.environ["MOSS_CODEC_PATH"])
+    reference = json.loads(Path(os.environ["MOSS_CODEC_GOLDEN"]).read_text())
+    tensor_path = Path(os.environ["MOSS_CODEC_GOLDEN_TENSORS"])
+    profile_path = Path(os.environ["MOSS_CODE_PROFILE"])
+    assert reference["status"] == "passed"
+    assert reference["serving_core_modules_imported"] in ([], False)
+    assert (
+        hashlib.sha256(tensor_path.read_bytes()).hexdigest()
+        == reference["tensor_artifact_sha256"]
+    )
+    assert (
+        hashlib.sha256(profile_path.read_bytes()).hexdigest()
+        == reference["code_profile_sha256"]
+    )
+    oracle = load_file(str(tensor_path), device="cpu")
+    profile = json.loads(profile_path.read_text())
+    codes = oracle["codes512.codes"][0].tolist()
+    assert codes == reference["cases"]["codes512"]["complete_decode_code_ledger"]
+    assert codes == profile["cases"]["codes512"]["complete_decode_code_ledger"]
+    assert len(codes) == 512 and all(0 <= code < 16384 for code in codes)
+    voice = {
+        name: oracle["voice." + name].clone()
+        for name in ("prompt_token", "prompt_feat", "embedding")
+    }
+    prompt_count = reference["voice_conditioning"]["full_prompt_tokens"]
+    assert voice["prompt_token"].shape == (1, prompt_count)
+    assert voice["prompt_feat"].shape == (1, prompt_count * 4, 80)
+    assert voice["embedding"].shape == (1, 192)
+    return codec_path, voice, codes

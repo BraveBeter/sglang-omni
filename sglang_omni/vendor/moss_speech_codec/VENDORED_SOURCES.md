@@ -50,7 +50,7 @@ All imports are rewired into this vendor namespace. Methods outside the producti
 | `cosyvoice_flow/transformer/activation.py`, `convolution.py`, `embedding.py`, `encoder_layer.py`, `positionwise_feed_forward.py`, `subsampling.py`, `upsample_encoder.py` | Corresponding `cosyvoice/transformer/*.py` | Import rewiring only |
 | `cosyvoice_flow/class_utils.py` | `cosyvoice/utils/class_utils.py` | Retains activation/subsample/position/attention registries needed by UpsampleConformerEncoder; removes unrelated model factories |
 | `cosyvoice_flow/utils_common.py` | `cosyvoice/utils/common.py` | Retains seed, mask-bias, padding and initialization helpers only |
-| `cosyvoice_flow/utils_mask.py` | `cosyvoice/utils/mask.py` | Import rewiring only |
+| `cosyvoice_flow/utils_mask.py` | `cosyvoice/utils/mask.py` | Import rewiring; during CUDA Graph capture only, replace the empty-row host scalar check with the equivalent in-place tensor mask repair; ordinary eager behavior is retained |
 | `matcha_components/audio.py` | `matcha/utils/audio.py` | Import rewiring only; preserves mel computation |
 | `matcha_components/decoder.py` | `matcha/models/components/decoder.py` | Retains layers needed by the causal estimator; removes unused full decoder and Conformer wrapper |
 | `matcha_components/transformer.py` | `matcha/models/components/transformer.py` | Import rewiring only; uses installed Diffusers attention |

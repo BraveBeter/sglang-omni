@@ -32,6 +32,7 @@ from sglang_omni.models.moss_speech.payload_types import MossSpeechState
 from sglang_omni.models.moss_speech.request_data import build_sglang_moss_request
 from sglang_omni.models.moss_speech.stages import (
     create_ar_engine_executor,
+    create_audio_vocoder_executor,
     create_preprocessing_executor,
 )
 from sglang_omni.proto.request import OmniRequest, StagePayload
@@ -135,6 +136,8 @@ def test_cli_overrides_survive_serialization_without_cross_instance_leak() -> No
                 "codec",
                 "--audio_vocoder.factory.chunk_size",
                 "5",
+                "--audio_vocoder.factory.cfm_graph_mel_length",
+                "1500",
                 "--ar_engine.engine.max_running_requests",
                 "2",
             ]
@@ -152,6 +155,12 @@ def test_cli_overrides_survive_serialization_without_cross_instance_leak() -> No
     assert (
         resolve_stage_typed_kwargs(restored.stage_named("audio_vocoder"))["chunk_size"]
         == 5
+    )
+    assert (
+        resolve_stage_typed_kwargs(restored.stage_named("audio_vocoder"))[
+            "cfm_graph_mel_length"
+        ]
+        == 1500
     )
     assert restored.stage_named("ar_engine").engine.max_running_requests == 2
     assert baseline == MossSpeechPipelineConfig(model_path="model")
@@ -176,6 +185,8 @@ def test_public_serve_cli_routes_model_assets_to_typed_stages(tmp_path: Path) ->
                 codec_path,
                 "--audio_vocoder.factory.codec_path",
                 codec_path,
+                "--audio_vocoder.factory.cfm_graph_mel_length",
+                "1500",
                 "--ar_engine.engine.max_running_requests",
                 "2",
             ],
@@ -193,6 +204,12 @@ def test_public_serve_cli_routes_model_assets_to_typed_stages(tmp_path: Path) ->
                 "codec_path"
             ]
             == codec_path
+        )
+        assert (
+            resolve_stage_typed_kwargs(config.stage_named("audio_vocoder"))[
+                "cfm_graph_mel_length"
+            ]
+            == 1500
         )
         assert config.stage_named("ar_engine").engine.max_running_requests == 2
 
@@ -378,3 +395,55 @@ def test_context_window_survives_upstream_generation_and_kv_guards(
         request.req.sampling_params.max_new_tokens == request.max_new_tokens == budget
     )
     assert scheduler.request_kv_capacity_error(request.req) is None
+
+
+@pytest.mark.parametrize("mel_length", [0, 101, 4100, 1500.5])
+def test_cfm_graph_shape_config_rejects_out_of_profile_lengths(
+    mel_length: int | float,
+) -> None:
+    document = MossSpeechPipelineConfig(model_path="unused").model_dump()
+    for stage in document["stages"]:
+        if stage["name"] == "audio_vocoder":
+            stage["factory"]["cfm_graph_mel_length"] = mel_length
+        else:
+            pass
+    with pytest.raises(ValidationError, match="cfm_graph_mel_length"):
+        MossSpeechPipelineConfig.model_validate(document)
+
+
+@pytest.mark.parametrize("mel_length", [None, 1500])
+def test_vocoder_factory_consumes_typed_graph_shape_and_cleans_startup_failure(
+    tmp_path: Path, mel_length: int | None
+) -> None:
+    configuration = MossSpeechPipelineConfig(model_path=str(tmp_path))
+    configuration.stage_named("audio_vocoder").factory.cfm_graph_mel_length = mel_length
+    restored = MossSpeechPipelineConfig.model_validate(configuration.model_dump())
+    stage = restored.stage_named("audio_vocoder")
+    keywords = resolve_factory_signature_args(
+        create_audio_vocoder_executor,
+        resolve_stage_typed_kwargs(stage),
+        defaults=resolve_stage_factory_arg_defaults(stage, restored),
+    )
+    keywords.update(codec_path=str(tmp_path), device="cpu")
+    with (
+        patch(
+            "sglang_omni.models.moss_speech.stages.MossSpeechCodecAdapter",
+            autospec=True,
+        ) as offline,
+        patch(
+            "sglang_omni.models.moss_speech.stages.MossSpeechStreamingCodec",
+            autospec=True,
+        ) as streaming,
+    ):
+        scheduler = create_audio_vocoder_executor(**keywords)
+        assert streaming.call_args.kwargs["cfm_graph_mel_length"] == mel_length
+        assert scheduler.codec is streaming.return_value
+        scheduler.stop()
+        if mel_length is not None:
+            offline.return_value.close.reset_mock()
+            streaming.side_effect = RuntimeError("Injected graph preparation failure")
+            with pytest.raises(RuntimeError, match="graph preparation"):
+                create_audio_vocoder_executor(**keywords)
+            offline.return_value.close.assert_called_once_with()
+        else:
+            pass
