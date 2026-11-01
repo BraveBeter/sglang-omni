@@ -38,7 +38,7 @@ Both placements use tensor parallel size one: the dual-GPU configuration places 
 
 Use the real-checkpoint smoke below to validate startup, output contracts, and recovery on the target GPUs. Measure deployment capacity and performance separately with fixed requests and output budgets.
 
-Set deployment values through typed stage configuration, for example preprocessing.factory.voice_wav, preprocessing.factory.codec_path, audio_vocoder.factory.codec_path, and ar_engine.engine.max_running_requests. The streaming codec uses chunk_size=25, declared once in the vocoder factory configuration. Optional optimization flags from the experimental branch are not part of this pipeline.
+Set deployment values through typed stage configuration, for example preprocessing.factory.voice_wav, preprocessing.factory.codec_path, audio_vocoder.factory.codec_path, and ar_engine.engine.max_running_requests. The streaming codec uses chunk_size=25, declared once in the vocoder factory configuration. Optional AR execution paths are disabled by default; see [Optional AR execution paths](#optional-ar-execution-paths).
 
 ## Requests
 
@@ -84,7 +84,7 @@ Set modalities to ["text"] in the speech-input example for speech-to-text, or us
 
 The optional output budget max_tokens (or native max_new_tokens) counts generated two-channel grid rows, including delimiters. When omitted or null, the server uses 40,960 minus the actual canonical prompt rows after left-padding removal. An explicit positive budget must fit that same remaining context; there is no separate 200-row default or 1000-row generation ceiling. Generation stops early at the model EOS, or returns finish_reason="length" when the effective budget is exhausted. A prompt filling all 40,960 rows is rejected because at least one generation row is required. Streaming text, audio and Codec accumulation remain bounded by the total context, while the AR scheduler enforces each request's effective budget. A successful HTTP response does not establish task compliance or audio quality.
 
-The checkpoint supports a total context of 40,960 two-channel rows. Preprocessing uses exact canonical token counts rather than character estimates; the default engine context is 40,960; the shared KV pool has 40,962 physical slots, including two allocator/admission guards. The model-specific scheduler sentinel accounts for upstream clipping without reducing the logical window. Prompt plus requested generation budget must fit that window. The independent output budget is 1–1000 rows (default 200); it is not the model context size. Raising the total context increases KV memory and does not guarantee four simultaneous full-window requests.
+The checkpoint supports a total context of 40,960 two-channel rows. Preprocessing uses exact canonical token counts rather than character estimates; the default engine context is 40,960; the shared KV pool has 40,962 physical slots, including two allocator/admission guards. The model-specific scheduler sentinel accounts for upstream clipping without reducing the logical window. Prompt plus requested generation budget must fit that window. Raising the total context increases KV memory and does not guarantee four simultaneous full-window requests.
 
 ## Validation status
 
