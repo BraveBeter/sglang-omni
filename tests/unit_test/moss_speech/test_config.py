@@ -297,7 +297,7 @@ def test_ar_factory_preflights_and_forwards_placement_budget(tmp_path: Path) -> 
         scheduler = create_ar_engine_executor(
             str(tmp_path),
             dtype="bfloat16",
-            context_length=512,
+            context_length=40960,
             decode_graph=True,
             gpu_id=1,
             total_gpu_memory_fraction=0.6,
@@ -306,7 +306,7 @@ def test_ar_factory_preflights_and_forwards_placement_budget(tmp_path: Path) -> 
         )
         assert scheduler is sentinel.scheduler
         builder = build.call_args.args[0]
-        assert builder.context_length == 512
+        assert builder.context_length == 40960
         assert builder.decode_graph_enabled is True
         assert build.call_args.kwargs["gpu_id"] == 1
         assert build.call_args.kwargs["total_gpu_memory_fraction"] == 0.7
