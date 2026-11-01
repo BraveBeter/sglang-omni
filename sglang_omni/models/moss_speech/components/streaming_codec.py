@@ -303,9 +303,9 @@ class MossSpeechStreamingCodec:
         waveform, generated_source = self.hift.inference(
             speech_feat=predicted_mel, cache_source=source
         )
+        waveform = waveform.cpu()
         if overlap is not None:
-            waveform_device = waveform.device
-            waveform, previous_waveform = waveform.cpu(), overlap["speech"].cpu()
+            previous_waveform = overlap["speech"].cpu()
             overlap_samples = self.source_cache_len
             # note (MOSS-Speech): Preserve float64 window arithmetic and FP32 assignment.
             waveform[..., :overlap_samples] = (
@@ -313,7 +313,6 @@ class MossSpeechStreamingCodec:
                 + previous_waveform[..., -overlap_samples:]
                 * self.speech_window[overlap_samples:]
             )
-            waveform = waveform.to(waveform_device)
         else:
             pass
         if not final:

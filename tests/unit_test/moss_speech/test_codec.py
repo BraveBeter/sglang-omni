@@ -20,7 +20,10 @@ from sglang_omni.models.moss_speech.components.codec_adapter import (
     CodecAdapterError,
     MossSpeechCodecAdapter,
 )
-from sglang_omni.models.moss_speech.components.streaming_codec import load_flow_weights
+from sglang_omni.models.moss_speech.components.streaming_codec import (
+    MossSpeechStreamingCodec,
+    load_flow_weights,
+)
 from sglang_omni.models.moss_speech.components.voice import (
     CampplusSpeakerEncoder,
     VoiceConditioning,
@@ -37,6 +40,7 @@ from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.decoder import (
 from sglang_omni.vendor.moss_speech_codec.hf_codec.modeling import scoped_global_rng
 from sglang_omni.vendor.moss_speech_codec.hf_codec.whisper import WhisperVQEncoder
 from tests.unit_test.fixtures.moss_speech_codec import (
+    TinyFlow,
     TinyHiFT,
     TinyOfflineDecoder,
     audio_payload,
@@ -409,3 +413,27 @@ def test_nonstream_audio_accepts_full_torch_seed_range_and_restores_rng(
         assert torch.equal(torch.get_rng_state(), caller_rng)
     finally:
         scheduler.stop()
+
+
+@pytest.mark.accelerator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_streaming_overlap_keeps_pcm_on_host_and_conditioning_on_device() -> None:
+    """Nonfinal HiFT output previously retained speech overlap on CUDA."""
+    codec = MossSpeechStreamingCodec(
+        None, chunk_size=5, device="cuda", flow=TinyFlow(), hift=TinyHiFT()
+    )
+    caller_cpu_rng = torch.get_rng_state().clone()
+    caller_cuda_rng = torch.cuda.get_rng_state().clone()
+    codec.begin("overlap", voice_tensors(), seed=123)
+    session = codec.sessions["overlap"]
+    waveforms = codec.push("overlap", list(range(11)))
+    assert session.cache is not None
+    assert session.cache["speech"].device.type == "cpu"
+    assert session.cache["mel"].device.type == "cuda"
+    assert session.cache["source"].device.type == "cuda"
+    waveforms.extend(codec.push("overlap", list(range(11, 20)), final=True))
+    assert all(waveform.device.type == "cpu" for waveform in waveforms)
+    assert sum(waveform.numel() for waveform in waveforms) == 20 * 1920
+    assert not codec.sessions
+    assert torch.equal(torch.get_rng_state(), caller_cpu_rng)
+    assert torch.equal(torch.cuda.get_rng_state(), caller_cuda_rng)

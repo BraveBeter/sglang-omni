@@ -92,6 +92,8 @@ The eager base has passed local CPU regressions, native CUDA checks, four-mode s
 
 Third-party source revisions, retained notices and outstanding statement scope are documented in [vendored source provenance](../../vendor/moss_speech_codec/VENDORED_SOURCES.md). Checkpoint terms are separate from source terms; no weights are bundled.
 
+Streaming PCM and speech-overlap samples remain on the host after HiFT synthesis; mel and source conditioning stay on the codec device. This avoids an overlap waveform round trip while preserving the existing float64 window arithmetic, request RNG, hop sizes, and sample ledger.
+
 ## Output and comparison contract
 
 Each generated row contains a text token and an audio token. A modality-pad text token selects the audio channel; text-channel end-of-text and message-end tokens terminate generation. EOSP closes the audio segment and returns the finite-state machine to text mode; EOSP in an inactive channel does not terminate the request.
