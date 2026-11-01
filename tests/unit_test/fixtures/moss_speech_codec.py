@@ -278,7 +278,11 @@ def assert_shared_hift_checkpoint_behavior(
     ) as encoder:
         voice = encoder.encode_voice_ref(voice_path)
     shared = create_audio_vocoder_executor(
-        "unused", chunk_size=25, codec_path=str(codec_path), device=str(device)
+        "unused",
+        chunk_size=25,
+        codec_path=str(codec_path),
+        device=device.type,
+        gpu_id=device.index,
     )
     independent = MossSpeechStreamingCodec(codec_path, chunk_size=25, device=device)
     offline = MossSpeechCodecAdapter(
