@@ -48,9 +48,16 @@ class MossSpeechEngineBuilder(
     model_arch_override = "MossSpeechForCausalLM"
     supports_context_length_override = True
 
-    def __init__(self, context_length: int | None = None, *, streaming: bool) -> None:
+    def __init__(
+        self,
+        context_length: int | None = None,
+        *,
+        streaming: bool,
+        decode_rope_reuse: bool = False,
+    ) -> None:
         super().__init__()
         self.streaming = streaming
+        self.decode_rope_reuse = decode_rope_reuse
         self.request_lifecycle: MossSpeechRequestLifecycle | None = None
         if context_length is None:
             pass
@@ -158,6 +165,7 @@ class MossSpeechEngineBuilder(
         model = model_worker.model_runner.model
         assert isinstance(model, MossSpeechSGLangModel)
         model.assert_heads_independent()
+        model.decode_rope_reuse = self.decode_rope_reuse
         configuration = resolved_view(server_args)
         if (
             configuration.max_running_requests

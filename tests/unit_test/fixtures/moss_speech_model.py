@@ -4,6 +4,7 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import TypedDict
 
 import torch
 from sglang.srt.layers.attention.torch_native_backend import TorchNativeAttnBackend
@@ -72,7 +73,7 @@ def native_runtime(device: torch.device) -> Iterator[None]:
 
 
 def tiny_model(
-    device: torch.device, *, audio_vocab_size: int = 64
+    device: torch.device, *, audio_vocab_size: int = 64, batch_size: int = 2
 ) -> MossSpeechSGLangModel:
     configuration = MossSpeechConfig(
         vocab_size=256,
@@ -86,7 +87,7 @@ def tiny_model(
         num_modality_layers=1,
         num_hidden_layers=3,
         max_position_embeddings=16,
-        moss_decode_buffer_bs=2,
+        moss_decode_buffer_bs=batch_size,
     )
     model = MossSpeechSGLangModel(configuration, init_device=device)
     generator = torch.Generator(device=device).manual_seed(183)
@@ -151,12 +152,12 @@ def prefill(
     token_count = sum(token_lengths)
     request_pool = ReqToTokenPool(
         size=len(token_lengths),
-        max_context_len=16,
+        max_context_len=max(16, max(token_lengths) + 2),
         device=str(device),
         enable_memory_saver=False,
     )
     kv_pool = MHATokenToKVPool(
-        size=32,
+        size=max(32, token_count + 2 * len(token_lengths)),
         page_size=1,
         dtype=torch.bfloat16,
         head_num=model.config.num_key_value_heads,
@@ -245,3 +246,121 @@ def decode(
     backend.init_forward_metadata(batch)
     with forward_context(ForwardContext(attn_backend=backend)):
         return model(batch.input_ids, batch.positions, batch)
+
+
+class BatchedRopeProof(TypedDict):
+    batch_sizes: list[int]
+    executions: dict[str, int]
+    complete_heads_exact: bool
+    all_kv_exact: bool
+    kv_layers: int
+
+
+def qualify_batched_rope(
+    model: MossSpeechSGLangModel, grids: dict[str, torch.Tensor]
+) -> tuple[BatchedRopeProof, dict[str, dict[str, dict[str, torch.Tensor]]]]:
+    """Return real batched final-row logits; the caller owns independent HF comparisons."""
+    assert grids and len({grid.shape[0] for grid in grids.values()}) >= 2
+    assert all(
+        grid.ndim == 2 and grid.shape[1] == 2 and grid.shape[0] >= 2
+        for grid in grids.values()
+    )
+    assert model.decode_input_embedding.num_embeddings >= 4
+    device = model.embed_tokens.weight.device
+    row_runner = RowCommitRunner(model)
+    original_enabled = model.decode_rope_reuse
+    original_training = model.training
+    original_logits = dict(model.dual_logits_by_request_id)
+    original_feedback = model.decode_input_embedding.weight.clone()
+    proof: BatchedRopeProof = {
+        "batch_sizes": [2, 4],
+        "executions": {},
+        "complete_heads_exact": True,
+        "all_kv_exact": True,
+        "kv_layers": model.total_attention_layers,
+    }
+    outputs: dict[str, dict[str, dict[str, torch.Tensor]]] = {}
+    names = sorted(grids, key=lambda name: grids[name].shape[0])
+    try:
+        with torch.inference_mode():
+            model.eval()
+            for batch_size in (2, 4):
+                before = model.decode_rope_reuse_forwards
+                outputs[str(batch_size)] = {}
+                for offset, name in enumerate(names):
+                    anchor = (
+                        names[-1]
+                        if grids[name].shape[0] == grids[names[0]].shape[0]
+                        else names[0]
+                    )
+                    group = [name] + [anchor] * (batch_size - 1)
+                    prompt_embeddings = [
+                        row_runner.rows_to_embeddings(grids[name][:-1].to(device))
+                        for name in group
+                    ]
+                    feedback = torch.cat(
+                        [
+                            row_runner.rows_to_embeddings(grids[name][-1:].to(device))
+                            for name in group
+                        ]
+                    )
+                    lengths = [len(prompt) for prompt in prompt_embeddings]
+                    request_ids = [
+                        f"rope-{batch_size}-{offset}-{index}"
+                        for index in range(batch_size)
+                    ]
+                    model.decode_rope_reuse = False
+                    _, eager_backend = prefill(model, prompt_embeddings, request_ids)
+                    eager_output = decode(
+                        model, eager_backend, lengths, feedback, request_ids
+                    )
+                    model.decode_rope_reuse = True
+                    _, candidate_backend = prefill(
+                        model, prompt_embeddings, request_ids
+                    )
+                    candidate_output = decode(
+                        model, candidate_backend, lengths, feedback, request_ids
+                    )
+                    for actual, expected in (
+                        (candidate_output.text_logits, eager_output.text_logits),
+                        (candidate_output.audio_logits, eager_output.audio_logits),
+                        (candidate_output.hidden_states, eager_output.hidden_states),
+                    ):
+                        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                    for layer_index in model.attention_layer_ids():
+                        for request_index, length in enumerate(lengths, 1):
+                            slots = candidate_backend.req_to_token_pool.req_to_token[
+                                request_index, : length + 1
+                            ].long()
+                            for cache_name in ("get_key_buffer", "get_value_buffer"):
+                                actual = getattr(
+                                    candidate_backend.token_to_kv_pool, cache_name
+                                )(layer_index)[slots]
+                                expected = getattr(
+                                    eager_backend.token_to_kv_pool, cache_name
+                                )(layer_index)[slots]
+                                torch.testing.assert_close(
+                                    actual, expected, rtol=0, atol=0
+                                )
+                    assert (
+                        candidate_output.text_logits is not None
+                        and candidate_output.audio_logits is not None
+                    )
+                    for index, name in enumerate(group):
+                        outputs[str(batch_size)][name] = {
+                            "text": candidate_output.text_logits[index].cpu().clone(),
+                            "audio": candidate_output.audio_logits[index].cpu().clone(),
+                        }
+                proof["executions"][str(batch_size)] = (
+                    model.decode_rope_reuse_forwards - before
+                )
+                assert proof["executions"][str(batch_size)] > 0
+                assert set(outputs[str(batch_size)]) == set(grids)
+    finally:
+        model.decode_rope_reuse = original_enabled
+        model.train(original_training)
+        model.dual_logits_by_request_id.clear()
+        model.dual_logits_by_request_id.update(original_logits)
+        with torch.inference_mode():
+            model.decode_input_embedding.weight.copy_(original_feedback)
+    return proof, outputs

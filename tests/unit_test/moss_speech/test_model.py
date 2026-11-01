@@ -12,6 +12,7 @@ from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm, Qwen3RotaryEmbedding
 
 from sglang_omni.model_runner.model_worker import ModelWorker
+from sglang_omni.models.moss_speech import model_layers, sglang_model
 from sglang_omni.models.moss_speech.hf_config import (
     MossSpeechConfig,
     ensure_moss_speech_config_registered,
@@ -28,6 +29,7 @@ from tests.unit_test.fixtures.moss_speech_model import (
     decode,
     native_runtime,
     prefill,
+    qualify_batched_rope,
     tiny_model,
 )
 
@@ -296,3 +298,184 @@ def test_native_cuda_prefill_decode_keep_requests_and_tail_kv_independent() -> N
         pytest.skip("Run the accelerator lane without the CPU engine override")
     else:
         assert_native_request_isolation(torch.device("cuda", 0))
+
+
+@pytest.mark.parametrize("batch_size", [1, 2, 4])
+@NATIVE_CPU
+def test_decode_rope_reuse_keeps_full_outputs_and_request_kv(batch_size: int) -> None:
+    assert_decode_rope_reuse(torch.device("cpu"), batch_size)
+
+
+@pytest.mark.accelerator
+@pytest.mark.parametrize("batch_size", [2, 4])
+def test_cuda_decode_rope_reuse_keeps_full_outputs_and_request_kv(
+    batch_size: int,
+) -> None:
+    require_cuda()
+    assert_decode_rope_reuse(torch.device("cuda", 0), batch_size)
+
+
+def assert_decode_rope_reuse(device: torch.device, batch_size: int) -> None:
+    """Reusing position terms must not change logits, retained outputs or either KV tail."""
+    calls = 0
+    original_terms = model_layers.reference_rope_terms
+
+    def counted_terms(
+        positions: torch.Tensor, head_dim: int, theta: float, dtype: torch.dtype
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        nonlocal calls
+        calls += 1
+        return original_terms(positions, head_dim, theta, dtype)
+
+    with (
+        native_runtime(device),
+        torch.no_grad(),
+        pytest.MonkeyPatch.context() as patcher,
+    ):
+        patcher.setattr(model_layers, "reference_rope_terms", counted_terms)
+        patcher.setattr(sglang_model, "reference_rope_terms", counted_terms)
+        eager = tiny_model(device, batch_size=batch_size).eval()
+        candidate = tiny_model(device, batch_size=batch_size).eval()
+        assert candidate.decode_rope_reuse is False
+        candidate.decode_rope_reuse = True
+        generator = torch.Generator(device=device).manual_seed(713)
+        lengths = list(range(1, batch_size + 1))
+        prompts = [
+            torch.randn(length, 128, device=device, generator=generator)
+            for length in lengths
+        ]
+        request_ids = [f"request-{i}" for i in range(batch_size)]
+        eager_prefill, eager_backend = prefill(eager, prompts, request_ids)
+        candidate_prefill, candidate_backend = prefill(candidate, prompts, request_ids)
+        assert candidate.decode_rope_reuse_forwards == 0
+        for name in ("text_logits", "audio_logits", "hidden_states"):
+            torch.testing.assert_close(
+                getattr(candidate_prefill, name),
+                getattr(eager_prefill, name),
+                rtol=0,
+                atol=0,
+            )
+        retained = []
+        for step in range(2):
+            feedback = torch.randn(batch_size, 128, device=device, generator=generator)
+            before = calls
+            eager_output = decode(eager, eager_backend, lengths, feedback, request_ids)
+            assert calls - before == eager.total_attention_layers
+            before = calls
+            candidate_output = decode(
+                candidate, candidate_backend, lengths, feedback, request_ids
+            )
+            assert calls - before == (
+                1 if batch_size >= 2 else candidate.total_attention_layers
+            )
+            for name in ("text_logits", "audio_logits", "hidden_states"):
+                actual = getattr(candidate_output, name)
+                torch.testing.assert_close(
+                    actual, getattr(eager_output, name), rtol=0, atol=0
+                )
+                retained.append((actual, actual.clone()))
+            for layer_index in candidate.attention_layer_ids():
+                for request_index, length in enumerate(lengths, 1):
+                    slots = candidate_backend.req_to_token_pool.req_to_token[
+                        request_index, : length + 1
+                    ].long()
+                    for cache_name in ("get_key_buffer", "get_value_buffer"):
+                        actual = getattr(
+                            candidate_backend.token_to_kv_pool, cache_name
+                        )(layer_index)[slots]
+                        expected = getattr(eager_backend.token_to_kv_pool, cache_name)(
+                            layer_index
+                        )[slots]
+                        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            assert candidate.decode_rope_reuse_forwards == (
+                step + 1 if batch_size >= 2 else 0
+            )
+            lengths = [length + 1 for length in lengths]
+        for actual, expected in retained:
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@NATIVE_CPU
+@pytest.mark.parametrize(
+    "incompatible", ["theta", "training", "grad", "hook", "autocast"]
+)
+def test_decode_rope_reuse_falls_back_for_incompatible_execution(
+    incompatible: str,
+) -> None:
+    with native_runtime(torch.device("cpu")), torch.no_grad():
+        model = tiny_model(torch.device("cpu")).eval()
+        model.decode_rope_reuse = True
+        prompts = [torch.ones(1, 128), torch.ones(2, 128)]
+        _, backend = prefill(model, prompts, ["one", "two"])
+        if incompatible == "theta":
+            model.text_block[0].self_attn.rope_theta *= 2
+        elif incompatible == "training":
+            model.train()
+        elif incompatible == "hook":
+            model.layers[0].register_forward_pre_hook(lambda module, arguments: None)
+        else:
+            pass
+        with (
+            torch.set_grad_enabled(incompatible == "grad"),
+            torch.autocast(
+                "cpu", dtype=torch.bfloat16, enabled=incompatible == "autocast"
+            ),
+        ):
+            decode(model, backend, [1, 2], torch.ones(2, 128), ["one", "two"])
+        assert model.decode_rope_reuse_forwards == 0
+
+
+@pytest.mark.parametrize("batch_size", [2, 4])
+@pytest.mark.parametrize(
+    "device",
+    [
+        pytest.param(torch.device("cpu"), id="cpu"),
+        pytest.param(torch.device("cuda", 0), id="cuda", marks=pytest.mark.accelerator),
+    ],
+)
+def test_decode_rope_terms_preserve_full_context_reference_rounding(
+    batch_size: int,
+    device: torch.device,
+) -> None:
+    if device.type == "cuda":
+        require_cuda()
+    else:
+        pass
+    positions = torch.tensor([0, 40959, 512, 40958][:batch_size], device=device)
+    reference = Qwen3RotaryEmbedding(Qwen3Config(head_dim=128, rope_theta=10000.0)).to(
+        device
+    )
+    hidden = torch.zeros(1, batch_size, 256, dtype=torch.bfloat16, device=device)
+    cosine, sine = model_layers.reference_rope_terms(
+        positions, 128, 10000.0, hidden.dtype
+    )
+    expected_cosine, expected_sine = reference(hidden, positions[None, :])
+    torch.testing.assert_close(cosine[:, 0], expected_cosine[0], rtol=0, atol=0)
+    torch.testing.assert_close(sine[:, 0], expected_sine[0], rtol=0, atol=0)
+
+
+@NATIVE_CPU
+def test_batched_rope_qualification_returns_complete_heads_and_restores_state() -> None:
+    with native_runtime(torch.device("cpu")), torch.no_grad():
+        model = tiny_model(torch.device("cpu"), batch_size=4).eval()
+        feedback = model.decode_input_embedding.weight.clone()
+        grids = {
+            "short": torch.tensor([[2, 0], [3, 0], [4, 0]]),
+            "long": torch.tensor([[5, 0], [6, 0], [7, 0], [8, 0]]),
+        }
+        proof, outputs = qualify_batched_rope(model, grids)
+        assert proof["batch_sizes"] == [2, 4]
+        assert all(count > 0 for count in proof["executions"].values())
+        assert proof["complete_heads_exact"] and proof["all_kv_exact"]
+        assert proof["kv_layers"] == model.total_attention_layers
+        for batch in ("2", "4"):
+            assert set(outputs[batch]) == set(grids)
+            for values in outputs[batch].values():
+                assert values["text"].shape == (model.text_vocab_size,)
+                assert values["audio"].shape == (model.audio_vocab_size,)
+                assert values["text"].dtype == values["audio"].dtype == torch.bfloat16
+        assert model.decode_rope_reuse is False and model.training is False
+        assert not model.dual_logits_by_request_id
+        torch.testing.assert_close(
+            model.decode_input_embedding.weight, feedback, rtol=0, atol=0
+        )

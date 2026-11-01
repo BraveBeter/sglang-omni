@@ -290,7 +290,10 @@ def test_typed_config_rejects_obsolete_or_untrained_knobs(
         MossSpeechPipelineConfig.model_validate(document)
 
 
-def test_ar_factory_preflights_and_forwards_placement_budget(tmp_path: Path) -> None:
+@pytest.mark.parametrize("decode_rope_reuse", [False, True])
+def test_ar_factory_preflights_and_forwards_placement_budget(
+    tmp_path: Path, decode_rope_reuse: bool
+) -> None:
     MossSpeechConfig(audio_vocab_size=16512).to_json_file(tmp_path / "config.json")
     with patch.object(MossSpeechEngineBuilder, "build", autospec=True) as build:
         build.return_value = sentinel.scheduler
@@ -298,6 +301,7 @@ def test_ar_factory_preflights_and_forwards_placement_budget(tmp_path: Path) -> 
             str(tmp_path),
             dtype="bfloat16",
             context_length=512,
+            decode_rope_reuse=decode_rope_reuse,
             gpu_id=1,
             total_gpu_memory_fraction=0.6,
             process_total_gpu_memory_fraction=0.7,
@@ -306,6 +310,7 @@ def test_ar_factory_preflights_and_forwards_placement_budget(tmp_path: Path) -> 
         assert scheduler is sentinel.scheduler
         builder = build.call_args.args[0]
         assert builder.context_length == 512
+        assert builder.decode_rope_reuse is decode_rope_reuse
         assert build.call_args.kwargs["gpu_id"] == 1
         assert build.call_args.kwargs["total_gpu_memory_fraction"] == 0.7
         assert build.call_args.kwargs["server_args_overrides"] == {
