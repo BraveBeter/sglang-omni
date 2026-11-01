@@ -464,9 +464,6 @@ class MossSpeechProjectionGraphs:
             self.layers = ()
             self.prepared_model_state = None
             self.prepared_numerical_context = None
-            logger.info(
-                f"MOSS projection graphs closed replays={self.replays} fallbacks={self.fallbacks}"
-            )
             if first_error is not None:
                 raise first_error
             else:
