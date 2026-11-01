@@ -51,6 +51,7 @@ class MossSpeechVocoderArgs(FactoryArgs):
 
     codec_path: str | None = None
     chunk_size: Literal[5, 25] = 25
+    direct_lt_library: str | None = None
 
 
 class MossSpeechVocoderStage(StageConfig):

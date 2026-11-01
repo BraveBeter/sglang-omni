@@ -2,6 +2,8 @@
 """Codec loading, tensor ownership, audio boundaries and eager session accounting."""
 
 import copy
+import json
+import os
 import random
 import warnings
 from pathlib import Path
@@ -16,11 +18,19 @@ import torch
 from safetensors.torch import load_file, save_file
 
 import sglang_omni.models.moss_speech.components.voice as voice_module
+from sglang_omni.models.moss_speech.components.cfm_direct_lt import (
+    FULL_LENGTHS,
+    DirectLtLinear,
+    DirectLtOwner,
+)
 from sglang_omni.models.moss_speech.components.codec_adapter import (
     CodecAdapterError,
     MossSpeechCodecAdapter,
 )
-from sglang_omni.models.moss_speech.components.streaming_codec import load_flow_weights
+from sglang_omni.models.moss_speech.components.streaming_codec import (
+    MossSpeechStreamingCodec,
+    load_flow_weights,
+)
 from sglang_omni.models.moss_speech.components.voice import (
     CampplusSpeakerEncoder,
     VoiceConditioning,
@@ -36,6 +46,7 @@ from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.decoder import (
 )
 from sglang_omni.vendor.moss_speech_codec.hf_codec.modeling import scoped_global_rng
 from sglang_omni.vendor.moss_speech_codec.hf_codec.whisper import WhisperVQEncoder
+from tests.unit_test.fixtures.accelerator import require_cuda
 from tests.unit_test.fixtures.moss_speech_codec import (
     TinyHiFT,
     TinyOfflineDecoder,
@@ -409,3 +420,182 @@ def test_nonstream_audio_accepts_full_torch_seed_range_and_restores_rng(
         assert torch.equal(torch.get_rng_state(), caller_rng)
     finally:
         scheduler.stop()
+
+
+def test_direct_lt_cpu_gradient_fallback_keeps_parameters() -> None:
+    source = torch.nn.Linear(4, 3).eval()
+    wrapped = DirectLtLinear(source, DirectLtOwner.__new__(DirectLtOwner))
+    hidden = torch.randn(2, 4, requires_grad=True)
+    expected = source(hidden)
+    actual = wrapped(hidden)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    actual.sum().backward()
+    assert hidden.grad is not None and source.weight.grad is not None
+    assert wrapped.weight is source.weight and wrapped.bias is source.bias
+    assert wrapped.state_dict().keys() == source.state_dict().keys()
+
+
+@pytest.mark.accelerator
+def test_direct_lt_cuda_full_affine_ownership_and_fallback() -> None:
+    require_cuda()
+    library = os.environ.get("MOSS_DIRECT_LT_LIBRARY")
+    if not library:
+        pytest.skip("Set MOSS_DIRECT_LT_LIBRARY to test the optional backend")
+    else:
+        pass
+    state = torch.load(
+        Path(os.environ["MOSS_CODEC_PATH"]) / "flow/flow.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+    owner = DirectLtOwner(library)
+    old_tf32 = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = False
+    try:
+        with scoped_global_rng(), torch.inference_mode():
+            for width, features in ((512, 256), (1024, 256), (256, 1024), (256, 512)):
+                biased = features != 512
+                name = next(
+                    name
+                    for name, tensor in state.items()
+                    if isinstance(tensor, torch.Tensor)
+                    and name.endswith(".weight")
+                    and tuple(tensor.shape) == (features, width)
+                    and ((name[:-6] + "bias" in state) == biased)
+                )
+                source = torch.nn.Linear(
+                    width, features, bias=biased, device="cuda", dtype=torch.float32
+                ).eval()
+                source.weight.copy_(state[name])
+                if biased:
+                    source.bias.copy_(state[name[:-6] + "bias"])
+                else:
+                    pass
+                wrapped = DirectLtLinear(source, owner)
+                for length in FULL_LENGTHS:
+                    hidden = torch.randn(
+                        2, length, width, device="cuda", dtype=torch.float32
+                    )
+                    expected = source(hidden)
+                    before = owner.calls
+                    actual = wrapped(hidden)
+                    assert owner.calls == before + 1
+                    assert torch.equal(
+                        actual.view(torch.uint8), expected.view(torch.uint8)
+                    )
+                    saved = actual.clone()
+                    changed = wrapped(hidden + 0.125)
+                    assert changed.data_ptr() != actual.data_ptr()
+                    assert torch.equal(
+                        saved.view(torch.uint8), actual.view(torch.uint8)
+                    )
+                    source.weight.add_(0.001)
+                    torch.testing.assert_close(
+                        wrapped(hidden), source(hidden), rtol=0, atol=0
+                    )
+                assert len(wrapped.plans) == 4
+                wrapped.weight = torch.nn.Parameter(source.weight.clone())
+                torch.testing.assert_close(
+                    wrapped(hidden),
+                    torch.nn.functional.linear(hidden, wrapped.weight, wrapped.bias),
+                    rtol=0,
+                    atol=0,
+                )
+                before = owner.calls
+                alternate = torch.cuda.Stream()
+                alternate.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(alternate):
+                    other = wrapped(hidden)
+                alternate.synchronize()
+                assert owner.calls == before
+                torch.testing.assert_close(
+                    other,
+                    torch.nn.functional.linear(hidden, wrapped.weight, wrapped.bias),
+                    rtol=0,
+                    atol=0,
+                )
+                wrapped.train()
+                torch.testing.assert_close(
+                    wrapped(hidden),
+                    torch.nn.functional.linear(hidden, wrapped.weight, wrapped.bias),
+                    rtol=0,
+                    atol=0,
+                )
+                assert owner.calls == before
+            assert owner.calls > 0
+            alternate_owner = DirectLtOwner(library)
+            try:
+                wrapped.eval()
+                wrapped.owner = alternate_owner
+                torch.testing.assert_close(
+                    wrapped(hidden),
+                    torch.nn.functional.linear(hidden, wrapped.weight, wrapped.bias),
+                    rtol=0,
+                    atol=0,
+                )
+                assert alternate_owner.calls == 1 and owner.calls == before
+            finally:
+                alternate_owner.close()
+                wrapped.owner = owner
+            owner.close()
+            wrapped.eval()
+            torch.testing.assert_close(
+                wrapped(hidden),
+                torch.nn.functional.linear(hidden, wrapped.weight, wrapped.bias),
+                rtol=0,
+                atol=0,
+            )
+            assert owner.calls == before
+    finally:
+        owner.close()
+        torch.backends.cuda.matmul.allow_tf32 = old_tf32
+
+
+@pytest.mark.accelerator
+def test_direct_lt_real_codec_interleaves_exact_pcm_and_releases() -> None:
+    require_cuda()
+    library = os.environ.get("MOSS_DIRECT_LT_LIBRARY")
+    if not library:
+        pytest.skip("Set MOSS_DIRECT_LT_LIBRARY to test the optional backend")
+    else:
+        pass
+    codec_path = os.environ["MOSS_CODEC_PATH"]
+    oracle = load_file(os.environ["MOSS_ENCODER_GOLDEN"], device="cuda")
+    voice = {
+        name: oracle["voice." + name]
+        for name in ("prompt_token", "prompt_feat", "embedding")
+    }
+    profile = json.loads(Path(os.environ["MOSS_CODE_PROFILE"]).read_text())
+    codes = profile["cases"]["codes32"]["complete_decode_code_ledger"] * 2
+    baseline = MossSpeechStreamingCodec(codec_path, chunk_size=25, device="cuda:0")
+    candidate = MossSpeechStreamingCodec(
+        codec_path,
+        chunk_size=25,
+        device="cuda:0",
+        direct_lt_library=library,
+    )
+    old_tf32 = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = False
+    try:
+        expected = {}
+        for request_id, seed in (("red", 42), ("blue", 43)):
+            baseline.begin(request_id, voice, seed=seed)
+            expected[request_id] = baseline.push(request_id, codes[:36])
+            expected[request_id] += baseline.push(request_id, codes[36:], final=True)
+            candidate.begin(request_id, voice, seed=seed)
+        actual = {}
+        for request_id in ("red", "blue"):
+            actual[request_id] = candidate.push(request_id, codes[:36])
+        candidate.begin("cancelled", voice, seed=44)
+        candidate.cleanup("cancelled")
+        for request_id in ("blue", "red"):
+            actual[request_id] += candidate.push(request_id, codes[36:], final=True)
+            left, right = torch.cat(actual[request_id]), torch.cat(expected[request_id])
+            assert torch.equal(left.view(torch.uint8), right.view(torch.uint8))
+        assert candidate.direct_lt is not None and candidate.direct_lt.calls > 0
+        assert not candidate.sessions
+    finally:
+        candidate.close()
+        baseline.close()
+        torch.backends.cuda.matmul.allow_tf32 = old_tf32
+    assert candidate.direct_lt.closed

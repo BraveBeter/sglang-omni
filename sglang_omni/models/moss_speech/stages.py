@@ -179,6 +179,7 @@ def create_audio_vocoder_executor(
     model_path: str,
     *,
     chunk_size: int,
+    direct_lt_library: str | None = None,
     codec_path: str | None = None,
     device: str | None = None,
     gpu_id: int | None = None,
@@ -190,10 +191,14 @@ def create_audio_vocoder_executor(
         device=concrete_device,
         load_encoder=False,
         load_decoder=True,
+        direct_lt_library=direct_lt_library,
     )
     try:
         streaming_codec = MossSpeechStreamingCodec(
-            codec_directory, chunk_size=chunk_size, device=concrete_device
+            codec_directory,
+            chunk_size=chunk_size,
+            device=concrete_device,
+            direct_lt_library=direct_lt_library,
         )
     except BaseException:
         offline_codec.close()

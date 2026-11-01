@@ -11,6 +11,10 @@ from typing import TypedDict
 import numpy as np
 import torch
 
+from sglang_omni.models.moss_speech.components.cfm_direct_lt import (
+    DirectLtOwner,
+    install_direct_lt,
+)
 from sglang_omni.models.moss_speech.hf_config import MAX_CONTEXT_TOKENS
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.flow import (
     CausalMaskedDiffWithXvec,
@@ -75,6 +79,7 @@ class MossSpeechStreamingCodec:
         codec_path: str | Path | None,
         *,
         chunk_size: int,
+        direct_lt_library: str | None = None,
         device: str | torch.device,
         flow: CausalMaskedDiffWithXvec | None = None,
         hift: HiFTGenerator | None = None,
@@ -119,6 +124,13 @@ class MossSpeechStreamingCodec:
             pass
         self.flow = flow
         self.hift = hift
+        self.direct_lt: DirectLtOwner | None = None
+        if direct_lt_library is not None:
+            self.direct_lt = install_direct_lt(
+                self.flow.decoder.estimator, direct_lt_library
+            )
+        else:
+            pass
 
     def begin(
         self, request_id: str, voice: dict[str, torch.Tensor], *, seed: int
@@ -348,3 +360,7 @@ class MossSpeechStreamingCodec:
     def close(self) -> None:
         with self.lock:
             self.sessions.clear()
+            if self.direct_lt is not None:
+                self.direct_lt.close()
+            else:
+                pass
