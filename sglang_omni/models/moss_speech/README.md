@@ -92,7 +92,7 @@ Set modalities to ["text"] in the speech-input example for speech-to-text, or us
 
 The optional output budget max_tokens (or native max_new_tokens) counts generated two-channel grid rows, including delimiters. When omitted or null, the server uses 40,960 minus the actual canonical prompt rows after left-padding removal. An explicit positive budget must fit that same remaining context; there is no separate 200-row default or 1000-row generation ceiling. Generation stops early at the model EOS, or returns finish_reason="length" when the effective budget is exhausted. A prompt filling all 40,960 rows is rejected because at least one generation row is required. Streaming text, audio and Codec accumulation remain bounded by the total context, while the AR scheduler enforces each request's effective budget. A successful HTTP response does not establish task compliance or audio quality.
 
-The checkpoint supports a total context of 40,960 two-channel rows. Preprocessing uses exact canonical token counts rather than character estimates; the default engine context is 40,960; the shared KV pool has 40,962 physical slots, including two allocator/admission guards. The model-specific scheduler sentinel accounts for upstream clipping without reducing the logical window. Prompt plus requested generation budget must fit that window. The independent output budget is 1–1000 rows (default 200); it is not the model context size. Raising the total context increases KV memory and does not guarantee four simultaneous full-window requests.
+The checkpoint supports a total context of 40,960 two-channel rows. Preprocessing uses exact canonical token counts rather than character estimates; the default engine context is 40,960; the shared KV pool has 40,962 physical slots, including two allocator/admission guards. The model-specific scheduler sentinel accounts for upstream clipping without reducing the logical window. Prompt plus requested generation budget must fit that window. Raising the total context increases KV memory and does not guarantee four simultaneous full-window requests.
 
 ## Validation status
 
@@ -101,6 +101,8 @@ The eager base has passed local CPU regressions, native CUDA checks, four-mode s
 Third-party source revisions, retained notices and outstanding statement scope are documented in [vendored source provenance](../../vendor/moss_speech_codec/VENDORED_SOURCES.md). Checkpoint terms are separate from source terms; no weights are bundled.
 
 ### Mixed-output admission measurements
+
+The measurements below belong to the historical 084f62ef eager base. They do not qualify this port to the 40,960-row eager base; that requires fresh correctness and performance validation.
 
 Local single- and dual-A800 checks covered serial/concurrent text and audio outputs, streaming/buffered responses, cancellation, and recovery. Complete outputs matched across the admission settings and placements. The measured configuration uses BF16 AR, FP32 codec, chunk size 25, and max_running_requests=2. Higher concurrency has not been evaluated for this option.
 
