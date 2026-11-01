@@ -2,8 +2,11 @@
 """Small neural boundaries for the real MOSS codec and scheduler contracts."""
 
 import queue
+import random
 from pathlib import Path
+from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 from safetensors.torch import save_file
@@ -21,6 +24,7 @@ from sglang_omni.models.moss_speech.payload_types import (
     MODALITY_PAD_TOKEN_ID,
     MossSpeechState,
 )
+from sglang_omni.models.moss_speech.stages import create_audio_vocoder_executor
 from sglang_omni.models.moss_speech.streaming import (
     MossSpeechStreamingText,
     MossSpeechStreamingVocoder,
@@ -259,3 +263,113 @@ def drain_messages(
             messages.append(scheduler.outbox.get_nowait())
         except queue.Empty:
             return messages
+
+
+def assert_shared_hift_checkpoint_behavior(
+    codec_path: Path,
+    voice_path: Path,
+    codes: list[int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Check complete PCM, active-session isolation and both shared-owner lifetimes."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    with MossSpeechCodecAdapter(
+        codec_path, device=device, load_encoder=True, load_decoder=False
+    ) as encoder:
+        voice = encoder.encode_voice_ref(voice_path)
+    shared = create_audio_vocoder_executor(
+        "unused", chunk_size=25, codec_path=str(codec_path), device=str(device)
+    )
+    independent = MossSpeechStreamingCodec(codec_path, chunk_size=25, device=device)
+    offline = MossSpeechCodecAdapter(
+        codec_path, device=device, load_encoder=False, load_decoder=True
+    )
+
+    def decode_offline(adapter: MossSpeechCodecAdapter) -> torch.Tensor:
+        with scoped_global_rng():
+            random.seed(42)
+            np.random.seed(42)
+            torch.manual_seed(42)
+            return adapter.decode(codes, voice, request_id="offline")[1]
+
+    def decode_stream(codec: MossSpeechStreamingCodec) -> torch.Tensor:
+        codec.begin("stream", voice.to_dict(), seed=42)
+        return torch.cat(
+            codec.push("stream", codes[:36])
+            + codec.push("stream", codes[36:], final=True)
+        )
+
+    try:
+        assert shared.offline_codec.decoder is not None
+        assert shared.codec.hift is shared.offline_codec.decoder.hift
+        assert shared.offline_codec.decode_lock is shared.codec.lock
+        assert shared.codec.hift is not independent.hift
+        assert offline.decoder is not None
+        assert shared.codec.hift is not offline.decoder.hift
+        for module in (shared.codec.flow, shared.codec.hift, offline.decoder):
+            assert all(parameter.device == device for parameter in module.parameters())
+        with (
+            torch.inference_mode(),
+            torch.backends.cudnn.flags(
+                enabled=torch.backends.cudnn.enabled,
+                benchmark=False,
+                deterministic=True,
+                allow_tf32=torch.backends.cudnn.allow_tf32,
+            ),
+        ):
+            expected_stream = decode_stream(independent)
+            expected_offline = decode_offline(offline)
+            caller_cpu_rng = torch.get_rng_state().clone()
+            caller_cuda_rng = torch.cuda.get_rng_state(device).clone()
+            shared.codec.begin("live-a", voice.to_dict(), seed=42)
+            shared.codec.begin("live-b", voice.to_dict(), seed=42)
+            first_a = shared.codec.push("live-a", codes[:36])
+            first_b = shared.codec.push("live-b", codes[:36])
+            assert first_a and first_b
+            assert set(shared.codec.sessions) == {"live-a", "live-b"}
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    shared.offline_codec.decoder.flow,
+                    "inference",
+                    Mock(side_effect=RuntimeError("Injected offline flow failure")),
+                )
+                with pytest.raises(RuntimeError, match="offline flow failure"):
+                    decode_offline(shared.offline_codec)
+            assert not shared.offline_codec.sessions
+            assert set(shared.codec.sessions) == {"live-a", "live-b"}
+            torch.testing.assert_close(
+                decode_offline(shared.offline_codec), expected_offline, rtol=0, atol=0
+            )
+            shared.codec.begin("failed", voice.to_dict(), seed=42)
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    shared.codec.flow,
+                    "inference",
+                    Mock(side_effect=RuntimeError("Injected streaming flow failure")),
+                )
+                with pytest.raises(RuntimeError, match="streaming flow failure"):
+                    shared.codec.push("failed", codes, final=True)
+            assert set(shared.codec.sessions) == {"live-a", "live-b"}
+            torch.testing.assert_close(
+                decode_offline(shared.offline_codec), expected_offline, rtol=0, atol=0
+            )
+            for request_id, first in (("live-a", first_a), ("live-b", first_b)):
+                actual = torch.cat(
+                    first + shared.codec.push(request_id, codes[36:], final=True)
+                )
+                torch.testing.assert_close(actual, expected_stream, rtol=0, atol=0)
+            assert not shared.codec.sessions and not shared.offline_codec.sessions
+            shared.codec.close()
+            torch.testing.assert_close(
+                decode_offline(shared.offline_codec), expected_offline, rtol=0, atol=0
+            )
+            shared.offline_codec.close()
+            torch.testing.assert_close(
+                decode_stream(shared.codec), expected_stream, rtol=0, atol=0
+            )
+            assert torch.equal(torch.get_rng_state(), caller_cpu_rng)
+            assert torch.equal(torch.cuda.get_rng_state(device), caller_cuda_rng)
+    finally:
+        shared.stop()
+        independent.close()
+        offline.close()

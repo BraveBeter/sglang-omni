@@ -2,6 +2,8 @@
 """Codec loading, tensor ownership, audio boundaries and eager session accounting."""
 
 import copy
+import json
+import os
 import random
 import warnings
 from pathlib import Path
@@ -42,6 +44,7 @@ from tests.unit_test.fixtures.moss_speech_codec import (
     TinyFlow,
     TinyHiFT,
     TinyOfflineDecoder,
+    assert_shared_hift_checkpoint_behavior,
     audio_payload,
     encoder_adapter,
     offline_adapter,
@@ -473,3 +476,20 @@ def test_vocoder_factory_shares_hift_with_serial_ownership(
         assert not adapter.decoder.hift.should_fail
         executor.stop()
         adapter.close.assert_called_once()
+
+
+@pytest.mark.accelerator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_cuda_shared_hift_preserves_real_pcm_and_lifetime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asset_names = ("MOSS_CODEC_PATH", "MOSS_AUDIO_VOICE", "MOSS_CODE_PROFILE")
+    if not all(os.environ.get(name) for name in asset_names):
+        pytest.skip("Explicit codec, voice and code-profile assets are required")
+    profile = json.loads(Path(os.environ["MOSS_CODE_PROFILE"]).read_text())
+    assert_shared_hift_checkpoint_behavior(
+        Path(os.environ["MOSS_CODEC_PATH"]),
+        Path(os.environ["MOSS_AUDIO_VOICE"]),
+        profile["base_en_codes"][:60],
+        monkeypatch,
+    )
