@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
 import torch
@@ -25,10 +26,13 @@ from sglang_omni.models.moss_speech.fsm import (
     sample_row,
     stop_hit,
 )
+from sglang_omni.models.moss_speech.payload_types import MossSpeechState
 from sglang_omni.models.moss_speech.request_data import MossSpeechSGLangRequestData
 from sglang_omni.models.moss_speech.sglang_model import MossSpeechSGLangModel
 from sglang_omni.scheduling.sglang_backend.output_processor import SGLangOutputProcessor
 from sglang_omni.scheduling.types import SchedulerRequest
+
+logger = logging.getLogger(__name__)
 
 
 def moss_request_data(request: SchedulerRequest) -> MossSpeechSGLangRequestData:
@@ -38,10 +42,15 @@ def moss_request_data(request: SchedulerRequest) -> MossSpeechSGLangRequestData:
 
 class MossSpeechModelRunner(ModelRunner[MossSpeechSGLangRequestData]):
     def __init__(
-        self, tp_worker: ModelWorker, output_processor: SGLangOutputProcessor
+        self,
+        tp_worker: ModelWorker,
+        output_processor: SGLangOutputProcessor,
+        *,
+        mixed_modalities: bool = False,
     ) -> None:
         super().__init__(tp_worker, output_processor)
         assert isinstance(self.model, MossSpeechSGLangModel)
+        self.report_mixed_batch = mixed_modalities
 
     def rows_to_embeddings(self, rows: torch.Tensor) -> torch.Tensor:
         rows = rows.to(device=self.model.embed_tokens.weight.device, dtype=torch.long)
@@ -251,6 +260,26 @@ class MossSpeechModelRunner(ModelRunner[MossSpeechSGLangRequestData]):
         result.next_token_ids = torch.tensor(
             selected_tokens, dtype=torch.long, device=logits_device
         )
+        if self.report_mixed_batch and len(requests) > 1:
+            output_modalities = set()
+            for request in requests:
+                payload = moss_request_data(request).stage_payload
+                assert payload is not None
+                if isinstance(payload.data, MossSpeechState):
+                    output_modalities.add(payload.data.output_modality)
+                elif isinstance(payload.data, dict):
+                    output_modalities.add(payload.data["output_modality"])
+                else:
+                    raise TypeError("MOSS-Speech batch has invalid request state")
+            if output_modalities == {"text", "audio"}:
+                self.report_mixed_batch = False
+                logger.info(
+                    f"MOSS-Speech executed mixed-output AR batch phase={phase} requests={len(requests)}"
+                )
+            else:
+                pass
+        else:
+            pass
 
     def lookahead_eligible(self, batch: ScheduleBatch) -> bool:
         """Dual-channel history must be committed before the following step."""

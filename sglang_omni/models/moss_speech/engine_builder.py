@@ -186,7 +186,9 @@ class MossSpeechEngineBuilder(
     def make_model_runner(
         self, model_worker: ModelWorker, output_proc: SGLangOutputProcessor
     ) -> MossSpeechModelRunner:
-        return MossSpeechModelRunner(model_worker, output_proc)
+        return MossSpeechModelRunner(
+            model_worker, output_proc, mixed_modalities=self.mixed_modalities
+        )
 
     def post_scheduler_setup(
         self,

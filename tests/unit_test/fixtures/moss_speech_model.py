@@ -32,6 +32,7 @@ class RowCommitRunner(MossSpeechModelRunner):
 
     def __init__(self, model: MossSpeechSGLangModel) -> None:
         self.model = model
+        self.report_mixed_batch = False
 
 
 @contextmanager

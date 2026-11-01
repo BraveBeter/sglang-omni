@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import torch
 from sglang.srt.configs.model_config import ModelConfig
+from sglang.srt.managers.scheduler import GenerationBatchResult
 from transformers import Qwen3Config
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm, Qwen3RotaryEmbedding
@@ -21,9 +22,18 @@ from sglang_omni.models.moss_speech.model_layers import (
     reference_rope_frequencies,
     request_linear,
 )
+from sglang_omni.models.moss_speech.payload_types import MossSpeechState
+from sglang_omni.models.moss_speech.request_builders import (
+    make_moss_speech_scheduler_adapters,
+)
+from sglang_omni.models.moss_speech.request_data import MossSpeechSGLangRequestData
+from sglang_omni.models.moss_speech.request_lifecycle import MossSpeechRequestLifecycle
 from sglang_omni.models.moss_speech.sglang_model import MossSpeechSGLangModel
+from sglang_omni.proto.request import OmniRequest, StagePayload
+from sglang_omni.scheduling.types import SchedulerRequest
 from tests.unit_test.fixtures.accelerator import require_cuda
 from tests.unit_test.fixtures.moss_speech_model import (
+    RowCommitRunner,
     checkpoint_weights,
     decode,
     native_runtime,
@@ -296,3 +306,115 @@ def test_native_cuda_prefill_decode_keep_requests_and_tail_kv_independent() -> N
         pytest.skip("Run the accelerator lane without the CPU engine override")
     else:
         assert_native_request_isolation(torch.device("cuda", 0))
+
+
+@pytest.mark.accelerator
+def test_mixed_output_cuda_batch_preserves_complete_heads_and_kv(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    require_cuda()
+    if os.environ.get("SGLANG_USE_CPU_ENGINE") == "1":
+        pytest.skip("Run the accelerator lane without the CPU engine override")
+    else:
+        pass
+    device = torch.device("cuda", 0)
+    with native_runtime(device), torch.no_grad():
+        model = tiny_model(device, audio_vocab_size=1024)
+        assert all(parameter.device == device for parameter in model.parameters())
+        runner = RowCommitRunner(model)
+        lifecycle = MossSpeechRequestLifecycle(model, mixed_modalities=True)
+        build, _ = make_moss_speech_scheduler_adapters(lifecycle=lifecycle)
+        requests = []
+        for request_id, output_modality, rows in (
+            ("text", "text", [[12, 512], [13, 512]]),
+            ("audio", "audio", [[151667, 7], [151667, 8], [151667, 9]]),
+        ):
+            state = MossSpeechState(
+                input_grid=rows,
+                output_modality=output_modality,
+                max_new_tokens=4,
+                temperature=0,
+                top_k=1,
+                repetition_penalty=1,
+            )
+            with torch.device("cpu"):
+                request = build(
+                    StagePayload(request_id, OmniRequest(inputs=None), state.to_dict())
+                )
+            assert isinstance(request, MossSpeechSGLangRequestData)
+            requests.append(request)
+        assert lifecycle.snapshot() == {"requests": 2, "active": 2, "pending": 0}
+        prompts = [
+            runner.rows_to_embeddings(request.prompt_rows) for request in requests
+        ]
+        feedback = runner.rows_to_embeddings(torch.tensor([[14, 512], [151667, 10]]))
+        packed_prefill, packed_backend = prefill(model, prompts, ["text", "audio"])
+        packed_decode = decode(
+            model, packed_backend, [2, 3], feedback, ["text", "audio"]
+        )
+        for index, prompt in enumerate(prompts):
+            isolated_prefill, isolated_backend = prefill(model, [prompt], ["isolated"])
+            isolated_decode = decode(
+                model,
+                isolated_backend,
+                [len(prompt)],
+                feedback[index : index + 1],
+                ["isolated"],
+            )
+            for packed, isolated in (
+                (packed_prefill.text_logits, isolated_prefill.text_logits),
+                (packed_prefill.audio_logits, isolated_prefill.audio_logits),
+                (packed_decode.text_logits, isolated_decode.text_logits),
+                (packed_decode.audio_logits, isolated_decode.audio_logits),
+            ):
+                assert packed is not None and isolated is not None
+                torch.testing.assert_close(packed[index], isolated[0], rtol=0, atol=0)
+            packed_slots = packed_backend.req_to_token_pool.req_to_token[
+                index + 1, : len(prompt) + 1
+            ].long()
+            isolated_slots = isolated_backend.req_to_token_pool.req_to_token[
+                1, : len(prompt) + 1
+            ].long()
+            for layer_id in model.attention_layer_ids():
+                for packed_buffer, isolated_buffer in (
+                    (
+                        packed_backend.token_to_kv_pool.get_key_buffer(layer_id),
+                        isolated_backend.token_to_kv_pool.get_key_buffer(layer_id),
+                    ),
+                    (
+                        packed_backend.token_to_kv_pool.get_value_buffer(layer_id),
+                        isolated_backend.token_to_kv_pool.get_value_buffer(layer_id),
+                    ),
+                ):
+                    torch.testing.assert_close(
+                        packed_buffer[packed_slots],
+                        isolated_buffer[isolated_slots],
+                        rtol=0,
+                        atol=0,
+                    )
+        runner.report_mixed_batch = True
+        scheduled = [
+            SchedulerRequest(request_id=request.req.rid, data=request)
+            for request in requests
+        ]
+        with (
+            torch.device("cpu"),
+            caplog.at_level(
+                "INFO", logger="sglang_omni.models.moss_speech.model_runner"
+            ),
+        ):
+            runner.collect_step(GenerationBatchResult(), scheduled, phase="decode")
+            decode(model, packed_backend, [2, 3], feedback, ["text", "audio"])
+            runner.collect_step(GenerationBatchResult(), scheduled, phase="decode")
+        assert (
+            sum(
+                "executed mixed-output AR batch" in record.message
+                for record in caplog.records
+            )
+            == 1
+        )
+        assert not runner.report_mixed_batch
+        assert all(len(request.output_rows) == 2 for request in requests)
+        for request_id in ("text", "audio"):
+            lifecycle.release(request_id)
+        assert lifecycle.snapshot() == {"requests": 0, "active": 0, "pending": 0}
