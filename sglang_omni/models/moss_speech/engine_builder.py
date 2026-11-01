@@ -10,9 +10,11 @@ from sglang.srt.arg_groups.model_override_base import (
     attention_backends_of,
     resolved_view,
 )
+from sglang.srt.layers.attention.torch_native_backend import TorchNativeAttnBackend
 from sglang.srt.server_args import ServerArgs
 
 from sglang_omni.model_runner.model_worker import ModelWorker
+from sglang_omni.models.moss_speech.attention import MossSpeechTorchNativeBackend
 from sglang_omni.models.moss_speech.hf_config import (
     KV_RESERVE_TOKENS,
     ensure_moss_speech_config_registered,
@@ -48,9 +50,16 @@ class MossSpeechEngineBuilder(
     model_arch_override = "MossSpeechForCausalLM"
     supports_context_length_override = True
 
-    def __init__(self, context_length: int | None = None, *, streaming: bool) -> None:
+    def __init__(
+        self,
+        context_length: int | None = None,
+        *,
+        streaming: bool,
+        use_host_attention_metadata: bool = False,
+    ) -> None:
         super().__init__()
         self.streaming = streaming
+        self.use_host_attention_metadata = use_host_attention_metadata
         self.request_lifecycle: MossSpeechRequestLifecycle | None = None
         if context_length is None:
             pass
@@ -145,6 +154,17 @@ class MossSpeechEngineBuilder(
             raise ValueError(f"{self.model_name}: {', '.join(problems)}")
         else:
             pass
+        if self.use_host_attention_metadata and (
+            configuration.enable_pdmux
+            or configuration.enable_two_batch_overlap
+            or configuration.enable_single_batch_overlap
+            or configuration.speculative_algorithm is not None
+        ):
+            raise ValueError(
+                "MOSS host attention metadata requires ordinary eager execution without PDmux, overlap, or speculation"
+            )
+        else:
+            pass
 
     def setup_model(
         self,
@@ -171,6 +191,29 @@ class MossSpeechEngineBuilder(
         model.decode_input_embedding = model.decode_input_embedding.to(
             torch.device(device)
         )
+        if self.use_host_attention_metadata:
+            runner = model_worker.model_runner
+            original_backend = runner.attn_backend
+            if (
+                type(original_backend) is not TorchNativeAttnBackend
+                or runner.decode_attn_backend is not None
+                or runner.decode_attn_backend_group
+            ):
+                raise ValueError(
+                    "MOSS host attention metadata requires one plain TorchNative attention backend"
+                )
+            else:
+                replacement = MossSpeechTorchNativeBackend(runner)
+                replacement.prefill_attention_backend_str = (
+                    original_backend.prefill_attention_backend_str
+                )
+                replacement.decode_attention_backend_str = (
+                    original_backend.decode_attention_backend_str
+                )
+                runner.kv_index_translator.bind_and_verify_backends([replacement])
+                runner.attn_backend = replacement
+        else:
+            pass
 
     def make_model_runner(
         self, model_worker: ModelWorker, output_proc: SGLangOutputProcessor

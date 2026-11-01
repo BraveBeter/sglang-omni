@@ -40,6 +40,7 @@ class MossSpeechEngineArgs(FactoryArgs):
 
     dtype: str = "bfloat16"
     context_length: int = Field(default=MAX_CONTEXT_TOKENS, ge=1, le=MAX_CONTEXT_TOKENS)
+    use_host_attention_metadata: bool = False
 
 
 class MossSpeechEngineStage(EngineStageConfig):

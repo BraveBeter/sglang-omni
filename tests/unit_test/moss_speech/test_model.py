@@ -2,16 +2,22 @@
 """Native weight-loading, numerical, and dual-tail attention contracts."""
 
 import os
+import weakref
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import torch
 from sglang.srt.configs.model_config import ModelConfig
+from sglang.srt.layers.radix_attention import RadixAttention
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from torch.nn.functional import scaled_dot_product_attention
 from transformers import Qwen3Config
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm, Qwen3RotaryEmbedding
 
 from sglang_omni.model_runner.model_worker import ModelWorker
+from sglang_omni.models.moss_speech.attention import MossSpeechTorchNativeBackend
 from sglang_omni.models.moss_speech.hf_config import (
     MossSpeechConfig,
     ensure_moss_speech_config_registered,
@@ -240,7 +246,9 @@ def test_rope_frequencies_keep_cpu_float32_reference_values(
     torch.testing.assert_close(frequencies, reference.inv_freq, rtol=0, atol=0)
 
 
-def assert_native_request_isolation(device: torch.device) -> None:
+def assert_native_request_isolation(
+    device: torch.device, *, use_host_attention_metadata: bool
+) -> None:
     with native_runtime(device), torch.no_grad():
         generator = torch.Generator(device=device).manual_seed(183)
         model = tiny_model(device)
@@ -250,13 +258,21 @@ def assert_native_request_isolation(device: torch.device) -> None:
         ]
         feedback_embeddings = torch.randn((2, 128), generator=generator, device=device)
         packed_prefill, packed_backend = prefill(
-            model, prompt_embeddings, ["first", "second"]
+            model,
+            prompt_embeddings,
+            ["first", "second"],
+            use_host_attention_metadata=use_host_attention_metadata,
         )
         packed_decode = decode(
             model, packed_backend, [2, 3], feedback_embeddings, ["first", "second"]
         )
         for request_index, prompt in enumerate(prompt_embeddings):
-            isolated_prefill, isolated_backend = prefill(model, [prompt], ["isolated"])
+            isolated_prefill, isolated_backend = prefill(
+                model,
+                [prompt],
+                ["isolated"],
+                use_host_attention_metadata=use_host_attention_metadata,
+            )
             isolated_decode = decode(
                 model,
                 isolated_backend,
@@ -285,14 +301,324 @@ def assert_native_request_isolation(device: torch.device) -> None:
 
 
 @NATIVE_CPU
-def test_native_cpu_prefill_decode_keep_requests_and_tail_kv_independent() -> None:
-    assert_native_request_isolation(torch.device("cpu"))
+@pytest.mark.parametrize("use_host_attention_metadata", [False, True])
+def test_native_cpu_prefill_decode_keep_requests_and_tail_kv_independent(
+    use_host_attention_metadata: bool,
+) -> None:
+    assert_native_request_isolation(
+        torch.device("cpu"), use_host_attention_metadata=use_host_attention_metadata
+    )
 
 
 @pytest.mark.accelerator
-def test_native_cuda_prefill_decode_keep_requests_and_tail_kv_independent() -> None:
+@pytest.mark.parametrize("use_host_attention_metadata", [False, True])
+def test_native_cuda_prefill_decode_keep_requests_and_tail_kv_independent(
+    use_host_attention_metadata: bool,
+) -> None:
     require_cuda()
     if os.environ.get("SGLANG_USE_CPU_ENGINE") == "1":
         pytest.skip("Run the accelerator lane without the CPU engine override")
     else:
-        assert_native_request_isolation(torch.device("cuda", 0))
+        assert_native_request_isolation(
+            torch.device("cuda", 0),
+            use_host_attention_metadata=use_host_attention_metadata,
+        )
+
+
+def assert_host_attention_matches_native(
+    device: torch.device, *, prompt_lengths: tuple[int, int] = (2, 3)
+) -> None:
+    with native_runtime(device), torch.no_grad():
+        model = tiny_model(device)
+        assert all(parameter.device == device for parameter in model.parameters())
+        generator = torch.Generator(device=device).manual_seed(691)
+        prompts = [
+            torch.randn((length, 128), generator=generator, device=device)
+            for length in prompt_lengths
+        ]
+        feedback = torch.randn((2, 128), generator=generator, device=device)
+        # note (Codex): Metadata allocation must stay on CPU even when the model is on CUDA.
+        with torch.device("cpu"):
+            baseline_output, baseline = prefill(
+                model, prompts, ["first", "second"], request_slots=[3, 1]
+            )
+            candidate_output, candidate = prefill(
+                model,
+                prompts,
+                ["first", "second"],
+                request_slots=[3, 1],
+                use_host_attention_metadata=True,
+            )
+            assert isinstance(candidate, MossSpeechTorchNativeBackend)
+            for baseline_logits, candidate_logits in (
+                (baseline_output.text_logits, candidate_output.text_logits),
+                (baseline_output.audio_logits, candidate_output.audio_logits),
+            ):
+                torch.testing.assert_close(
+                    baseline_logits, candidate_logits, rtol=0, atol=0
+                )
+            for decode_lengths, slots, request_ids in (
+                ([prompt_lengths[1], prompt_lengths[0]], [1, 3], ["second", "first"]),
+                ([prompt_lengths[0] + 1], [3], ["first"]),
+            ):
+                baseline_output = decode(
+                    model,
+                    baseline,
+                    decode_lengths,
+                    feedback[: len(slots)],
+                    request_ids,
+                    request_slots=slots,
+                )
+                candidate_output = decode(
+                    model,
+                    candidate,
+                    decode_lengths,
+                    feedback[: len(slots)],
+                    request_ids,
+                    request_slots=slots,
+                )
+                for baseline_logits, candidate_logits in (
+                    (baseline_output.text_logits, candidate_output.text_logits),
+                    (baseline_output.audio_logits, candidate_output.audio_logits),
+                ):
+                    torch.testing.assert_close(
+                        baseline_logits, candidate_logits, rtol=0, atol=0
+                    )
+                for layer_index in range(model.total_attention_layers):
+                    for baseline_cache, candidate_cache in (
+                        (
+                            baseline.token_to_kv_pool.get_key_buffer(layer_index),
+                            candidate.token_to_kv_pool.get_key_buffer(layer_index),
+                        ),
+                        (
+                            baseline.token_to_kv_pool.get_value_buffer(layer_index),
+                            candidate.token_to_kv_pool.get_value_buffer(layer_index),
+                        ),
+                    ):
+                        torch.testing.assert_close(
+                            baseline_cache[1 : sum(prompt_lengths) + 3],
+                            candidate_cache[1 : sum(prompt_lengths) + 3],
+                            rtol=0,
+                            atol=0,
+                        )
+
+
+@NATIVE_CPU
+def test_host_metadata_cpu_preserves_model_logits_and_all_tail_kv() -> None:
+    assert_host_attention_matches_native(torch.device("cpu"))
+
+
+@pytest.mark.accelerator
+def test_host_metadata_cuda_preserves_model_logits_and_all_tail_kv() -> None:
+    require_cuda()
+    if os.environ.get("SGLANG_USE_CPU_ENGINE") == "1":
+        pytest.skip("Run the accelerator lane without the CPU engine override")
+    else:
+        assert_host_attention_matches_native(torch.device("cuda", 0))
+
+
+@NATIVE_CPU
+@pytest.mark.parametrize("use_cpu_mirrors", [False, True])
+def test_host_metadata_prefix_freshness_and_lifetime_use_real_sdpa(
+    use_cpu_mirrors: bool,
+) -> None:
+    device = torch.device("cpu")
+    with native_runtime(device), torch.no_grad():
+        model = tiny_model(device)
+        generator = torch.Generator(device=device).manual_seed(421)
+        prompts = [torch.randn((length, 128), generator=generator) for length in (2, 3)]
+        _, baseline = prefill(model, prompts, ["first", "second"], request_slots=[3, 1])
+        _, candidate = prefill(
+            model,
+            prompts,
+            ["first", "second"],
+            request_slots=[3, 1],
+            use_host_attention_metadata=True,
+        )
+        assert isinstance(candidate, MossSpeechTorchNativeBackend)
+        layer = RadixAttention(
+            num_heads=2, head_dim=64, scaling=64**-0.5, num_kv_heads=1, layer_id=0
+        )
+        batch = ForwardBatch(
+            forward_mode=ForwardMode.EXTEND,
+            batch_size=2,
+            input_ids=torch.zeros(3, dtype=torch.long),
+            req_pool_indices=torch.tensor([3, 1]),
+            req_pool_indices_cpu=torch.tensor([3, 1]),
+            seq_lens=torch.tensor([4, 4], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([4, 4], dtype=torch.int64),
+            seq_lens_sum=8,
+            out_cache_loc=torch.tensor([6, 7, 8]),
+            extend_seq_lens=torch.tensor([2, 1], dtype=torch.int32),
+            extend_prefix_lens=torch.tensor([2, 3], dtype=torch.int32),
+            extend_seq_lens_cpu=[2, 1],
+            extend_prefix_lens_cpu=[2, 3],
+        )
+        if not use_cpu_mirrors:
+            batch.seq_lens_cpu = None
+            batch.req_pool_indices_cpu = None
+            batch.extend_seq_lens_cpu = None
+            batch.extend_prefix_lens_cpu = None
+        with pytest.raises(RuntimeError, match="this forward batch"):
+            candidate.host_batch_view(batch)
+        for backend in (baseline, candidate):
+            backend.req_to_token_pool.req_to_token[3, 2:4] = torch.tensor([6, 7])
+            backend.req_to_token_pool.req_to_token[1, 3] = 8
+            backend.init_forward_metadata(batch)
+        original_fields = vars(batch).copy()
+        if use_cpu_mirrors:
+            batch.seq_lens_cpu.zero_()
+            batch.req_pool_indices_cpu.zero_()
+            batch.extend_seq_lens_cpu[:] = [0, 0]
+            batch.extend_prefix_lens_cpu[:] = [0, 0]
+        snapshot = candidate.host_metadata
+        assert snapshot is not None
+        assert snapshot.sequence_lengths.device.type == "cpu"
+        assert snapshot.sequence_lengths.dtype == batch.seq_lens.dtype
+        assert snapshot.request_slots.device.type == "cpu"
+        assert snapshot.extend_lengths.device.type == "cpu"
+        assert snapshot.extend_prefix_lengths.device.type == "cpu"
+        q = torch.randn((3, 128), generator=generator)
+        k = torch.randn((3, 1, 64), generator=generator)
+        v = torch.randn((3, 1, 64), generator=generator)
+        expected = baseline.forward_extend(q, k, v, layer, batch)
+        actual = candidate.forward_extend(q, k, v, layer, batch)
+        references = []
+        query_offset = 0
+        for token_slots, prefix_length, extend_length in (
+            ([1, 2, 6, 7], 2, 2),
+            ([3, 4, 5, 8], 3, 1),
+        ):
+            query = (
+                q[query_offset : query_offset + extend_length]
+                .view(-1, 2, 64)
+                .movedim(0, 1)
+            )
+            keys = candidate.token_to_kv_pool.get_key_buffer(0)[token_slots].movedim(
+                0, 1
+            )
+            values = candidate.token_to_kv_pool.get_value_buffer(0)[
+                token_slots
+            ].movedim(0, 1)
+            mask = (
+                torch.arange(4)[None, :]
+                <= prefix_length + torch.arange(extend_length)[:, None]
+            )
+            references.append(
+                scaled_dot_product_attention(
+                    query[None],
+                    keys[None],
+                    values[None],
+                    attn_mask=mask,
+                    enable_gqa=True,
+                    scale=layer.scaling,
+                )
+                .squeeze(0)
+                .movedim(0, 1)
+                .reshape(extend_length, 128)
+            )
+            query_offset += extend_length
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(actual, torch.cat(references), rtol=0, atol=0)
+        cached_keys = candidate.token_to_kv_pool.get_key_buffer(0)[1:9].clone()
+        cached_values = candidate.token_to_kv_pool.get_value_buffer(0)[1:9].clone()
+        torch.testing.assert_close(
+            candidate.forward_extend(
+                q, k + 1, v + 1, layer, batch, save_kv_cache=False
+            ),
+            actual,
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            candidate.token_to_kv_pool.get_key_buffer(0)[1:9],
+            cached_keys,
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            candidate.token_to_kv_pool.get_value_buffer(0)[1:9],
+            cached_values,
+            rtol=0,
+            atol=0,
+        )
+        assert all(
+            vars(batch)[name] is value for name, value in original_fields.items()
+        )
+        assert batch.seq_lens.tolist() == [4, 4]
+        assert batch.req_pool_indices.tolist() == [3, 1]
+        assert batch.extend_seq_lens.tolist() == [2, 1]
+        assert batch.extend_prefix_lens.tolist() == [2, 3]
+        assert batch.out_cache_loc.tolist() == [6, 7, 8]
+        stale_batch = batch
+        batch = ForwardBatch(
+            forward_mode=ForwardMode.DECODE,
+            batch_size=1,
+            input_ids=torch.zeros(1, dtype=torch.long),
+            req_pool_indices=torch.tensor([1]),
+            req_pool_indices_cpu=torch.tensor([3]),
+            seq_lens=torch.tensor([4], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([4], dtype=torch.int64),
+            seq_lens_sum=4,
+            out_cache_loc=torch.tensor([8]),
+        )
+        candidate.init_forward_metadata(batch)
+        assert candidate.host_metadata.request_slots.tolist() == [1]
+        with pytest.raises(RuntimeError, match="this forward batch"):
+            candidate.host_batch_view(stale_batch)
+        torch.testing.assert_close(
+            candidate.forward_decode(
+                q[:1], None, None, layer, batch, save_kv_cache=False
+            ),
+            baseline.forward_decode(
+                q[:1], None, None, layer, batch, save_kv_cache=False
+            ),
+            rtol=0,
+            atol=0,
+        )
+        batch_reference = weakref.ref(batch)
+        del batch
+        assert batch_reference() is None
+        candidate.init_forward_metadata(
+            replace(stale_batch, forward_mode=ForwardMode.IDLE)
+        )
+        assert candidate.host_metadata is None
+        with pytest.raises(ValueError, match="ordinary extend or decode"):
+            candidate.init_forward_metadata(
+                replace(stale_batch, forward_mode=ForwardMode.MIXED)
+            )
+        assert candidate.host_metadata is None
+        recovered_batch = ForwardBatch(
+            forward_mode=ForwardMode.DECODE,
+            batch_size=1,
+            input_ids=torch.zeros(1, dtype=torch.long),
+            req_pool_indices=torch.tensor([3]),
+            seq_lens=torch.tensor([4], dtype=torch.int32),
+            seq_lens_sum=4,
+            out_cache_loc=torch.tensor([7]),
+        )
+        candidate.init_forward_metadata(recovered_batch)
+        assert candidate.host_metadata.request_slots.tolist() == [3]
+        torch.testing.assert_close(
+            candidate.forward_decode(
+                q[:1], None, None, layer, recovered_batch, save_kv_cache=False
+            ),
+            baseline.forward_decode(
+                q[:1], None, None, layer, recovered_batch, save_kv_cache=False
+            ),
+            rtol=0,
+            atol=0,
+        )
+
+
+@NATIVE_CPU
+def test_host_metadata_cpu_preserves_long_context_model_logits_and_kv() -> None:
+    assert_host_attention_matches_native(torch.device("cpu"), prompt_lengths=(1025, 3))
+
+
+@pytest.mark.accelerator
+def test_host_metadata_cuda_preserves_long_context_model_logits_and_kv() -> None:
+    require_cuda()
+    assert_host_attention_matches_native(
+        torch.device("cuda", 0), prompt_lengths=(1025, 3)
+    )

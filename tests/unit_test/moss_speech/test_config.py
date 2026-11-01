@@ -15,7 +15,10 @@ from unittest.mock import Mock, patch, sentinel
 import pytest
 import torch
 from pydantic import ValidationError
+from sglang.srt.layers.attention.torch_native_backend import TorchNativeAttnBackend
 from sglang.srt.mem_cache.allocator.token import TokenToKVPoolAllocator
+from sglang.srt.mem_cache.kv_index_translator import KVIndexTranslator
+from sglang.srt.server_args import ServerArgs
 from typer.testing import CliRunner
 
 from sglang_omni.cli import app
@@ -25,6 +28,9 @@ from sglang_omni.config.runtime import (
     resolve_stage_factory_arg_defaults,
     resolve_stage_typed_kwargs,
 )
+from sglang_omni.model_runner.model_worker import ModelWorker
+from sglang_omni.model_runner.sglang_model_runner import SGLModelRunner
+from sglang_omni.models.moss_speech.attention import MossSpeechTorchNativeBackend
 from sglang_omni.models.moss_speech.config import MossSpeechPipelineConfig
 from sglang_omni.models.moss_speech.engine_builder import MossSpeechEngineBuilder
 from sglang_omni.models.moss_speech.hf_config import MossSpeechConfig
@@ -36,6 +42,12 @@ from sglang_omni.models.moss_speech.stages import (
 )
 from sglang_omni.proto.request import OmniRequest, StagePayload
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
+from sglang_omni.vendor.sglang.server_args import override_server_args
+from tests.unit_test.fixtures.moss_speech_model import (
+    native_runtime,
+    prefill,
+    tiny_model,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DISCOVERY_PROGRAM = """
@@ -137,6 +149,8 @@ def test_cli_overrides_survive_serialization_without_cross_instance_leak() -> No
                 "5",
                 "--ar_engine.engine.max_running_requests",
                 "2",
+                "--ar_engine.factory.use_host_attention_metadata",
+                "true",
             ]
         )
     )
@@ -154,6 +168,18 @@ def test_cli_overrides_survive_serialization_without_cross_instance_leak() -> No
         == 5
     )
     assert restored.stage_named("ar_engine").engine.max_running_requests == 2
+    assert (
+        resolve_stage_typed_kwargs(restored.stage_named("ar_engine"))[
+            "use_host_attention_metadata"
+        ]
+        is True
+    )
+    assert (
+        resolve_stage_typed_kwargs(baseline.stage_named("ar_engine"))[
+            "use_host_attention_metadata"
+        ]
+        is False
+    )
     assert baseline == MossSpeechPipelineConfig(model_path="model")
 
 
@@ -259,7 +285,7 @@ def test_engine_rejects_unsupported_execution_policy(
     name: str, value: str | int | bool, message: str
 ) -> None:
     config = MossSpeechPipelineConfig(model_path="unused")
-    builder = MossSpeechEngineBuilder(streaming=True)
+    builder = MossSpeechEngineBuilder(streaming=True, use_host_attention_metadata=False)
     builder.server_args_overrides = config.stage_named("ar_engine").engine.overrides()
     overrides = dict(builder.generation_defaults(dtype="bfloat16"))
     overrides[name] = value
@@ -290,7 +316,11 @@ def test_typed_config_rejects_obsolete_or_untrained_knobs(
         MossSpeechPipelineConfig.model_validate(document)
 
 
-def test_ar_factory_preflights_and_forwards_placement_budget(tmp_path: Path) -> None:
+@pytest.mark.parametrize("use_host_attention_metadata", [False, True])
+def test_ar_factory_preflights_and_forwards_placement_budget(
+    tmp_path: Path,
+    use_host_attention_metadata: bool,
+) -> None:
     MossSpeechConfig(audio_vocab_size=16512).to_json_file(tmp_path / "config.json")
     with patch.object(MossSpeechEngineBuilder, "build", autospec=True) as build:
         build.return_value = sentinel.scheduler
@@ -298,6 +328,7 @@ def test_ar_factory_preflights_and_forwards_placement_budget(tmp_path: Path) -> 
             str(tmp_path),
             dtype="bfloat16",
             context_length=512,
+            use_host_attention_metadata=use_host_attention_metadata,
             gpu_id=1,
             total_gpu_memory_fraction=0.6,
             process_total_gpu_memory_fraction=0.7,
@@ -306,6 +337,7 @@ def test_ar_factory_preflights_and_forwards_placement_budget(tmp_path: Path) -> 
         assert scheduler is sentinel.scheduler
         builder = build.call_args.args[0]
         assert builder.context_length == 512
+        assert builder.use_host_attention_metadata is use_host_attention_metadata
         assert build.call_args.kwargs["gpu_id"] == 1
         assert build.call_args.kwargs["total_gpu_memory_fraction"] == 0.7
         assert build.call_args.kwargs["server_args_overrides"] == {
@@ -315,9 +347,138 @@ def test_ar_factory_preflights_and_forwards_placement_budget(tmp_path: Path) -> 
         }
         with pytest.raises(ValueError, match="BF16"):
             create_ar_engine_executor(
-                str(tmp_path), dtype="float16", context_length=512
+                str(tmp_path),
+                dtype="float16",
+                context_length=512,
+                use_host_attention_metadata=use_host_attention_metadata,
             )
         assert build.call_count == 1
+
+
+@pytest.mark.skipif(
+    os.environ.get("SGLANG_USE_CPU_ENGINE") != "1",
+    reason="Native CPU construction requires the official CPU engine flag",
+)
+@pytest.mark.parametrize("use_host_attention_metadata", [False, True])
+def test_host_metadata_builder_binds_only_its_backend(
+    use_host_attention_metadata: bool,
+) -> None:
+    with native_runtime(torch.device("cpu")), torch.no_grad():
+        model = tiny_model(torch.device("cpu"))
+        prompts = [torch.ones((2, 128), dtype=torch.bfloat16)]
+        _, original_backend = prefill(model, prompts, ["first"])
+        _, independent_backend = prefill(model, prompts, ["second"])
+        original_backend.prefill_attention_backend_str = "torch_native"
+        original_backend.decode_attention_backend_str = "torch_native"
+        runner = SGLModelRunner.__new__(SGLModelRunner)
+        runner.model = model
+        runner.device = "cpu"
+        runner.req_to_token_pool = original_backend.req_to_token_pool
+        runner.token_to_kv_pool = original_backend.token_to_kv_pool
+        runner.attn_backend = original_backend
+        runner.decode_attn_backend = None
+        runner.decode_attn_backend_group = []
+        runner.kv_index_translator = KVIndexTranslator(
+            req_to_token=runner.req_to_token_pool.req_to_token,
+            token_to_kv_pool_allocator=None,
+            token_to_kv_pool=runner.token_to_kv_pool,
+            page_size=1,
+            device="cpu",
+        )
+        runner.kv_index_translator.bind_and_verify_backends([original_backend])
+        worker = ModelWorker.__new__(ModelWorker)
+        worker.model_runner = runner
+        builder = MossSpeechEngineBuilder(
+            streaming=True, use_host_attention_metadata=use_host_attention_metadata
+        )
+        server_args = ServerArgs(
+            model_path="unused",
+            device="cpu",
+            dtype="bfloat16",
+            max_running_requests=2,
+            attention_backend="torch_native",
+            disable_cuda_graph=True,
+            disable_radix_cache=True,
+            chunked_prefill_size=-1,
+        )
+        builder.validate_before_infrastructure(server_args)
+        builder.setup_model(
+            model_worker=worker,
+            checkpoint_dir="unused",
+            device="cpu",
+            gpu_id=0,
+            server_args=server_args,
+        )
+        installed_backend = runner.attn_backend
+        if use_host_attention_metadata:
+            assert isinstance(installed_backend, MossSpeechTorchNativeBackend)
+            assert installed_backend is not original_backend
+        else:
+            assert installed_backend is original_backend
+        assert type(independent_backend) is TorchNativeAttnBackend
+        assert independent_backend.kv_index_translator is None
+        assert installed_backend.kv_index_translator is runner.kv_index_translator
+        assert installed_backend.req_to_token_pool is original_backend.req_to_token_pool
+        assert installed_backend.token_to_kv_pool is original_backend.token_to_kv_pool
+        assert installed_backend.prefill_attention_backend_str == "torch_native"
+        assert installed_backend.decode_attention_backend_str == "torch_native"
+        assert runner.decode_attn_backend is None
+        assert runner.decode_attn_backend_group == []
+        if use_host_attention_metadata:
+            for backend_name in ("decode_attn_backend", "decode_attn_backend_group"):
+                runner.attn_backend = original_backend
+                if backend_name == "decode_attn_backend":
+                    runner.decode_attn_backend = independent_backend
+                else:
+                    runner.decode_attn_backend = None
+                    runner.decode_attn_backend_group = [independent_backend]
+                with pytest.raises(ValueError, match="one plain TorchNative"):
+                    builder.setup_model(
+                        model_worker=worker,
+                        checkpoint_dir="unused",
+                        device="cpu",
+                        gpu_id=0,
+                        server_args=server_args,
+                    )
+                assert runner.attn_backend is original_backend
+            runner.decode_attn_backend = None
+            runner.decode_attn_backend_group = []
+            runner.attn_backend = installed_backend
+            with pytest.raises(ValueError, match="one plain TorchNative"):
+                builder.setup_model(
+                    model_worker=worker,
+                    checkpoint_dir="unused",
+                    device="cpu",
+                    gpu_id=0,
+                    server_args=server_args,
+                )
+
+
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        ("enable_pdmux", True),
+        ("enable_two_batch_overlap", True),
+        ("enable_single_batch_overlap", True),
+        ("speculative_algorithm", "EAGLE"),
+    ],
+)
+def test_host_metadata_rejects_unsupported_execution_profiles(
+    name: str, value: bool | str
+) -> None:
+    server_args = ServerArgs(
+        model_path="unused",
+        device="cpu",
+        dtype="bfloat16",
+        attention_backend="torch_native",
+        disable_cuda_graph=True,
+        disable_radix_cache=True,
+        chunked_prefill_size=-1,
+    )
+    override_server_args(server_args, "test_host_metadata_profile", **{name: value})
+    builder = MossSpeechEngineBuilder(streaming=True, use_host_attention_metadata=True)
+    with pytest.raises(ValueError, match="ordinary eager execution"):
+        builder.validate_before_infrastructure(server_args)
 
 
 def test_missing_voice_fails_before_loading_codec(tmp_path: Path) -> None:

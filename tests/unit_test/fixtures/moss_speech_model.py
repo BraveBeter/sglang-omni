@@ -12,6 +12,7 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMo
 from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
 from sglang.srt.runtime_context import get_context, get_parallel
 
+from sglang_omni.models.moss_speech.attention import MossSpeechTorchNativeBackend
 from sglang_omni.models.moss_speech.hf_config import MossSpeechConfig
 from sglang_omni.models.moss_speech.model_runner import MossSpeechModelRunner
 from sglang_omni.models.moss_speech.sglang_model import (
@@ -145,18 +146,25 @@ def prefill(
     model: MossSpeechSGLangModel,
     prompt_embeddings: list[torch.Tensor],
     request_ids: list[str],
+    *,
+    use_host_attention_metadata: bool = False,
+    request_slots: list[int] | None = None,
 ) -> tuple[MossSpeechModelOutput, TorchNativeAttnBackend]:
     device = model.embed_tokens.weight.device
     token_lengths = [embeddings.shape[0] for embeddings in prompt_embeddings]
     token_count = sum(token_lengths)
+    if request_slots is None:
+        request_slots = list(range(1, len(token_lengths) + 1))
+    else:
+        assert len(request_slots) == len(token_lengths)
     request_pool = ReqToTokenPool(
-        size=len(token_lengths),
-        max_context_len=16,
+        size=max(request_slots),
+        max_context_len=max(16, max(token_lengths) + 2),
         device=str(device),
         enable_memory_saver=False,
     )
     kv_pool = MHATokenToKVPool(
-        size=32,
+        size=max(32, token_count + len(token_lengths) + 2),
         page_size=1,
         dtype=torch.bfloat16,
         head_num=model.config.num_key_value_heads,
@@ -167,12 +175,17 @@ def prefill(
         enable_alt_stream=False,
     )
     next_slot = 1
-    for request_index, token_length in enumerate(token_lengths, 1):
+    for request_index, token_length in zip(request_slots, token_lengths, strict=True):
         request_pool.req_to_token[request_index, :token_length] = torch.arange(
             next_slot, next_slot + token_length, device=device
         )
         next_slot += token_length
-    backend = TorchNativeAttnBackend(
+    backend_class = (
+        MossSpeechTorchNativeBackend
+        if use_host_attention_metadata
+        else TorchNativeAttnBackend
+    )
+    backend = backend_class(
         AttentionPools(
             device=str(device),
             req_to_token_pool=request_pool,
@@ -183,8 +196,10 @@ def prefill(
         forward_mode=ForwardMode.EXTEND,
         batch_size=len(token_lengths),
         input_ids=torch.zeros(token_count, dtype=torch.long, device=device),
-        req_pool_indices=torch.arange(1, len(token_lengths) + 1, device=device),
+        req_pool_indices=torch.tensor(request_slots, device=device),
         seq_lens=torch.tensor(token_lengths, dtype=torch.int32, device=device),
+        seq_lens_cpu=torch.tensor(token_lengths, dtype=torch.int64, device="cpu"),
+        req_pool_indices_cpu=torch.tensor(request_slots, device="cpu"),
         out_cache_loc=torch.arange(1, token_count + 1, device=device),
         seq_lens_sum=token_count,
         positions=torch.cat(
@@ -216,29 +231,40 @@ def decode(
     prompt_lengths: list[int],
     feedback_embeddings: torch.Tensor,
     request_ids: list[str],
+    *,
+    request_slots: list[int] | None = None,
 ) -> MossSpeechModelOutput:
     device = model.embed_tokens.weight.device
     batch_size = len(prompt_lengths)
+    if request_slots is None:
+        request_slots = list(range(1, batch_size + 1))
+    else:
+        assert len(request_slots) == batch_size
     token_slots = torch.arange(
         sum(prompt_lengths) + 1,
         sum(prompt_lengths) + 1 + batch_size,
         device=device,
     )
-    for request_index, token_length in enumerate(prompt_lengths, 1):
+    for batch_index, (request_index, token_length) in enumerate(
+        zip(request_slots, prompt_lengths, strict=True)
+    ):
         backend.req_to_token_pool.req_to_token[request_index, token_length] = (
-            token_slots[request_index - 1]
+            token_slots[batch_index]
         )
     model.decode_input_embedding.weight[:batch_size].copy_(feedback_embeddings)
     batch = ForwardBatch(
         forward_mode=ForwardMode.DECODE,
         batch_size=batch_size,
         input_ids=torch.arange(batch_size, device=device),
-        req_pool_indices=torch.arange(1, batch_size + 1, device=device),
+        req_pool_indices=torch.tensor(request_slots, device=device),
         seq_lens=torch.tensor(
             [length + 1 for length in prompt_lengths], dtype=torch.int32, device=device
         ),
         out_cache_loc=token_slots,
         seq_lens_sum=sum(prompt_lengths) + batch_size,
+        seq_lens_cpu=torch.tensor(
+            [length + 1 for length in prompt_lengths], dtype=torch.int64, device="cpu"
+        ),
         positions=torch.tensor(prompt_lengths, device=device),
         rids=request_ids,
     )

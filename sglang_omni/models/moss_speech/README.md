@@ -38,7 +38,22 @@ Both placements use tensor parallel size one: the dual-GPU configuration places 
 
 Use the real-checkpoint smoke below to validate startup, output contracts, and recovery on the target GPUs. Measure deployment capacity and performance separately with fixed requests and output budgets.
 
-Set deployment values through typed stage configuration, for example preprocessing.factory.voice_wav, preprocessing.factory.codec_path, audio_vocoder.factory.codec_path, and ar_engine.engine.max_running_requests. The streaming codec uses chunk_size=25, declared once in the vocoder factory configuration. Optional optimization flags from the experimental branch are not part of this pipeline.
+Set deployment values through typed stage configuration, for example preprocessing.factory.voice_wav, preprocessing.factory.codec_path, audio_vocoder.factory.codec_path, and ar_engine.engine.max_running_requests. The streaming codec uses chunk_size=25, declared once in the vocoder factory configuration.
+
+### Optional host attention metadata
+
+The experimental ar_engine.factory.use_host_attention_metadata option defaults to false. Enable it explicitly through typed configuration or the CLI:
+
+```bash
+sgl-omni serve --config examples/configs/moss_speech.yaml \
+  --ar_engine.factory.use_host_attention_metadata true
+```
+
+This option snapshots small attention index vectors on CPU once per forward and delegates attention and KV writes to the existing torch_native backend. It reuses current SGLang CPU length mirrors and ordinary-extend request-slot mirrors. Decode reads the device request-slot vector once per forward because its CPU mirror has no freshness guarantee. Missing mirrors use one bulk CPU copy per vector. Temporary per-layer batch views leave the original batch and its device tensors unchanged; the backend retains only CPU indices, with no request history, reference-audio cache, or GPU batch cache.
+
+The supported profile is BF16, tensor parallel size one, eager decoder-only torch_native attention, with prefix caching and chunked prefill disabled. CUDA graphs, compile, PDmux, overlap, speculative modes and wrapped or separate decode backends are rejected when this option is enabled. The option is independent of sampling-history and codec optimizations.
+
+Historical old-base A800 checks covered real CUDA attention/KV comparisons, four-mode streaming/buffered requests, and request isolation. Their mixed concurrency-one timing results do not validate this migrated candidate. This option remains experimental and disabled by default pending new-base correctness and performance acceptance.
 
 ## Requests
 
@@ -84,7 +99,7 @@ Set modalities to ["text"] in the speech-input example for speech-to-text, or us
 
 The optional output budget max_tokens (or native max_new_tokens) counts generated two-channel grid rows, including delimiters. When omitted or null, the server uses 40,960 minus the actual canonical prompt rows after left-padding removal. An explicit positive budget must fit that same remaining context; there is no separate 200-row default or 1000-row generation ceiling. Generation stops early at the model EOS, or returns finish_reason="length" when the effective budget is exhausted. A prompt filling all 40,960 rows is rejected because at least one generation row is required. Streaming text, audio and Codec accumulation remain bounded by the total context, while the AR scheduler enforces each request's effective budget. A successful HTTP response does not establish task compliance or audio quality.
 
-The checkpoint supports a total context of 40,960 two-channel rows. Preprocessing uses exact canonical token counts rather than character estimates; the default engine context is 40,960; the shared KV pool has 40,962 physical slots, including two allocator/admission guards. The model-specific scheduler sentinel accounts for upstream clipping without reducing the logical window. Prompt plus requested generation budget must fit that window. The independent output budget is 1–1000 rows (default 200); it is not the model context size. Raising the total context increases KV memory and does not guarantee four simultaneous full-window requests.
+The checkpoint supports a total context of 40,960 two-channel rows. Preprocessing uses exact canonical token counts rather than character estimates; the default engine context is 40,960; the shared KV pool has 40,962 physical slots, including two allocator/admission guards. The model-specific scheduler sentinel accounts for upstream clipping without reducing the logical window. Prompt plus requested generation budget must fit that window. Raising the total context increases KV memory and does not guarantee four simultaneous full-window requests.
 
 ## Validation status
 
