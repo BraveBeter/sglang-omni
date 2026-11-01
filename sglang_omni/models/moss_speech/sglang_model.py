@@ -18,6 +18,8 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 
+from sglang_omni.models.moss_speech.decode_graphs import DecodeGraph
+from sglang_omni.models.moss_speech.graph_state import native_norm_calls
 from sglang_omni.models.moss_speech.hf_config import MossSpeechConfig
 from sglang_omni.models.moss_speech.model_layers import (
     MossSpeechDecoderLayer,
@@ -25,6 +27,8 @@ from sglang_omni.models.moss_speech.model_layers import (
     request_linear,
     request_norm,
 )
+from sglang_omni.models.moss_speech.prefill_graphs import PrefillGraphs
+from sglang_omni.models.moss_speech.projection_graphs import MossSpeechProjectionGraphs
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +106,10 @@ class MossSpeechSGLangModel(torch.nn.Module):
             dtype=self.dtype,
         )
         self.decode_input_embedding.weight.requires_grad_(False)
+        self.native_eager_reported = True
+        self.decode_graph: DecodeGraph | None = None
+        self.prefill_graph: PrefillGraphs | None = None
+        self.projection_graphs: MossSpeechProjectionGraphs | None = None
         self.dual_logits_by_request_id: dict[
             tuple[str, Literal["prefill", "decode"]], tuple[torch.Tensor, torch.Tensor]
         ] = {}
@@ -123,6 +131,59 @@ class MossSpeechSGLangModel(torch.nn.Module):
         input_embeds: torch.Tensor | None = None,
         omni_prefill_rids: list[str] | None = None,
     ) -> MossSpeechModelOutput:
+        graph = (
+            self.decode_graph
+            if forward_batch.forward_mode.is_decode()
+            else self.prefill_graph
+        )
+        output = (
+            graph.try_replay(input_ids, positions, forward_batch, input_embeds)
+            if graph is not None
+            else None
+        )
+        request_ids = (
+            forward_batch.rids if omni_prefill_rids is None else omni_prefill_rids
+        )
+        if output is None:
+            native_calls_before = (
+                native_norm_calls(self) if not self.native_eager_reported else 0
+            )
+            output = self.forward_eager(
+                input_ids, positions, forward_batch, input_embeds, omni_prefill_rids
+            )
+            if (
+                not self.native_eager_reported
+                and native_norm_calls(self) > native_calls_before
+            ):
+                self.native_eager_reported = True
+                logger.info(
+                    f"MOSS native norm eager request execution active requests={request_ids}"
+                )
+            else:
+                pass
+        else:
+            pass
+        assert len(request_ids) == output.text_logits.shape[0]
+        phase = "decode" if forward_batch.forward_mode.is_decode() else "prefill"
+        for i, request_id in enumerate(request_ids):
+            self.dual_logits_by_request_id[(request_id, phase)] = (
+                output.text_logits[i].clone(),
+                output.audio_logits[i].clone(),
+            )
+        return output
+
+    def forward_eager(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        input_embeds: torch.Tensor | None = None,
+        omni_prefill_rids: list[str] | None = None,
+        *,
+        rope_frequencies: torch.Tensor | None = None,
+        last_token_indices: torch.Tensor | None = None,
+        use_projection_graphs: bool = True,
+    ) -> MossSpeechModelOutput:
         is_decode = forward_batch.forward_mode.is_decode()
         if input_embeds is not None:
             hidden_states = input_embeds
@@ -136,21 +197,50 @@ class MossSpeechSGLangModel(torch.nn.Module):
             assert forward_batch.extend_seq_lens_cpu is not None
             token_lengths = list(forward_batch.extend_seq_lens_cpu)
         assert sum(token_lengths) == hidden_states.shape[0]
+        layer_kwargs = (
+            {} if rope_frequencies is None else {"rope_frequencies": rope_frequencies}
+        )
+        projection_runner = self.projection_graphs if use_projection_graphs else None
+        if projection_runner is not None and not projection_runner.can_replay(
+            hidden_states, positions, is_decode=is_decode
+        ):
+            projection_runner.fallbacks += 2 * self.total_attention_layers
+            projection_runner = None
+        else:
+            pass
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(
-                positions, hidden_states, forward_batch, token_lengths, residual
+                positions,
+                hidden_states,
+                forward_batch,
+                token_lengths,
+                residual,
+                projection_runner=projection_runner,
+                **layer_kwargs,
             )
         text_hidden, text_residual = hidden_states, residual
         audio_hidden = hidden_states.clone()
         audio_residual = residual.clone() if residual is not None else None
         for layer in self.text_block:
             text_hidden, text_residual = layer(
-                positions, text_hidden, forward_batch, token_lengths, text_residual
+                positions,
+                text_hidden,
+                forward_batch,
+                token_lengths,
+                text_residual,
+                projection_runner=projection_runner,
+                **layer_kwargs,
             )
         for layer in self.audio_block:
             audio_hidden, audio_residual = layer(
-                positions, audio_hidden, forward_batch, token_lengths, audio_residual
+                positions,
+                audio_hidden,
+                forward_batch,
+                token_lengths,
+                audio_residual,
+                projection_runner=projection_runner,
+                **layer_kwargs,
             )
         if text_residual is None or audio_residual is None:
             raise RuntimeError("MOSS-Speech requires nonempty modality tails")
@@ -162,25 +252,18 @@ class MossSpeechSGLangModel(torch.nn.Module):
         audio_final, _ = request_norm(
             self.audio_norm, audio_hidden, token_lengths, audio_residual
         )
-        last_token_indices = (
-            torch.tensor(token_lengths, device=text_final.device).cumsum(0) - 1
-        )
+        if last_token_indices is None:
+            last_token_indices = (
+                torch.tensor(token_lengths, device=text_final.device).cumsum(0) - 1
+            )
+        else:
+            pass
         text_logits = request_linear(
             text_final, self.text_lm_head.weight, token_lengths
         )[last_token_indices, : self.text_vocab_size]
         audio_logits = request_linear(
             audio_final, self.audio_lm_head.weight, token_lengths
         )[last_token_indices, : self.audio_vocab_size]
-        request_ids = (
-            forward_batch.rids if omni_prefill_rids is None else omni_prefill_rids
-        )
-        assert len(request_ids) == len(token_lengths)
-        phase = "decode" if is_decode else "prefill"
-        for i, request_id in enumerate(request_ids):
-            self.dual_logits_by_request_id[(request_id, phase)] = (
-                text_logits[i].clone(),
-                audio_logits[i].clone(),
-            )
         return MossSpeechModelOutput(
             next_token_logits=text_logits,
             text_logits=text_logits,
@@ -244,6 +327,15 @@ class MossSpeechSGLangModel(torch.nn.Module):
         }[shard]
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
+        for graph in (
+            self.decode_graph,
+            self.prefill_graph,
+            self.projection_graphs,
+        ):
+            if graph is not None:
+                graph.close()
+            else:
+                pass
         parameters = dict(self.named_parameters())
         shards_seen: dict[str, set[str]] = {}
         direct_seen: set[str] = set()

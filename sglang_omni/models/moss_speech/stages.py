@@ -142,6 +142,12 @@ def create_ar_engine_executor(
     *,
     dtype: str,
     context_length: int,
+    decode_graph: bool = False,
+    projection_graph_batch_size: int | None = None,
+    prefill_graph_lengths: list[int] | None = None,
+    native_norm_library: str | None = None,
+    use_host_attention_metadata: bool = False,
+    mixed_modalities: bool = False,
     device: str | None = None,
     gpu_id: int | None = None,
     total_gpu_memory_fraction: float | None = None,
@@ -157,7 +163,16 @@ def create_ar_engine_executor(
         overrides.setdefault("mem_fraction_static", process_total_gpu_memory_fraction)
     else:
         pass
-    return MossSpeechEngineBuilder(context_length=context_length, streaming=True).build(
+    return MossSpeechEngineBuilder(
+        context_length=context_length,
+        streaming=True,
+        decode_graph=decode_graph,
+        projection_graph_batch_size=projection_graph_batch_size,
+        prefill_graph_lengths=prefill_graph_lengths,
+        native_norm_library=native_norm_library,
+        use_host_attention_metadata=use_host_attention_metadata,
+        mixed_modalities=mixed_modalities,
+    ).build(
         model_path,
         device=device,
         gpu_id=gpu_id,

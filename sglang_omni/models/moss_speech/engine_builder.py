@@ -10,14 +10,24 @@ from sglang.srt.arg_groups.model_override_base import (
     attention_backends_of,
     resolved_view,
 )
+from sglang.srt.layers.attention.torch_native_backend import TorchNativeAttnBackend
 from sglang.srt.server_args import ServerArgs
 
 from sglang_omni.model_runner.model_worker import ModelWorker
+from sglang_omni.models.moss_speech.attention import MossSpeechTorchNativeBackend
+from sglang_omni.models.moss_speech.decode_graphs import DecodeGraph
 from sglang_omni.models.moss_speech.hf_config import (
     KV_RESERVE_TOKENS,
     ensure_moss_speech_config_registered,
 )
+from sglang_omni.models.moss_speech.model_layers import MossSpeechRMSNorm
 from sglang_omni.models.moss_speech.model_runner import MossSpeechModelRunner
+from sglang_omni.models.moss_speech.native_norm import NativeNorm
+from sglang_omni.models.moss_speech.prefill_graphs import (
+    PrefillGraphs,
+    validate_lengths,
+)
+from sglang_omni.models.moss_speech.projection_graphs import MossSpeechProjectionGraphs
 from sglang_omni.models.moss_speech.request_builders import (
     RequestBuilder,
     ResultAdapter,
@@ -36,6 +46,10 @@ from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 from sglang_omni.scheduling.sglang_backend.output_processor import SGLangOutputProcessor
 
 
+class RequestShutdown(Protocol):
+    def __call__(self) -> None: ...
+
+
 class RequestCallback(Protocol):
     def __call__(self, request_id: str) -> None: ...
 
@@ -48,9 +62,49 @@ class MossSpeechEngineBuilder(
     model_arch_override = "MossSpeechForCausalLM"
     supports_context_length_override = True
 
-    def __init__(self, context_length: int | None = None, *, streaming: bool) -> None:
+    def __init__(
+        self,
+        context_length: int | None = None,
+        *,
+        streaming: bool,
+        use_host_attention_metadata: bool = False,
+        mixed_modalities: bool = False,
+        decode_graph: bool = False,
+        projection_graph_batch_size: int | None = None,
+        prefill_graph_lengths: list[int] | None = None,
+        native_norm_library: str | None = None,
+    ) -> None:
+        for option_name, option in (
+            ("use_host_attention_metadata", use_host_attention_metadata),
+            ("mixed_modalities", mixed_modalities),
+            ("decode_graph", decode_graph),
+        ):
+            if type(option) is not bool:
+                raise ValueError(f"{option_name} must be a bool")
+            else:
+                pass
+        if projection_graph_batch_size is not None and (
+            type(projection_graph_batch_size) is not int
+            or not 1 <= projection_graph_batch_size <= 4
+        ):
+            raise ValueError(
+                "projection_graph_batch_size must be None or an integer in 1..4"
+            )
+        else:
+            pass
         super().__init__()
         self.streaming = streaming
+        self.use_host_attention_metadata = use_host_attention_metadata
+        self.mixed_modalities = mixed_modalities
+        self.decode_graph_enabled = decode_graph
+        self.projection_graph_batch_size = projection_graph_batch_size
+        self.prefill_graph_lengths = validate_lengths(prefill_graph_lengths)
+        self.native_norm_library = native_norm_library
+        self.decode_graph: DecodeGraph | None = None
+        self.prefill_graph: PrefillGraphs | None = None
+        self.projection_graphs: MossSpeechProjectionGraphs | None = None
+        self.projection_model: MossSpeechSGLangModel | None = None
+        self.attention_backend: TorchNativeAttnBackend | None = None
         self.request_lifecycle: MossSpeechRequestLifecycle | None = None
         if context_length is None:
             pass
@@ -145,6 +199,17 @@ class MossSpeechEngineBuilder(
             raise ValueError(f"{self.model_name}: {', '.join(problems)}")
         else:
             pass
+        if self.use_host_attention_metadata and (
+            configuration.enable_pdmux
+            or configuration.enable_two_batch_overlap
+            or configuration.enable_single_batch_overlap
+            or configuration.speculative_algorithm is not None
+        ):
+            raise ValueError(
+                "MOSS host attention metadata requires ordinary eager execution without PDmux, overlap, or speculation"
+            )
+        else:
+            pass
 
     def setup_model(
         self,
@@ -171,11 +236,139 @@ class MossSpeechEngineBuilder(
         model.decode_input_embedding = model.decode_input_embedding.to(
             torch.device(device)
         )
+        if self.native_norm_library is not None:
+            native_norm = NativeNorm(self.native_norm_library)
+            model.native_eager_reported = False
+            for module in model.modules():
+                if isinstance(module, MossSpeechRMSNorm):
+                    module.native_norm = native_norm
+                else:
+                    pass
+        else:
+            pass
+        if self.use_host_attention_metadata:
+            runner = model_worker.model_runner
+            original_backend = runner.attn_backend
+            if (
+                type(original_backend) is not TorchNativeAttnBackend
+                or runner.decode_attn_backend is not None
+                or runner.decode_attn_backend_group
+            ):
+                raise ValueError(
+                    "MOSS host attention metadata requires one plain TorchNative attention backend"
+                )
+            else:
+                replacement = MossSpeechTorchNativeBackend(runner)
+                replacement.prefill_attention_backend_str = (
+                    original_backend.prefill_attention_backend_str
+                )
+                replacement.decode_attention_backend_str = (
+                    original_backend.decode_attention_backend_str
+                )
+                runner.kv_index_translator.bind_and_verify_backends([replacement])
+                runner.attn_backend = replacement
+        else:
+            pass
+
+        self.attention_backend = model_worker.model_runner.attn_backend
+
+    def setup_model_resources(
+        self,
+        model: torch.nn.Module,
+        server_args: ServerArgs,
+        *,
+        generation_cuda_graph_enabled: bool,
+    ) -> None:
+        if not (
+            self.decode_graph_enabled
+            or self.prefill_graph_lengths
+            or self.projection_graph_batch_size is not None
+        ):
+            return
+        elif generation_cuda_graph_enabled or not isinstance(
+            model, MossSpeechSGLangModel
+        ):
+            raise ValueError("AR graphs require the native eager MOSS model")
+        elif self.projection_model is not None or any(
+            (model.decode_graph, model.prefill_graph, model.projection_graphs)
+        ):
+            raise ValueError("MOSS model already owns AR graphs")
+        else:
+            self.projection_model = model
+        try:
+            if self.decode_graph_enabled:
+                assert self.attention_backend is not None
+                self.decode_graph = DecodeGraph(model, self.attention_backend)
+                self.decode_graph.initialize()
+                model.decode_graph = self.decode_graph
+            else:
+                pass
+            if self.prefill_graph_lengths:
+                assert self.attention_backend is not None
+                self.prefill_graph = PrefillGraphs(
+                    model, self.attention_backend, self.prefill_graph_lengths
+                )
+                self.prefill_graph.initialize()
+                model.prefill_graph = self.prefill_graph
+            else:
+                pass
+            if self.projection_graph_batch_size is not None:
+                self.projection_graphs = MossSpeechProjectionGraphs(
+                    [*model.layers, *model.text_block, *model.audio_block],
+                    batch_size=self.projection_graph_batch_size,
+                )
+                model.projection_graphs = self.projection_graphs
+            else:
+                pass
+        except BaseException as original_error:
+            try:
+                self.cleanup_build_failure()
+            except BaseException as close_error:
+                raise original_error from close_error
+            raise
+
+    def extra_scheduler_callbacks(self) -> dict[str, RequestShutdown | None]:
+        if self.projection_model is None:
+            return {}
+        else:
+            return {"shutdown_callback": self.cleanup_build_failure}
+
+    def cleanup_build_failure(self) -> None:
+        first_error: BaseException | None = None
+        for attribute in ("decode_graph", "prefill_graph", "projection_graphs"):
+            graph = getattr(self, attribute)
+            try:
+                if graph is not None:
+                    graph.close()
+                else:
+                    pass
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+                else:
+                    pass
+            finally:
+                if (
+                    self.projection_model is not None
+                    and getattr(self.projection_model, attribute) is graph
+                ):
+                    setattr(self.projection_model, attribute, None)
+                else:
+                    pass
+                setattr(self, attribute, None)
+        self.projection_model = None
+        self.attention_backend = None
+        if first_error is not None:
+            raise first_error
+        else:
+            pass
 
     def make_model_runner(
         self, model_worker: ModelWorker, output_proc: SGLangOutputProcessor
     ) -> MossSpeechModelRunner:
-        return MossSpeechModelRunner(model_worker, output_proc)
+        return MossSpeechModelRunner(
+            model_worker, output_proc, mixed_modalities=self.mixed_modalities
+        )
 
     def post_scheduler_setup(
         self,
@@ -195,7 +388,9 @@ class MossSpeechEngineBuilder(
         self, model: torch.nn.Module
     ) -> tuple[RequestBuilder, ResultAdapter]:
         assert isinstance(model, MossSpeechSGLangModel)
-        self.request_lifecycle = MossSpeechRequestLifecycle(model=model)
+        self.request_lifecycle = MossSpeechRequestLifecycle(
+            model=model, mixed_modalities=self.mixed_modalities
+        )
         return make_moss_speech_scheduler_adapters(lifecycle=self.request_lifecycle)
 
     def extra_scheduler_kwargs(self) -> SchedulerExtras[MossSpeechSGLangRequestData]:

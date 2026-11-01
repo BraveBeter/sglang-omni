@@ -128,3 +128,32 @@ The prepared speech inputs retain the first 20 seconds of each pinned reference 
 The smoke covers both languages, all four input/output modes, streaming and non-streaming, natural text EOS, audio length truncation, disconnect recovery, and invalid-request recovery. It retains HTTP responses, generated WAVs, usage, timing observations, asset hashes, and server logs. A first PCM event can contain silence; non-streaming TTFA and TTFT are unobserved. These observations have no calibrated performance or quality thresholds, and the chat API does not expose the native token grid for exact retained-code comparison.
 
 The central Omni workflow selects this dedicated smoke with the run-omni-ci and run-moss-speech labels. It does not add MOSS-Speech to the random model selection. Local checks and workflow wiring do not establish a successful remote CI run.
+
+## Optional AR execution paths
+
+All AR options below default to disabled. Set them under `ar_engine.factory`; they leave the 40,960-row context limit and omitted output-budget policy unchanged. Tensor parallel size one, BF16 weights/KV, native attention and the ordinary eager scheduler remain required.
+
+| Factory option | Eligible work | Preserved execution boundary |
+| :--- | :--- | :--- |
+| `decode_graph: true` | Ordinary B1 decode with an exact total sequence length in 1–512 | Startup captures retain each native SDPA shape; longer sequences use eager execution. |
+| `projection_graph_batch_size: 1` | Decode with exactly the configured batch size; values 1–4 are supported | Each request keeps its original GEMM and normalization shapes. Attention and KV writes remain outside these projection graphs. |
+| `prefill_graph_lengths: [N, ...]` | B1 full-prompt prefill with zero prefix and an explicitly listed exact length | Choose 1–8 unique lengths in 1–512. Each graph owns private KV and scatters every layer to the live request slots. |
+| `native_norm_library: /path/to/native_norm.so` | Supported SM80 BF16 normalization shapes | An explicit operator-built library replaces pointwise arithmetic and retains Torch mean reduction and BF16 rounding. |
+| `use_host_attention_metadata: true` | Ordinary extend/decode on the native backend | Fresh per-forward CPU snapshots replace repeated scalar reads; missing mirrors trigger one vector transfer. |
+| `mixed_modalities: true` | Text-output and audio-output requests admitted together | Request histories, dual heads, budgets and completion remain owned by each request. |
+
+Full decode, full prefill and projection graphs have separate dispatch guards and buffers. Full captures explicitly disable projection replay, so enabling both options does not nest captures. Supported B1 full decode takes priority over B1 projection replay; B1 projection can run on the eager fallback beyond 512 rows. With projection batch size four, B4 decode uses the projection path while B1 uses the full-decode bank. Host metadata and the native norm are installed before graph capture. Captured normalization implementations, epsilon values, library owners, weights and numerical policy are guarded; a changed signature uses eager execution. Outputs own their storage, and teardown attempts every graph even if another resource reports a cleanup error.
+
+The full graph families are qualified for Torch `2.14.1+cu130`, CUDA runtime `13.0` and SM80. Unsupported runtimes, batches, lengths, prefixes, hooks or execution contexts retain the eager path. Startup capture messages establish preparation only. First successful graph replays are logged separately; `native_norm_capture_calls` and `native_owners` identify a graph whose native normalization launches were captured and whose library remains owned. First successful host execution and eager native execution are also logged separately. An option being present in configuration does not establish that it ran.
+
+Mixed admission can improve a mixed workload's completion time while delaying individual audio requests; projection batch sizes and exact prompt banks target different workloads. Measure the selected combination against its own baseline and individual options with the same inputs and generation budget. These options do not establish a universal speedup or change the quality contract. Use `benchmark-client` correctness C00–C08 before a Quick performance comparison; retain the exact candidate revision, runtime configuration, input and library hashes. Full and Daily qualification and quality scoring are separate checks.
+
+Build the optional native library from this model directory and record both hashes:
+
+```bash
+nvcc -shared -Xcompiler=-fPIC -O3 -std=c++17 -arch=sm_80 --fmad=false \
+  -o /path/to/native_norm.so kernels/decode_norm_native.cu
+sha256sum kernels/decode_norm_native.cu /path/to/native_norm.so
+```
+
+The loader requires matching CUDA runtime headers and SM80. No compilation runs during import or request processing. Native norm supports contiguous BF16 `(1, 4096)`, `(1, 32, 128)` and `(1, 8, 128)` inputs without gradients; other inputs use the original Torch norm. The optional library is built separately from the source shipped in the package.

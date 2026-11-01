@@ -41,9 +41,12 @@ from tests.unit_test.fixtures.moss_speech_requests import (
 
 
 @pytest.fixture
-def lifecycle() -> Iterator[MossSpeechRequestLifecycle]:
+def lifecycle(request: pytest.FixtureRequest) -> Iterator[MossSpeechRequestLifecycle]:
     with native_runtime(torch.device("cpu")):
-        owner = MossSpeechRequestLifecycle(tiny_model(torch.device("cpu")))
+        owner = MossSpeechRequestLifecycle(
+            tiny_model(torch.device("cpu")),
+            mixed_modalities=getattr(request, "param", False),
+        )
         yield owner
         for request_id in list(owner.requests):
             owner.release(request_id)
@@ -63,11 +66,13 @@ def request_data(
     return build_sglang_moss_request(state, payload=payload)
 
 
+@pytest.mark.parametrize("lifecycle", [False, True], indirect=True)
 def test_abort_releases_only_matching_actual_request_and_model_logits(
     lifecycle: MossSpeechRequestLifecycle,
 ) -> None:
-    aborted, kept = request_data("aborted"), request_data("kept")
-    lifecycle.admit(aborted, "text")
+    modality = "audio" if lifecycle.mixed_modalities else "text"
+    aborted, kept = request_data("aborted", modality=modality), request_data("kept")
+    lifecycle.admit(aborted, modality)
     lifecycle.admit(kept, "text")
     aborted.output_rows = [(97, 512)]
     aborted.output_ids = [97]
@@ -89,6 +94,7 @@ def test_abort_releases_only_matching_actual_request_and_model_logits(
     assert torch.equal(kept.prompt_rows, torch.tensor([[12, 512], [13, 512]]))
 
 
+@pytest.mark.parametrize("lifecycle", [False, True], indirect=True)
 def test_duplicate_live_id_cannot_replace_existing_request(
     lifecycle: MossSpeechRequestLifecycle,
 ) -> None:
@@ -138,6 +144,61 @@ def test_modalities_admit_in_fifo_groups_and_cancel_pending_without_starvation(
     assert delayed_audio.ready.result(timeout=0) is None
 
 
+@pytest.mark.parametrize("lifecycle", [True], indirect=True)
+def test_mixed_output_adapters_admit_and_finish_each_request_independently(
+    lifecycle: MossSpeechRequestLifecycle,
+) -> None:
+    build, adapt = make_moss_speech_scheduler_adapters(lifecycle=lifecycle)
+    live = []
+    for request_id, modality in (
+        ("text-first", "text"),
+        ("audio", "audio"),
+        ("text-last", "text"),
+    ):
+        payload = request_data(request_id, modality=modality).stage_payload
+        assert payload is not None
+        admitted = build(payload)
+        assert isinstance(admitted, MossSpeechSGLangRequestData)
+        live.append(admitted)
+    assert lifecycle.snapshot() == {"requests": 3, "active": 3, "pending": 0}
+    assert lifecycle.active == {
+        "text-first": "text",
+        "audio": "audio",
+        "text-last": "text",
+    }
+    audio = live[1]
+    audio.output_rows.append((151667, 7))
+    audio.finish_reason = "length"
+    audio.rng_generator = torch.Generator().manual_seed(audio.effective_seed)
+    lifecycle.model.dual_logits_by_request_id[("audio", "decode")] = (
+        torch.ones(1),
+        torch.ones(1),
+    )
+    kept = live[0]
+    kept.pending_feedback_queue.append(torch.ones(128))
+    kept.rng_generator = torch.Generator().manual_seed(kept.effective_seed)
+    caller_state = kept.rng_generator.get_state().clone()
+    restored = MossSpeechState.from_dict(adapt(audio).data)
+    assert restored.output_modality == "audio" and restored.output_grid == [[151667, 7]]
+    assert restored.finish_reason == "length" and restored.effective_seed == 123
+    assert audio.finished and not audio.output_rows and audio.rng_generator is None
+    assert lifecycle.snapshot() == {"requests": 2, "active": 2, "pending": 0}
+    assert not lifecycle.model.dual_logits_by_request_id
+    assert len(kept.pending_feedback_queue) == 1
+    assert torch.equal(kept.rng_generator.get_state(), caller_state)
+    for data in (live[0], live[2]):
+        data.output_rows.append((97, 512))
+        assert MossSpeechState.from_dict(adapt(data).data).output_modality == "text"
+        assert (
+            data.finished and not data.output_rows and not data.pending_feedback_queue
+        )
+        assert data.effective_seed == 123 and torch.equal(
+            data.prompt_rows, torch.tensor([[12, 512], [13, 512]])
+        )
+    assert lifecycle.snapshot() == {"requests": 0, "active": 0, "pending": 0}
+
+
+@pytest.mark.parametrize("lifecycle", [False, True], indirect=True)
 def test_cancel_before_late_builder_admission_leaves_no_live_resources(
     lifecycle: MossSpeechRequestLifecycle,
 ) -> None:
@@ -212,6 +273,7 @@ def test_result_adapter_failure_still_releases_its_actual_owner(
     assert built.finished
 
 
+@pytest.mark.parametrize("lifecycle", [False, True], indirect=True)
 def test_retry_keeps_prompt_seed_and_restarts_generated_history(
     lifecycle: MossSpeechRequestLifecycle,
 ) -> None:
