@@ -2,10 +2,13 @@
 """Explicit CUDA pointwise library with the original Torch mean reduction."""
 
 import ctypes
+import logging
 import math
 from pathlib import Path
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 class NativeNorm:
@@ -120,4 +123,8 @@ class NativeNorm:
             raise RuntimeError(f"Native norm finish launch failed: {result}")
         else:
             self.calls += 1
+            if self.calls == 1:
+                logger.info("MOSS native norm pointwise execution active")
+            else:
+                pass
         return output
