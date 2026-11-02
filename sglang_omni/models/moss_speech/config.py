@@ -3,7 +3,7 @@
 
 from typing import ClassVar, Literal
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, StrictBool
 
 from sglang_omni.config import (
     EngineArgs,
@@ -51,6 +51,7 @@ class MossSpeechVocoderArgs(FactoryArgs):
 
     codec_path: str | None = None
     chunk_size: Literal[5, 25] = 25
+    broadcast_attention_bias: StrictBool = False
 
 
 class MossSpeechVocoderStage(StageConfig):

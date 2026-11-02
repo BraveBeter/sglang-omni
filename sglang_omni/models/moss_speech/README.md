@@ -40,6 +40,8 @@ Use the real-checkpoint smoke below to validate startup, output contracts, and r
 
 Set deployment values through typed stage configuration, for example preprocessing.factory.voice_wav, preprocessing.factory.codec_path, audio_vocoder.factory.codec_path, and ar_engine.engine.max_running_requests. The streaming codec uses chunk_size=25, declared once in the vocoder factory configuration. Optional optimization flags from the experimental branch are not part of this pipeline.
 
+`audio_vocoder.factory.broadcast_attention_bias` is an optional strict boolean, defaulting to `false`. When enabled, both streaming and offline codec decoders use a live attention-bias broadcast for plain native CUDA FP32 B2 self-attention, avoiding physical head copies without caching bias values or changing the SDPA backend. Training, autograd, autocast, custom processors/preparers/hooks and unsupported shapes or dtypes retain the stock processor. The public mask-preparation API and checkpoint keys remain unchanged. A first actual optimized call emits `MOSS_CODEC_BIAS_BROADCAST_ACTIVE`; installation alone is not execution evidence. Local operator/Codec checks do not establish HTTP TTFA or RTF benefits.
+
 ## Requests
 
 The service defaults to port 8000 and accepts /v1/chat/completions. Input content determines the input modality; modalities selects one output modality, text or audio. For a buffered text response:

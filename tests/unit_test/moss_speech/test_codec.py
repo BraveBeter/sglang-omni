@@ -2,6 +2,9 @@
 """Codec loading, tensor ownership, audio boundaries and eager session accounting."""
 
 import copy
+import hashlib
+import json
+import os
 import random
 import warnings
 from pathlib import Path
@@ -13,6 +16,7 @@ import numpy as np
 import pytest
 import soundfile
 import torch
+from diffusers.models.attention_processor import Attention, AttnProcessor2_0
 from safetensors.torch import load_file, save_file
 
 import sglang_omni.models.moss_speech.components.voice as voice_module
@@ -36,6 +40,13 @@ from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.decoder import (
 )
 from sglang_omni.vendor.moss_speech_codec.hf_codec.modeling import scoped_global_rng
 from sglang_omni.vendor.moss_speech_codec.hf_codec.whisper import WhisperVQEncoder
+from sglang_omni.vendor.moss_speech_codec.matcha_components.bias_broadcast import (
+    LiveBiasBroadcastProcessor,
+    install_broadcast_bias_attention,
+)
+from tests.unit_test.fixtures.moss_speech_bias_broadcast import (
+    qualify_bias_broadcast_streaming,
+)
 from tests.unit_test.fixtures.moss_speech_codec import (
     TinyHiFT,
     TinyOfflineDecoder,
@@ -47,6 +58,121 @@ from tests.unit_test.fixtures.moss_speech_codec import (
     vocoder,
     voice_tensors,
 )
+
+
+def test_bias_broadcast_cpu_fallback_preserves_public_preparer() -> None:
+    with scoped_global_rng():
+        attention = Attention(query_dim=16, heads=2, dim_head=8).eval()
+        attention.set_processor(AttnProcessor2_0())
+        hidden_states = torch.randn(2, 7, 16)
+        attention_bias = torch.zeros(2, 7, 7)
+        expected = attention(hidden_states, attention_mask=attention_bias)
+        parameter_ids = {
+            name: id(parameter) for name, parameter in attention.named_parameters()
+        }
+        processors = install_broadcast_bias_attention(attention)
+        assert len(processors) == 1
+        assert isinstance(attention.processor, LiveBiasBroadcastProcessor)
+        actual = attention(hidden_states, attention_mask=attention_bias)
+        assert torch.equal(actual, expected)
+        assert processors[0].broadcast_calls == 0 and processors[0].fallback_calls == 1
+        assert attention.prepare_attention_mask(attention_bias, 7, 2).shape == (4, 7, 7)
+        assert parameter_ids == {
+            name: id(parameter) for name, parameter in attention.named_parameters()
+        }
+        custom_processor = Mock(wraps=AttnProcessor2_0())
+        attention.set_processor(custom_processor)
+        assert install_broadcast_bias_attention(attention) == ()
+        assert attention.processor is custom_processor
+
+
+@pytest.mark.accelerator
+def test_bias_broadcast_cuda_exact_live_inputs() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for actual bias broadcasting")
+    else:
+        pass
+    with scoped_global_rng(), torch.inference_mode():
+        generator = torch.Generator(device="cpu").manual_seed(20261102)
+        for head_count, frame_count in [
+            (2, 17),
+            (4, 32),
+            (8, 65),
+            (8, 1500),
+            (8, 1512),
+        ]:
+            attention = (
+                Attention(query_dim=256, heads=head_count, dim_head=64).cuda().eval()
+            )
+            attention.set_processor(AttnProcessor2_0())
+            original_processor = attention.processor
+            hidden_states = torch.randn(2, frame_count, 256, generator=generator).cuda()
+            attention_bias = torch.where(
+                torch.rand(2, frame_count, frame_count, generator=generator) > 0.2,
+                torch.tensor(-0.0),
+                torch.tensor(-1.0e10),
+            ).cuda()
+            attention_bias[0, 0] = -1.0e10
+            processors = install_broadcast_bias_attention(attention)
+            parameter_ids = {
+                name: id(parameter) for name, parameter in attention.named_parameters()
+            }
+            rng_before = torch.cuda.get_rng_state().clone()
+            for _ in range(2):
+                expected = original_processor(
+                    attention, hidden_states, attention_mask=attention_bias
+                )
+                actual = attention(hidden_states, attention_mask=attention_bias)
+                assert torch.equal(actual.view(torch.int32), expected.view(torch.int32))
+                held_output = actual.clone()
+                attention_bias[:, :, frame_count // 2] = -1.0e10
+                assert torch.equal(actual, held_output)
+                attention.to_q.weight.mul_(0.75)
+            assert processors[0].broadcast_calls == 2
+            assert processors[0].last_head_stride == 0
+            assert torch.equal(rng_before, torch.cuda.get_rng_state())
+            assert parameter_ids == {
+                name: id(parameter) for name, parameter in attention.named_parameters()
+            }
+            assert (
+                attention.prepare_attention_mask(attention_bias, frame_count, 2).shape[
+                    0
+                ]
+                == 2 * head_count
+            )
+            attention.train()
+            expected = original_processor(
+                attention, hidden_states, attention_mask=attention_bias
+            )
+            actual = attention(hidden_states, attention_mask=attention_bias)
+            assert torch.equal(actual, expected) and processors[0].fallback_calls == 1
+
+
+@pytest.mark.accelerator
+def test_bias_broadcast_trained_streaming_ownership(tmp_path: Path) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA and explicit real codec assets are required")
+    else:
+        pass
+    codec_path = Path(os.environ["MOSS_CODEC_PATH"])
+    code_profile_path = Path(os.environ["MOSS_CODE_PROFILE"])
+    golden_tensors_path = Path(os.environ["MOSS_CODEC_GOLDEN_TENSORS"])
+    profile = json.loads(code_profile_path.read_text())
+    assert (
+        hashlib.sha256(Path(os.environ["MOSS_AUDIO_VOICE"]).read_bytes()).hexdigest()
+        == profile["voice_input_sha256"]
+    )
+    report_path = Path(
+        os.environ.get(
+            "MOSS_BIAS_BROADCAST_REPORT",
+            str(tmp_path / "bias-broadcast-streaming.json"),
+        )
+    )
+    report = qualify_bias_broadcast_streaming(
+        codec_path, code_profile_path, golden_tensors_path, report_path.parent
+    )
+    report_path.write_text(json.dumps(report, indent=2) + "\n")
+    assert report["status"] == "passed" and report["broadcast_calls"] > 0
 
 
 @pytest.mark.parametrize("streaming", [False, True])

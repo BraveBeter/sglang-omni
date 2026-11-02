@@ -23,6 +23,10 @@ from sglang_omni.vendor.moss_speech_codec.hf_codec.modeling import (
     build_hift,
     scoped_global_rng,
 )
+from sglang_omni.vendor.moss_speech_codec.matcha_components.bias_broadcast import (
+    LiveBiasBroadcastProcessor,
+    install_broadcast_bias_attention,
+)
 
 
 class HiFTCache(TypedDict):
@@ -78,7 +82,12 @@ class MossSpeechStreamingCodec:
         device: str | torch.device,
         flow: CausalMaskedDiffWithXvec | None = None,
         hift: HiFTGenerator | None = None,
+        broadcast_attention_bias: bool = False,
     ) -> None:
+        if type(broadcast_attention_bias) is not bool:
+            raise ValueError("broadcast_attention_bias must be a bool")
+        else:
+            pass
         if chunk_size not in (5, 25):
             raise ValueError("Streaming chunk size must match trained profile 5 or 25")
         else:
@@ -119,6 +128,15 @@ class MossSpeechStreamingCodec:
             pass
         self.flow = flow
         self.hift = hift
+        if broadcast_attention_bias and type(flow) is not CausalMaskedDiffWithXvec:
+            raise ValueError("Bias broadcasting requires the native flow model")
+        else:
+            pass
+        self.bias_broadcast_processors: tuple[LiveBiasBroadcastProcessor, ...] = (
+            install_broadcast_bias_attention(self.flow.decoder.estimator)
+            if broadcast_attention_bias
+            else ()
+        )
 
     def begin(
         self, request_id: str, voice: dict[str, torch.Tensor], *, seed: int

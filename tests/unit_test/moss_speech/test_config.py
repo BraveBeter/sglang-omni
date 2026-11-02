@@ -25,7 +25,10 @@ from sglang_omni.config.runtime import (
     resolve_stage_factory_arg_defaults,
     resolve_stage_typed_kwargs,
 )
-from sglang_omni.models.moss_speech.config import MossSpeechPipelineConfig
+from sglang_omni.models.moss_speech.config import (
+    MossSpeechPipelineConfig,
+    MossSpeechVocoderArgs,
+)
 from sglang_omni.models.moss_speech.engine_builder import MossSpeechEngineBuilder
 from sglang_omni.models.moss_speech.hf_config import MossSpeechConfig
 from sglang_omni.models.moss_speech.payload_types import MossSpeechState
@@ -38,6 +41,55 @@ from sglang_omni.proto.request import OmniRequest, StagePayload
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.mark.parametrize("invalid_flag", [0, 1, "true", "false", None])
+def test_bias_broadcast_configuration_rejects_coercion(invalid_flag: object) -> None:
+    with pytest.raises(ValidationError):
+        MossSpeechVocoderArgs(broadcast_attention_bias=invalid_flag)
+
+
+def test_bias_broadcast_flag_survives_stage_configuration_roundtrip() -> None:
+    configuration = MossSpeechPipelineConfig(model_path="model")
+    assert not resolve_stage_typed_kwargs(configuration.stage_named("audio_vocoder"))[
+        "broadcast_attention_bias"
+    ]
+    configuration.stage_named("audio_vocoder").factory.broadcast_attention_bias = True
+    restored = MossSpeechPipelineConfig.model_validate(configuration.model_dump())
+    assert (
+        resolve_stage_typed_kwargs(restored.stage_named("audio_vocoder"))[
+            "broadcast_attention_bias"
+        ]
+        is True
+    )
+
+
+def test_bias_broadcast_factory_propagates_to_both_decoders() -> None:
+    with (
+        patch(
+            "sglang_omni.models.moss_speech.stages.resolve_codec_dir",
+            return_value=Path("codec"),
+        ),
+        patch(
+            "sglang_omni.models.moss_speech.stages.resolve_concrete_device",
+            return_value=torch.device("cpu"),
+        ),
+        patch(
+            "sglang_omni.models.moss_speech.stages.MossSpeechCodecAdapter"
+        ) as offline_decoder,
+        patch(
+            "sglang_omni.models.moss_speech.stages.MossSpeechStreamingCodec"
+        ) as streaming_decoder,
+        patch("sglang_omni.models.moss_speech.stages.MossSpeechStreamingVocoder"),
+    ):
+        stages = importlib.import_module("sglang_omni.models.moss_speech.stages")
+        stages.create_audio_vocoder_executor(
+            "model", chunk_size=25, broadcast_attention_bias=True
+        )
+        assert offline_decoder.call_args.kwargs["broadcast_attention_bias"] is True
+        assert streaming_decoder.call_args.kwargs["broadcast_attention_bias"] is True
+
+
 DISCOVERY_PROGRAM = """
 import builtins
 import importlib

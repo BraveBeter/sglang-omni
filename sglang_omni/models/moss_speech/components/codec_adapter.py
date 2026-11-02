@@ -45,7 +45,12 @@ class MossSpeechCodecAdapter:
         dtype: torch.dtype = torch.float32,
         load_encoder: bool = True,
         load_decoder: bool = True,
+        broadcast_attention_bias: bool = False,
     ) -> None:
+        if type(broadcast_attention_bias) is not bool:
+            raise ValueError("broadcast_attention_bias must be a bool")
+        else:
+            pass
         if dtype is not torch.float32:
             raise NotImplementedError("The MOSS-Speech codec requires FP32")
         else:
@@ -98,6 +103,7 @@ class MossSpeechCodecAdapter:
                 self.codec_directory / "flow/flow.pt",
                 self.codec_directory / "flow/hift.pt",
                 device=self.device,
+                broadcast_attention_bias=broadcast_attention_bias,
             ).eval()
         else:
             pass

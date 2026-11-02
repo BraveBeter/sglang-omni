@@ -77,10 +77,16 @@ class TinyHiFT(torch.nn.Module):
 
 class TinyOfflineDecoder(torch.nn.Module):
     def __init__(
-        self, flow_ckpt_path: Path, hift_ckpt_path: Path, *, device: torch.device
+        self,
+        flow_ckpt_path: Path,
+        hift_ckpt_path: Path,
+        *,
+        device: torch.device,
+        broadcast_attention_bias: bool = False,
     ) -> None:
         super().__init__()
         self.device = device
+        self.broadcast_attention_bias = broadcast_attention_bias
         self.checkpoint_paths = (flow_ckpt_path, hift_ckpt_path)
         self.should_fail = False
         self.received_codes: list[list[int]] = []
