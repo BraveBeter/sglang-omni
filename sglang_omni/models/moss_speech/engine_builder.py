@@ -55,13 +55,22 @@ class MossSpeechEngineBuilder(
         *,
         streaming: bool,
         decode_graph: bool = False,
+        decode_graph_serial_batch: bool = False,
     ) -> None:
         super().__init__()
-        if type(decode_graph) is not bool:
-            raise ValueError("decode_graph must be a boolean")
+        if (
+            type(decode_graph) is not bool
+            or type(decode_graph_serial_batch) is not bool
+        ):
+            raise ValueError(
+                "decode_graph and decode_graph_serial_batch must be boolean"
+            )
+        elif decode_graph_serial_batch and not decode_graph:
+            raise ValueError("decode_graph_serial_batch requires decode_graph")
         else:
             pass
         self.decode_graph_enabled = decode_graph
+        self.decode_graph_serial_batch = decode_graph_serial_batch
         self.decode_graph = None
         self.streaming = streaming
         self.request_lifecycle: MossSpeechRequestLifecycle | None = None
@@ -186,7 +195,9 @@ class MossSpeechEngineBuilder(
         )
         if self.decode_graph_enabled:
             self.decode_graph = DecodeGraph(
-                model, model_worker.model_runner.attn_backend
+                model,
+                model_worker.model_runner.attn_backend,
+                serial_batch_replay=self.decode_graph_serial_batch,
             )
             self.decode_graph.initialize()
             model.decode_graph = self.decode_graph

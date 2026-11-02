@@ -25,7 +25,10 @@ from sglang_omni.config.runtime import (
     resolve_stage_factory_arg_defaults,
     resolve_stage_typed_kwargs,
 )
-from sglang_omni.models.moss_speech.config import MossSpeechPipelineConfig
+from sglang_omni.models.moss_speech.config import (
+    MossSpeechEngineArgs,
+    MossSpeechPipelineConfig,
+)
 from sglang_omni.models.moss_speech.engine_builder import MossSpeechEngineBuilder
 from sglang_omni.models.moss_speech.hf_config import MossSpeechConfig
 from sglang_omni.models.moss_speech.payload_types import MossSpeechState
@@ -320,6 +323,35 @@ def test_ar_factory_preflights_and_forwards_placement_budget(tmp_path: Path) -> 
                 str(tmp_path), dtype="float16", context_length=512
             )
         assert build.call_count == 1
+
+
+def test_serial_decode_graph_config_and_factory_require_explicit_opt_in(
+    tmp_path: Path,
+) -> None:
+    """Serial replay cannot activate through a truthy nonboolean or without its bank."""
+    for value in (1, "true", None):
+        with pytest.raises(ValidationError):
+            MossSpeechEngineArgs(decode_graph=True, decode_graph_serial_batch=value)
+    with pytest.raises(ValidationError, match="decode_graph"):
+        MossSpeechEngineArgs(decode_graph_serial_batch=True)
+    with pytest.raises(ValueError, match="decode_graph"):
+        MossSpeechEngineBuilder(streaming=True, decode_graph_serial_batch=True)
+    with pytest.raises(ValueError, match="boolean"):
+        MossSpeechEngineBuilder(
+            streaming=True, decode_graph=True, decode_graph_serial_batch=1
+        )
+    MossSpeechConfig(audio_vocab_size=16512).to_json_file(tmp_path / "config.json")
+    with patch.object(MossSpeechEngineBuilder, "build", autospec=True) as build:
+        create_ar_engine_executor(str(tmp_path), dtype="bfloat16", context_length=40960)
+        assert not build.call_args.args[0].decode_graph_serial_batch
+        create_ar_engine_executor(
+            str(tmp_path),
+            dtype="bfloat16",
+            context_length=40960,
+            decode_graph=True,
+            decode_graph_serial_batch=True,
+        )
+        assert build.call_args.args[0].decode_graph_serial_batch
 
 
 def test_missing_voice_fails_before_loading_codec(tmp_path: Path) -> None:

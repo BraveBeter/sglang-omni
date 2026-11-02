@@ -143,6 +143,7 @@ def create_ar_engine_executor(
     dtype: str,
     context_length: int,
     decode_graph: bool = False,
+    decode_graph_serial_batch: bool = False,
     device: str | None = None,
     gpu_id: int | None = None,
     total_gpu_memory_fraction: float | None = None,
@@ -159,7 +160,10 @@ def create_ar_engine_executor(
     else:
         pass
     return MossSpeechEngineBuilder(
-        context_length=context_length, streaming=True, decode_graph=decode_graph
+        context_length=context_length,
+        streaming=True,
+        decode_graph=decode_graph,
+        decode_graph_serial_batch=decode_graph_serial_batch,
     ).build(
         model_path,
         device=device,

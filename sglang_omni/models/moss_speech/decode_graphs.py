@@ -152,8 +152,16 @@ class DecodeEntry:
 class DecodeGraph:
     """Startup-only exact bank with independent buffers and serialized teardown."""
 
-    def __init__(self, model, backend, *, lengths=LENGTHS):
+    def __init__(
+        self, model, backend, *, lengths=LENGTHS, serial_batch_replay: bool = False
+    ):
+        if type(serial_batch_replay) is not bool:
+            raise ValueError("serial_batch_replay must be a boolean")
+        else:
+            pass
         self.model, self.backend = model, backend
+        self.serial_batch_replay = serial_batch_replay
+        self.serial_batches: dict[int, int] = {2: 0, 4: 0}
         self.lengths = tuple(lengths)
         if (
             not self.lengths
@@ -261,7 +269,13 @@ class DecodeGraph:
                 or torch.is_grad_enabled()
                 or self.model.training
                 or not batch.forward_mode.is_decode()
-                or batch.batch_size != 1
+                or (
+                    batch.batch_size != 1
+                    and (
+                        not self.serial_batch_replay
+                        or batch.batch_size not in self.serial_batches
+                    )
+                )
                 or batch.encoder_lens is not None
                 or batch.spec_info is not None
                 or not context_api.has_forward_context()
@@ -274,6 +288,33 @@ class DecodeGraph:
                 )  # noqa: leading-underscore
             ):
                 return None
+            else:
+                pass
+            if batch.batch_size != 1:
+                rows = self.prepare_serial(ids, positions, batch)
+                if rows is None:
+                    return None
+                else:
+                    outputs = [entry.replay(inputs) for entry, inputs in rows]
+                    output = type(outputs[0])(
+                        next_token_logits=torch.cat(
+                            [row.next_token_logits for row in outputs]
+                        ),
+                        text_logits=torch.cat([row.text_logits for row in outputs]),
+                        audio_logits=torch.cat([row.audio_logits for row in outputs]),
+                        hidden_states=torch.cat(
+                            [row.hidden_states for row in outputs], dim=1
+                        ),
+                    )
+                    self.hits += batch.batch_size
+                    self.serial_batches[batch.batch_size] += 1
+                    if self.serial_batches[batch.batch_size] == 1:
+                        logger.info(
+                            f"MOSS serial batch decode graph replay active batch={batch.batch_size}"
+                        )
+                    else:
+                        pass
+                    return output
             else:
                 pass
             cpu = batch.seq_lens_cpu
@@ -311,6 +352,128 @@ class DecodeGraph:
             else:
                 pass
             return output
+
+    def prepare_serial(
+        self, ids: torch.Tensor, positions: torch.Tensor, batch: ForwardBatch
+    ) -> list[tuple[DecodeEntry, tuple[tuple[torch.Tensor, torch.Tensor], ...]]] | None:
+        """Reject the whole batch before any replay can mutate another request's KV."""
+        token_lengths = batch.seq_lens_cpu
+        if (
+            token_lengths is None
+            or (
+                isinstance(token_lengths, torch.Tensor)
+                and (
+                    token_lengths.device.type != "cpu"
+                    or token_lengths.ndim != 1
+                    or token_lengths.dtype not in (torch.int32, torch.int64)
+                )
+            )
+            or len(token_lengths) != batch.batch_size
+            or any(
+                type(length) is not int
+                for length in token_lengths
+                if not isinstance(length, torch.Tensor)
+            )
+            or any(int(length) not in self.entries for length in token_lengths)
+        ):
+            return None
+        else:
+            pass
+        first_entry = self.entries[int(token_lengths[0])]
+        if (
+            not isinstance(batch.seq_lens, torch.Tensor)
+            or batch.seq_lens.shape != (batch.batch_size,)
+            or batch.seq_lens.dtype not in (torch.int32, torch.int64)
+            or batch.seq_lens.device != first_entry.ids.device
+            or batch.seq_lens.tolist() != [int(length) for length in token_lengths]
+            or batch.seq_lens_sum != sum(int(length) for length in token_lengths)
+        ):
+            return None
+        else:
+            pass
+        values = (ids, positions, batch.req_pool_indices, batch.out_cache_loc)
+        targets = (
+            first_entry.ids,
+            first_entry.positions,
+            first_entry.req,
+            first_entry.locations,
+        )
+        if any(
+            not isinstance(value, torch.Tensor)
+            or value.shape != (batch.batch_size,)
+            or value.dtype != target.dtype
+            or value.device != target.device
+            or value.stride() != (1,)
+            for target, value in zip(targets, values)
+        ):
+            return None
+        else:
+            pass
+        embedding_rows, token_positions, request_rows, output_locations = [
+            value.tolist() for value in values
+        ]
+        request_table = self.backend.req_to_token_pool.req_to_token
+        cache_capacity = self.backend.token_to_kv_pool.k_buffer[0].shape[0]
+        if (
+            len(set(request_rows)) != batch.batch_size
+            or len(set(output_locations)) != batch.batch_size
+            or any(
+                row < 0 or row >= self.model.decode_input_embedding.num_embeddings
+                for row in embedding_rows
+            )
+            or any(row <= 0 or row >= request_table.shape[0] for row in request_rows)
+            or any(
+                location <= 0 or location >= cache_capacity
+                for location in output_locations
+            )
+            or any(
+                position != int(length) - 1
+                for position, length in zip(token_positions, token_lengths)
+            )
+        ):
+            return None
+        else:
+            pass
+        histories = [
+            request_table[row, : int(length)].tolist()
+            for row, length in zip(request_rows, token_lengths)
+        ]
+        if any(
+            len(history) != int(length)
+            or history[-1] != location
+            or any(slot <= 0 or slot >= cache_capacity for slot in history)
+            for history, length, location in zip(
+                histories, token_lengths, output_locations
+            )
+        ) or any(
+            output_locations[i] in histories[j]
+            for i in range(batch.batch_size)
+            for j in range(batch.batch_size)
+            if i != j
+        ):
+            return None
+        else:
+            pass
+        rows = []
+        for i, length in enumerate(token_lengths):
+            entry = self.entries[int(length)]
+            inputs = tuple(
+                zip(
+                    (entry.ids, entry.positions, entry.req, entry.locations),
+                    (value[i : i + 1] for value in values),
+                )
+            )
+            if any(
+                value.shape != target.shape
+                or value.dtype != target.dtype
+                or value.device != target.device
+                or value.stride() != target.stride()
+                for target, value in inputs
+            ):
+                return None
+            else:
+                rows.append((entry, inputs))
+        return rows
 
     def close(self):
         with self.lock:
