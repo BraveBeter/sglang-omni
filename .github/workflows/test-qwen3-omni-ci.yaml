@@ -37,10 +37,12 @@ env:
 #     -> stage-8-videomme-talker -> stage-9-videoamme
 #     -> stage-10-videoamme-talker-tp2 -> stage-11-process-replicas (qwen3-omni)
 #     -> stage-12-fdb-smoke (minicpmo)
+#   moss-speech-smoke (moss-speech)
 
 jobs:
   stage-1-thinker:
     name: stage 1 - thinker length integration
+    if: inputs.omni_ci_model != 'moss-speech'
     runs-on: [self-hosted, h100]
     timeout-minutes: 20
     container:
@@ -82,7 +84,7 @@ jobs:
   stage-2-tts:
     name: stage 2 - TTS speed + WER + SIM
     needs: stage-1-thinker
-    if: always() && !cancelled()
+    if: always() && !cancelled() && inputs.omni_ci_model != 'moss-speech'
     runs-on: [self-hosted, h100]
     timeout-minutes: 25
     container:
@@ -141,7 +143,7 @@ jobs:
   stage-3-mmmu:
     name: stage 3 - MMMU accuracy + speed
     needs: stage-2-tts
-    if: always() && !cancelled()
+    if: always() && !cancelled() && inputs.omni_ci_model != 'moss-speech'
     runs-on: [self-hosted, h100]
     timeout-minutes: 20
     container:
@@ -187,7 +189,7 @@ jobs:
   stage-4-mmmu-talker:
     name: stage 4 - MMMU Talker
     needs: stage-3-mmmu
-    if: always() && !cancelled()
+    if: always() && !cancelled() && inputs.omni_ci_model != 'moss-speech'
     runs-on: [self-hosted, h100]
     timeout-minutes: 15
     container:
@@ -233,7 +235,7 @@ jobs:
   stage-5-mmsu:
     name: stage 5 - MMSU accuracy + speed
     needs: stage-4-mmmu-talker
-    if: always() && !cancelled()
+    if: always() && !cancelled() && inputs.omni_ci_model != 'moss-speech'
     runs-on: [self-hosted, h100]
     timeout-minutes: 20
     container:
@@ -280,7 +282,7 @@ jobs:
   stage-6-mmsu-talker:
     name: stage 6 - MMSU Talker
     needs: stage-5-mmsu
-    if: always() && !cancelled()
+    if: always() && !cancelled() && inputs.omni_ci_model != 'moss-speech'
     runs-on: [self-hosted, h100]
     timeout-minutes: 15
     container:
@@ -326,7 +328,7 @@ jobs:
   stage-7-videomme:
     name: stage 7 - Video-MME accuracy + speed
     needs: stage-6-mmsu-talker
-    if: always() && !cancelled()
+    if: always() && !cancelled() && inputs.omni_ci_model != 'moss-speech'
     runs-on: [self-hosted, h100]
     timeout-minutes: 30
     container:
@@ -372,7 +374,7 @@ jobs:
   stage-8-videomme-talker:
     name: stage 8 - Video-MME Talker
     needs: stage-7-videomme
-    if: always() && !cancelled()
+    if: always() && !cancelled() && inputs.omni_ci_model != 'moss-speech'
     runs-on: [self-hosted, h100]
     timeout-minutes: 30
     container:
@@ -418,7 +420,7 @@ jobs:
   stage-9-videoamme:
     name: stage 9 - Video-AMME accuracy + speed
     needs: stage-8-videomme-talker
-    if: always() && !cancelled()
+    if: always() && !cancelled() && inputs.omni_ci_model != 'moss-speech'
     runs-on: [self-hosted, h100]
     timeout-minutes: 30
     container:
@@ -464,7 +466,7 @@ jobs:
   stage-10-videoamme-talker-tp2:
     name: stage 10 - Video-AMME Talker
     needs: stage-9-videoamme
-    if: always() && !cancelled()
+    if: always() && !cancelled() && inputs.omni_ci_model != 'moss-speech'
     runs-on: [self-hosted, h100]
     timeout-minutes: 35
     container:
@@ -597,3 +599,68 @@ jobs:
             */RESULTS.md
           artifact-upload-name: ${{ inputs.omni_ci_model }}-fdb-smoke-results
           artifact-upload-path: ${{ env.OMNI_CI_HOME }}/fdb/runs/*/RESULTS.md
+
+  moss-speech-smoke:
+    name: MOSS-Speech four-mode service smoke
+    if: inputs.omni_ci_model == 'moss-speech'
+    runs-on: [self-hosted, h100]
+    timeout-minutes: 45
+    container:
+      image: hongccc/sglang-omni@sha256:06ed306707bcf3d9e9beb5ba7ce66f09a666cac11c23455ece50c34199c0e985
+      options: >-
+        --rm
+        -e NVIDIA_VISIBLE_DEVICES
+        -e OMNI_CI_CPUSET
+        --cap-add=SYS_PTRACE
+        -v /dev/shm:/dev/shm
+        -v /data/omni-ci:/data/omni-ci
+        -v /data/cache/huggingface:/github/home/.cache/huggingface
+        -v /data/cache/huggingface:/root/.cache/huggingface
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Select MOSS-Speech invocation directory
+        shell: bash
+        run: |
+          echo "MOSS_SPEECH_CI_RUN_DIR=${OMNI_CI_HOME}/moss-speech/${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}" >> "${GITHUB_ENV}"
+
+      - uses: ./.github/actions/omni-setup
+        with:
+          venv-name: omni
+
+      - name: Prepare MOSS-Speech smoke assets
+        shell: bash
+        env:
+          HF_ENDPOINT: https://huggingface.co
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          uv pip install --python omni/bin/python -e '.[moss-speech]'
+          omni/bin/python .github/scripts/prepare_moss_speech_ci.py \
+            --output-directory "${MOSS_SPEECH_CI_RUN_DIR}" \
+            --gpu-count 1 --github-env "${GITHUB_ENV}"
+
+      - name: Run MOSS-Speech service smoke
+        shell: bash
+        env:
+          TORCHINDUCTOR_CACHE_DIR: ${{ env.OMNI_CI_HOME }}/.torchinductor
+        run: |
+          source omni/bin/activate
+          export PYTHONPATH=$PWD
+          test -f "${MOSS_SPEECH_CI_CONFIG:?}"
+          test -f "${MOSS_SPEECH_CI_AUDIO_EN:?}"
+          test -f "${MOSS_SPEECH_CI_AUDIO_ZH:?}"
+          mkdir -p "${MOSS_SPEECH_CI_OUTPUT_DIR:?}"
+          pytest tests/test_model/test_moss_speech_ci.py -m accelerator -v -s -x \
+            --junitxml="${MOSS_SPEECH_CI_OUTPUT_DIR}/junit.xml"
+
+      - name: Post-stage cleanup
+        if: always()
+        uses: ./.github/actions/omni-post-stage
+        with:
+          stage-label: MOSS-Speech smoke
+          artifact-search-root: ${{ env.MOSS_SPEECH_CI_RUN_DIR }}
+          artifact-path-globs: |
+            */results/*.json
+          artifact-upload-name: moss-speech-smoke-results
+          artifact-upload-path: ${{ env.MOSS_SPEECH_CI_RUN_DIR }}

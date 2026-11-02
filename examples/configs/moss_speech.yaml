@@ -1,0 +1,10 @@
+config_cls: MossSpeechPipelineConfig
+model_path: models/MOSS-Speech
+stages:
+  preprocessing:
+    factory:
+      codec_path: models/MOSS-Speech-Codec
+      voice_wav: voice.wav
+  audio_vocoder:
+    factory:
+      codec_path: models/MOSS-Speech-Codec

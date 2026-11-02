@@ -84,6 +84,7 @@ CI_STAGES: tuple[CiStage, ...] = (
         preset_by_model_label={
             "run-qwen3-omni-30b-a3b-instruct": "qwen3-omni",
             "run-minicpm-o-4.5": "minicpmo",
+            "run-moss-speech": "moss-speech",
         },
         random_presets=("qwen3-omni", "minicpmo"),
     ),
