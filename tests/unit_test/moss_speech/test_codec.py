@@ -314,15 +314,16 @@ def test_stream_rng_isolation_survives_interleaving_and_abort() -> None:
     assert not interleaved.sessions
 
 
-def test_stream_rejects_duplicates_empty_final_and_decoder_failure_then_recovers() -> (
-    None
-):
+def test_stream_empty_final_cleans_up_and_decoder_failure_recovers() -> None:
     codec = streaming_codec()
     codec.begin("duplicate", voice_tensors(), seed=1)
     with pytest.raises(ValueError, match="already active"):
         codec.begin("duplicate", voice_tensors(), seed=2)
-    with pytest.raises(ValueError, match="empty"):
-        codec.push("duplicate", [], final=True)
+    caller_rng = torch.get_rng_state().clone()
+    session = codec.sessions["duplicate"]
+    assert codec.push("duplicate", [], final=True) == []
+    assert session.emitted_samples == 0 and session.ledger == []
+    assert torch.equal(torch.get_rng_state(), caller_rng)
     assert not codec.sessions
     codec.begin("failure", voice_tensors(), seed=1)
     assert isinstance(codec.hift, TinyHiFT)

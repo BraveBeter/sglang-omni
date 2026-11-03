@@ -206,7 +206,8 @@ class MossSpeechStreamingCodec:
                     pass
                 session.final_requested = session.final_requested or final
                 if session.final_requested and not session.codes:
-                    raise ValueError("Cannot finalize empty audio stream")
+                    self.cleanup(request_id)
+                    return []
                 else:
                     pass
                 waveforms: list[torch.Tensor] = []
