@@ -60,6 +60,7 @@ class MossSpeechVocoderArgs(FactoryArgs):
 
     codec_path: str | None = None
     chunk_size: Literal[5, 25] = 25
+    broadcast_attention_bias: StrictBool = False
 
 
 class MossSpeechVocoderStage(StageConfig):

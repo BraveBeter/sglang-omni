@@ -47,6 +47,10 @@ from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.hifigan_generator impor
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.transformer.upsample_encoder import (
     UpsampleConformerEncoder,
 )
+from sglang_omni.vendor.moss_speech_codec.matcha_components.bias_broadcast import (
+    LiveBiasBroadcastProcessor,
+    install_broadcast_bias_attention,
+)
 
 OFFLINE_FLOW_CHUNK_SIZE = 5
 
@@ -175,8 +179,13 @@ class AudioDecoder(nn.Module):
         hift_ckpt_path: str | Path,
         *,
         device: str | torch.device,
+        broadcast_attention_bias: bool = False,
     ) -> None:
         super().__init__()
+        if type(broadcast_attention_bias) is not bool:
+            raise ValueError("broadcast_attention_bias must be a bool")
+        else:
+            pass
         self.device = torch.device(device)
         with scoped_global_rng():
             self.flow = build_flow_decoder(chunk_size=OFFLINE_FLOW_CHUNK_SIZE)
@@ -191,6 +200,11 @@ class AudioDecoder(nn.Module):
             )
         self.flow.to(self.device).eval()
         self.hift.to(self.device).eval()
+        self.bias_broadcast_processors: tuple[LiveBiasBroadcastProcessor, ...] = (
+            install_broadcast_bias_attention(self.flow.decoder.estimator)
+            if broadcast_attention_bias
+            else ()
+        )
 
     @torch.inference_mode()
     def decode(
