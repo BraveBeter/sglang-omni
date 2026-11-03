@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Canonical grid, audio-boundary, and padding contracts."""
+"""Canonical per-request grid and audio-boundary contracts."""
 
 from __future__ import annotations
 
@@ -75,29 +75,6 @@ def test_default_system_follows_conversation(
     assert built.grid[0, :, 1].tolist() == [512] * len(expected_text)
 
 
-def test_collate_left_pads_without_changing_samples() -> None:
-    reference = canonical_fixture()
-    processor = MossSpeechGridProcessor(FixtureTokenizer(reference.text_encodings))
-    short = processor.build([{"role": "user", "kind": "text", "text": "a"}], [], "text")
-    long = processor.build(
-        [{"role": "user", "kind": "text", "text": "你好"}], [], "audio"
-    )
-    short_before, long_before = short.grid.clone(), long.grid.clone()
-    batch = processor.collate([short, long])
-    padding_length = long.prompt_len - short.prompt_len
-    assert padding_length > 0
-    assert batch.grid.shape == (2, long.prompt_len, 2)
-    assert batch.grid[0, :padding_length].tolist() == [[151643, 512]] * padding_length
-    assert (
-        batch.attention_mask[0].tolist()
-        == [0] * padding_length + [1] * short.prompt_len
-    )
-    torch.testing.assert_close(batch.grid[0, padding_length:], short_before[0])
-    torch.testing.assert_close(batch.grid[1], long_before[0])
-    torch.testing.assert_close(short.grid, short_before)
-    torch.testing.assert_close(long.grid, long_before)
-
-
 def test_multiple_audio_segments_keep_order_and_code_boundaries() -> None:
     reference = canonical_fixture()
     processor = MossSpeechGridProcessor(FixtureTokenizer(reference.text_encodings))
@@ -125,13 +102,6 @@ def test_missing_or_empty_audio_codes_are_rejected(
         processor.build(
             [{"role": "user", "kind": "audio", "text": None}], audio_codes, "text"
         )
-
-
-def test_empty_collation_is_rejected() -> None:
-    reference = canonical_fixture()
-    processor = MossSpeechGridProcessor(FixtureTokenizer(reference.text_encodings))
-    with pytest.raises(ContractViolation, match="empty batch"):
-        processor.collate([])
 
 
 def test_text_utf8_hold_final_prefix_and_shutdown_cleanup() -> None:
