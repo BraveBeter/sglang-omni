@@ -472,6 +472,27 @@ def test_late_chunk_after_completed_stream_never_recreates_state() -> None:
     assert "r" in scheduler.stream_states
 
 
+def test_duplicate_stream_done_does_not_wait_for_another_payload() -> None:
+    """A duplicate EOS previously retained a completed request in pending_done."""
+    scheduler = FakeStreamingVocoder()
+    scheduler.handle_streaming_new_request("r", make_payload())
+    scheduler.handle_stream_chunk("r", item([1]))
+    scheduler.handle_stream_done("r")
+    assert [message.type for message in drain(scheduler)] == ["stream", "result"]
+
+    scheduler.handle_stream_done("r")
+    assert drain(scheduler) == []
+    assert "r" not in scheduler.pending_done
+    assert scheduler.stream_states == {}
+
+    scheduler.handle_streaming_new_request("r", make_payload())
+    scheduler.handle_stream_chunk("r", item([2]))
+    scheduler.handle_stream_done("r")
+    messages = drain(scheduler)
+    assert [message.type for message in messages] == ["stream", "result"]
+    np.testing.assert_array_equal(make_waveform(messages[0].data), [2.0])
+
+
 def test_completed_stream_ids_evict_oldest_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
