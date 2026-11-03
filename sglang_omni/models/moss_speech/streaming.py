@@ -150,6 +150,15 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[AudioStreamState, None]):
         voice = VoiceConditioning(
             **unpack_voice_payload(state_voice_payload(state)), meta={"sr": 24000}
         )
+        codes = extract_output_codes(state)
+        if not codes:
+            state.audio_samples = []
+            state.audio_sample_rate = self.sample_rate
+            return StagePayload(
+                payload.request_id, payload.request, terminal_result(state)
+            )
+        else:
+            pass
         with (
             scoped_global_rng(),
             torch.backends.cudnn.flags(
@@ -163,7 +172,7 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[AudioStreamState, None]):
             np.random.seed(state.effective_seed % (1 << 32))
             torch.manual_seed(state.effective_seed)
             sample_rate, waveform = self.offline_codec.decode(
-                extract_output_codes(state), voice, request_id=payload.request_id
+                codes, voice, request_id=payload.request_id
             )
         state.audio_samples = waveform.tolist()
         state.audio_sample_rate = sample_rate

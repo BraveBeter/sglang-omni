@@ -9,12 +9,18 @@ from pathlib import Path
 import pytest
 import torch
 
+from sglang_omni.client.types import GenerateRequest, Message
 from sglang_omni.models.moss_speech.payload_types import (
+    AUDIO_PAD_TOKEN_ID,
     EOSP_TOKEN_ID,
     MODALITY_PAD_TOKEN_ID,
+    SOSP_TOKEN_ID,
     MossSpeechState,
 )
-from sglang_omni.models.moss_speech.request_builders import extract_output_codes
+from sglang_omni.models.moss_speech.request_builders import (
+    extract_output_codes,
+    normalize_and_validate,
+)
 from sglang_omni.models.moss_speech.request_data import build_sglang_moss_request
 from sglang_omni.models.moss_speech.streaming import (
     MossSpeechStreamingText,
@@ -206,6 +212,55 @@ def test_terminal_audio_preserves_natural_eos_and_length_code_counts(
         )
         assert terminal["stream_codec_ledger"][-1]["final"] is True
         assert not scheduler.codec.sessions and not scheduler.stream_states
+    finally:
+        scheduler.stop()
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_length_end_before_first_audio_code_completes_without_audio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stream: bool
+) -> None:
+    """A one-token budget ending at SOSP must complete instead of raising a codec error."""
+    request = OmniRequest(
+        inputs=GenerateRequest(
+            messages=[Message("user", "Hello.")],
+            output_modalities=["audio"],
+            max_tokens=1,
+            stream=stream,
+        ),
+        params={"stream": stream},
+    )
+    state = normalize_and_validate(request, request_id="empty", allow_streaming=True)
+    assert state.max_new_tokens == 1
+    state.voice_payload = pack_voice_payload(voice_tensors())
+    state.voice_key = voice_payload_digest(state.voice_payload)
+    state.output_grid = [[SOSP_TOKEN_ID, AUDIO_PAD_TOKEN_ID]]
+    state.finish_reason = "length"
+    payload = StagePayload("empty", request, state.to_dict())
+    scheduler = vocoder(tmp_path, monkeypatch)
+    caller_rng = torch.get_rng_state().clone()
+    try:
+        if stream:
+            scheduler.handle_stream_done("empty")
+            scheduler.handle_streaming_new_request("empty", payload)
+            messages = drain_messages(scheduler)
+            assert [message.type for message in messages] == ["result"]
+            result = messages[0].data.data
+            assert "audio_data" not in result
+            assert result["stream_samples"] == result["stream_chunks"] == 0
+            assert result["stream_codec_ledger"] == []
+            assert not scheduler.stream_states and not scheduler.stream_payloads
+            scheduler.handle_stream_done("empty")
+            assert drain_messages(scheduler) == []
+        else:
+            result = scheduler.compute(payload).data
+            assert result["audio_data"] == []
+            assert result["sample_rate"] == 24000
+        assert result["finish_reason"] == "length"
+        assert result["usage"]["completion_tokens"] == 1
+        assert not scheduler.codec.sessions and not scheduler.offline_codec.sessions
+        assert scheduler.offline_codec.decoder.received_codes == []
+        assert torch.equal(torch.get_rng_state(), caller_rng)
     finally:
         scheduler.stop()
 
