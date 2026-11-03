@@ -247,7 +247,7 @@ def normalize_and_validate(
     return state
 
 
-def pop_decoded_audio(state: MossSpeechState) -> list[tuple[torch.Tensor, int, str]]:
+def pop_decoded_audio(state: MossSpeechState) -> list[tuple[torch.Tensor, int]]:
     decoded_audio = state.decoded_audio
     state.decoded_audio = []
     return decoded_audio
