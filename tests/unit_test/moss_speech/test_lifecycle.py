@@ -270,7 +270,7 @@ def test_preprocessing_enrolls_voice_once_consumes_audio_and_releases_state(
         )
         state_references.append(weakref.ref(state))
         waveform_references.extend(
-            weakref.ref(waveform) for waveform, _, _ in state.decoded_audio
+            weakref.ref(waveform) for waveform, _ in state.decoded_audio
         )
         if outcome == "abort":
             scheduler.abort(request_id)
