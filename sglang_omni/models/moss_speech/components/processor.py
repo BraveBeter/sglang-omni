@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Build the MIMO text/audio grid and left-padded batches."""
+"""Build the per-request MIMO text/audio grid."""
 
 from __future__ import annotations
 
@@ -40,11 +40,6 @@ class MossSpeechGridProcessor:
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase) -> None:
         self.tokenizer = tokenizer
-        self.pad_token_id = tokenizer.pad_token_id
-        if self.pad_token_id is None:
-            raise ContractViolation("tokenizer must define pad_token_id")
-        else:
-            pass
 
     def text_segment(self, text: str) -> torch.Tensor:
         token_ids = self.tokenizer(text, add_special_tokens=False)["input_ids"]
@@ -122,34 +117,4 @@ class MossSpeechGridProcessor:
             grid=grid,
             attention_mask=torch.ones(1, grid.shape[1], dtype=torch.long),
             prompt_len=grid.shape[1],
-        )
-
-    def collate(self, samples: Sequence[CanonicalInput]) -> CanonicalInput:
-        if not samples:
-            raise ContractViolation("empty batch")
-        else:
-            pass
-        max_length = max(sample.grid.shape[1] for sample in samples)
-        grids: list[torch.Tensor] = []
-        masks: list[torch.Tensor] = []
-        for sample in samples:
-            padding_length = max_length - sample.grid.shape[1]
-            padding = torch.full(
-                (1, padding_length, 2), AUDIO_PAD_TOKEN_ID, dtype=torch.long
-            )
-            padding[:, :, 0] = self.pad_token_id
-            grids.append(torch.cat([padding, sample.grid], dim=1))
-            masks.append(
-                torch.cat(
-                    [
-                        torch.zeros(1, padding_length, dtype=torch.long),
-                        sample.attention_mask,
-                    ],
-                    dim=1,
-                )
-            )
-        return CanonicalInput(
-            grid=torch.cat(grids, dim=0),
-            attention_mask=torch.cat(masks, dim=0),
-            prompt_len=max_length,
         )
