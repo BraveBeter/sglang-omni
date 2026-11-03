@@ -4,6 +4,7 @@
 import random
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Literal, NotRequired, TypedDict
 
 import numpy as np
 import torch
@@ -21,6 +22,7 @@ from sglang_omni.models.moss_speech.hf_config import MAX_CONTEXT_TOKENS
 from sglang_omni.models.moss_speech.payload_types import (
     EOSP_TOKEN_ID,
     MODALITY_PAD_TOKEN_ID,
+    VoicePayload,
 )
 from sglang_omni.models.moss_speech.request_builders import (
     extract_output_codes,
@@ -49,6 +51,15 @@ def resolve_stream_terminal(request_id: str, payload: StagePayload) -> list[str]
         return [resolve_output_terminal(request_id, payload)]
     else:
         return []
+
+
+class MossSpeechStreamMetadata(TypedDict):
+    stream: Literal[True]
+    modality: Literal["audio_codes", "text_tokens"]
+    row_index: int
+    seed: NotRequired[int]
+    voice_key: NotRequired[str | None]
+    voice_payload: NotRequired[VoicePayload]
 
 
 class MossSpeechStreamOutputBuilder:
@@ -94,7 +105,7 @@ class MossSpeechStreamOutputBuilder:
         else:
             pass
         cursor = request_data.stream_token_cursor
-        metadata: dict[str, object] = {
+        metadata: MossSpeechStreamMetadata = {
             "stream": True,
             "modality": "audio_codes" if audio_output else "text_tokens",
             "row_index": cursor,

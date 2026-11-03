@@ -24,6 +24,7 @@ from sglang_omni.models.moss_speech.payload_types import (
 from sglang_omni.models.moss_speech.streaming import (
     MossSpeechStreamingText,
     MossSpeechStreamingVocoder,
+    MossSpeechStreamMetadata,
 )
 from sglang_omni.models.moss_speech.voice_transport import (
     pack_voice_payload,
@@ -220,7 +221,7 @@ def audio_payload(
 
 
 def audio_chunk(codes: list[int], *, cursor: int = 0, seed: int = 7) -> StreamItem:
-    metadata: dict[str, object] = {
+    metadata: MossSpeechStreamMetadata = {
         "stream": True,
         "modality": "audio_codes",
         "row_index": cursor,
