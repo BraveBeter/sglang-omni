@@ -18,7 +18,9 @@ from sglang_omni.models.moss_speech.hf_config import (
     KV_RESERVE_TOKENS,
     ensure_moss_speech_config_registered,
 )
+from sglang_omni.models.moss_speech.model_layers import MossSpeechRMSNorm
 from sglang_omni.models.moss_speech.model_runner import MossSpeechModelRunner
+from sglang_omni.models.moss_speech.native_norm import NativeNorm
 from sglang_omni.models.moss_speech.request_builders import (
     RequestBuilder,
     ResultAdapter,
@@ -54,10 +56,12 @@ class MossSpeechEngineBuilder(
         context_length: int | None = None,
         *,
         streaming: bool,
+        native_norm_library: str | None = None,
         decode_graph: bool = False,
         decode_graph_serial_batch: bool = False,
     ) -> None:
         super().__init__()
+        self.native_norm_library = native_norm_library
         if (
             type(decode_graph) is not bool
             or type(decode_graph_serial_batch) is not bool
@@ -193,6 +197,15 @@ class MossSpeechEngineBuilder(
         model.decode_input_embedding = model.decode_input_embedding.to(
             torch.device(device)
         )
+        if self.native_norm_library is not None:
+            native_norm = NativeNorm(self.native_norm_library)
+            for module in model.modules():
+                if isinstance(module, MossSpeechRMSNorm):
+                    module.native_norm = native_norm
+                else:
+                    pass
+        else:
+            pass
         if self.decode_graph_enabled:
             self.decode_graph = DecodeGraph(
                 model,

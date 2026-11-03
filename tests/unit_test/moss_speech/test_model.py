@@ -8,6 +8,7 @@ from unittest.mock import patch, sentinel
 import pytest
 import torch
 from sglang.srt.configs.model_config import ModelConfig
+from sglang.srt.utils import DynamicGradMode
 from transformers import Qwen3Config
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm, Qwen3RotaryEmbedding
@@ -22,6 +23,7 @@ from sglang_omni.models.moss_speech.model_layers import (
     reference_rope_frequencies,
     request_linear,
 )
+from sglang_omni.models.moss_speech.native_norm import NativeNorm
 from sglang_omni.models.moss_speech.sglang_model import MossSpeechSGLangModel
 from tests.unit_test.fixtures.accelerator import require_cuda
 from tests.unit_test.fixtures.moss_speech_model import (
@@ -342,3 +344,83 @@ def test_serial_decode_graph_matches_eager_and_owns_outputs() -> None:
         assert model.dual_logits_by_request_id == {
             ("retained", "decode"): original_logits
         }
+
+
+def test_native_norm_cpu_and_grad_fallback() -> None:
+    native = NativeNorm.__new__(NativeNorm)
+    hidden = torch.randn(1, 4096, requires_grad=True)
+    assert native.apply(hidden, torch.ones(4096), 1e-6) is None
+    with torch.inference_mode():
+        assert native.apply(hidden, torch.ones(4096), 1e-6) is None
+
+
+@pytest.mark.accelerator
+def test_native_norm_cuda_rounding_and_fallback() -> None:
+    require_cuda()
+    library = os.environ.get("MOSS_NATIVE_NORM_LIBRARY")
+    if not library:
+        pytest.skip("Set MOSS_NATIVE_NORM_LIBRARY to test the optional backend")
+    else:
+        pass
+    native = NativeNorm(library)
+    for context in (torch.no_grad, torch.inference_mode):
+        with context():
+            for shape in ((1, 4096), (1, 32, 128), (1, 8, 128)):
+                generator = torch.Generator(device="cuda").manual_seed(20261031)
+                hidden = torch.randn(
+                    shape, device="cuda", dtype=torch.bfloat16, generator=generator
+                )
+                weight = torch.randn(
+                    shape[-1], device="cuda", dtype=torch.bfloat16, generator=generator
+                )
+                for epsilon in (1e-6, 1e-5):
+                    reference = hidden.float() * torch.rsqrt(
+                        hidden.float().square().mean(-1, keepdim=True) + epsilon
+                    )
+                    reference = weight * reference.to(hidden.dtype)
+                    actual = native.apply(hidden, weight, epsilon)
+                    assert actual is not None
+                    assert actual.data_ptr() != hidden.data_ptr()
+                    assert torch.equal(
+                        actual.view(torch.uint8), reference.view(torch.uint8)
+                    )
+                    saved = actual.clone()
+                    native.apply(hidden + 1, weight, epsilon)
+                    assert torch.equal(actual, saved)
+                assert native.apply(hidden.float(), weight, 1e-6) is None
+                assert native.apply(hidden.expand(2, *shape[1:]), weight, 1e-6) is None
+    assert native.apply(hidden, weight, 1e-6) is None
+    assert native.calls == 24
+    norm = MossSpeechRMSNorm(4096).to(device="cuda", dtype=torch.bfloat16).eval()
+    norm.native_norm = native
+    with DynamicGradMode():
+        routed = norm(torch.randn(1, 4096, device="cuda", dtype=torch.bfloat16))
+        assert routed.shape == (1, 4096) and native.calls == 25
+        noncontiguous = torch.randn(1, 8192, device="cuda", dtype=torch.bfloat16)[
+            :, ::2
+        ]
+        assert native.apply(noncontiguous, norm.weight, 1e-6) is None
+    hidden = torch.randn(
+        1, 4096, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
+    norm(hidden).float().sum().backward()
+    assert hidden.grad is not None and norm.weight.grad is not None
+    assert native.calls == 25
+
+
+@pytest.mark.accelerator
+def test_cumulative_independent_ar_cuda_exact() -> None:
+    require_cuda()
+    library = os.environ.get("MOSS_NATIVE_NORM_LIBRARY")
+    assert library, "The combined native-norm deployment requires its pinned library"
+    with native_runtime(torch.device("cuda", 0)), torch.no_grad():
+        model = tiny_model(torch.device("cuda", 0)).eval()
+        proof = assert_serial_decode_graph(
+            model,
+            capacity=32,
+            native_norm_library=library,
+            require_native_execution=False,
+        )
+        assert proof["complete_heads_exact"] and proof["all_kv_exact"]
+        assert proof["native_capture_calls"] == 0
+        assert all(count > 0 for count in proof["executions"].values())

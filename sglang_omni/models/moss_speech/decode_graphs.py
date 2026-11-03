@@ -12,26 +12,18 @@ from sglang.srt.layers.attention.torch_native_backend import TorchNativeAttnBack
 from sglang.srt.model_executor import forward_context as context_api
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 
+from sglang_omni.models.moss_speech.graph_state import (
+    execution_policy,
+    native_norm_calls,
+    normalization_state,
+    reset_graph,
+)
 from sglang_omni.models.moss_speech.model_layers import reference_rope_frequencies
 
 logger = logging.getLogger(__name__)
 # Cover the supported 512-row prompt range; longer decode falls back to eager.
 # Each exact SDPA shape keeps BF16 rounding; no capacity padding or varlen Flash.
 LENGTHS = tuple(range(1, 513))
-
-
-def execution_policy():
-    cuda = torch.backends.cuda
-    return (
-        cuda.flash_sdp_enabled(),
-        cuda.mem_efficient_sdp_enabled(),
-        cuda.math_sdp_enabled(),
-        cuda.cudnn_sdp_enabled(),
-        tuple(torch._C._get_sdp_priority_order()),  # noqa: leading-underscore
-        cuda.matmul.allow_tf32,
-        cuda.matmul.allow_bf16_reduced_precision_reduction,
-        torch.are_deterministic_algorithms_enabled(),
-    )
 
 
 class DecodeBackend(TorchNativeAttnBackend):
@@ -107,8 +99,11 @@ class DecodeEntry:
                 # Separate pools permit arbitrary replay order across exact lengths.
                 with torch.cuda.graph(self.graph):
                     self.output = self.body()
-        except BaseException:
-            self.close()
+        except BaseException as original_error:
+            try:
+                self.close()
+            except BaseException as close_error:
+                raise original_error from close_error
             raise
 
     def body(self):
@@ -140,13 +135,11 @@ class DecodeEntry:
         )
 
     def close(self):
-        # note (Codex): Warmup may fail before a graph exists while work is in flight.
-        torch.cuda.synchronize(self.device)
-        if self.graph is not None:
-            self.graph.reset()
+        try:
+            # note (Codex): Warmup can leave in-flight work before a graph exists.
+            reset_graph(self.graph, self.device)
+        finally:
             self.graph = self.output = None
-        else:
-            pass
 
 
 class DecodeGraph:
@@ -175,6 +168,8 @@ class DecodeGraph:
         self.lock = threading.RLock()
         self.entries = {}
         self.hits = 0
+        self.native_capture_calls = 0
+        self.native_owners = 0
         self.closed = False
         self.reason = self.stream = self.signature = None
 
@@ -204,6 +199,7 @@ class DecodeGraph:
                 for t in (*pool.k_buffer, *pool.v_buffer)
             ),
             self.backend.req_to_token_pool.req_to_token.data_ptr(),
+            normalization_state(self.model),
             execution_policy(),
         )
 
@@ -231,6 +227,7 @@ class DecodeGraph:
                 return
             else:
                 pass
+            native_calls_before = native_norm_calls(self.model)
             pool = self.backend.token_to_kv_pool
             tensors = [
                 self.backend.req_to_token_pool.req_to_token,
@@ -250,12 +247,25 @@ class DecodeGraph:
                             self.model, self.backend, length, rope
                         )
                     torch.cuda.synchronize(self.device)
-                except BaseException:
-                    self.close()
+                except BaseException as original_error:
+                    try:
+                        self.close()
+                    except BaseException as close_error:
+                        raise original_error from close_error
                     raise
                 finally:
                     for t, value in zip(tensors, saved):
                         t[0].copy_(value)
+            self.native_capture_calls = (
+                native_norm_calls(self.model) - native_calls_before
+            )
+            self.native_owners = len(
+                {
+                    state.native_norm
+                    for state in normalization_state(self.model)
+                    if state.native_norm is not None
+                }
+            )
             self.signature = self.identity()
             self.stream = torch.cuda.current_stream(self.device).cuda_stream
             logger.info(f"MOSS exact decode graphs captured count={len(self.entries)}")
@@ -348,7 +358,9 @@ class DecodeGraph:
             output = entry.replay(inputs)
             self.hits += 1
             if self.hits == 1:
-                logger.info("MOSS full decode graph replay active")
+                logger.info(
+                    f"MOSS full decode graph replay active native_norm_capture_calls={self.native_capture_calls} native_owners={self.native_owners}"
+                )
             else:
                 pass
             return output
@@ -481,8 +493,20 @@ class DecodeGraph:
                 return
             else:
                 pass
+            first_error = None
             for entry in self.entries.values():
-                entry.close()
+                try:
+                    entry.close()
+                except BaseException as error:
+                    if first_error is None:
+                        first_error = error
+                    else:
+                        pass
             self.entries.clear()
+            self.signature = None
             self.closed = True
             logger.info(f"MOSS decode graph closed replays={self.hits}")
+            if first_error is not None:
+                raise first_error
+            else:
+                pass

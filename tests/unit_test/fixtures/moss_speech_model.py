@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from time import perf_counter
 from types import SimpleNamespace
+from typing import NotRequired, TypedDict
 from unittest.mock import patch
 
 import pytest
@@ -18,11 +19,53 @@ from sglang.srt.runtime_context import get_context, get_parallel
 
 from sglang_omni.models.moss_speech.decode_graphs import DecodeEntry, DecodeGraph
 from sglang_omni.models.moss_speech.hf_config import MossSpeechConfig
+from sglang_omni.models.moss_speech.model_layers import MossSpeechRMSNorm
 from sglang_omni.models.moss_speech.model_runner import MossSpeechModelRunner
+from sglang_omni.models.moss_speech.native_norm import NativeNorm
 from sglang_omni.models.moss_speech.sglang_model import (
     MossSpeechModelOutput,
     MossSpeechSGLangModel,
 )
+
+
+class ARPathProof(TypedDict):
+    executions: int
+    complete_heads_exact: bool
+    all_kv_exact: bool
+    captures: NotRequired[int]
+    replays: NotRequired[int]
+    native_capture_calls: NotRequired[int]
+
+
+class SerialDecodeProof(TypedDict):
+    batch_sizes: list[int]
+    executions: dict[str, int]
+    captures: int
+    row_replays: int
+    kv_layers: int
+    complete_heads_exact: bool
+    complete_hidden_exact: bool
+    all_kv_exact: bool
+    ownership_exact: bool
+    all_row_rejection_exact: bool
+    all_row_rejection_count: int
+    runtime_guards_exact: bool
+    runtime_guard_count: int
+    boundary_fallback_exact: bool
+    boundary_lengths: list[int]
+    no_partial_retry: bool
+    exactness_cases: int
+    native_capture_calls: int
+
+
+class CumulativeARProof(TypedDict):
+    optimizations: dict[str, ARPathProof]
+    complete_heads_exact: bool
+    all_kv_exact: bool
+    joint_optimizations: list[str]
+    joint_complete_heads_exact: bool
+    joint_all_kv_exact: bool
+    serial_decode_graph: NotRequired[SerialDecodeProof]
 
 
 @dataclass(kw_only=True)
@@ -384,8 +427,12 @@ def assert_full_decode_graph(model: MossSpeechSGLangModel, *, capacity=16) -> di
 
 
 def assert_serial_decode_graph(
-    model: MossSpeechSGLangModel, *, capacity: int = 1024
-) -> dict:
+    model: MossSpeechSGLangModel,
+    *,
+    capacity: int = 1024,
+    native_norm_library: str | None = None,
+    require_native_execution: bool = True,
+) -> SerialDecodeProof:
     """Qualify actual serial dispatch, complete outputs, KV ownership and fallbacks."""
     original_embedding = model.decode_input_embedding
     original_embedding_contents = original_embedding.weight.clone()
@@ -393,7 +440,14 @@ def assert_serial_decode_graph(
     original_decode_graph = model.__dict__.get("decode_graph")
     original_logits = dict(model.dual_logits_by_request_id)
     original_training = [(module, module.training) for module in model.modules()]
+    norms = [
+        module for module in model.modules() if isinstance(module, MossSpeechRMSNorm)
+    ]
+    previous_native = [module.native_norm for module in norms]
+    native = NativeNorm(native_norm_library) if native_norm_library else None
     try:
+        for module in norms:
+            module.native_norm = native
         device = model.embed_tokens.weight.device
         if model.decode_input_embedding.num_embeddings < 4:
             model.decode_input_embedding = torch.nn.Embedding(
@@ -471,6 +525,10 @@ def assert_serial_decode_graph(
         try:
             decode_graph.initialize()
             assert len(decode_graph.entries) == len(graph_lengths), decode_graph.reason
+            if native is not None and require_native_execution:
+                assert decode_graph.native_capture_calls > 0
+            else:
+                pass
             snapshots = [cache.clone() for cache in caches]
             cases = [
                 (list(range(count)), [length] * count)
@@ -490,9 +548,15 @@ def assert_serial_decode_graph(
                     batch = make_batch(order, token_lengths)
                     for cache, saved in zip(caches, snapshots):
                         cache.copy_(saved)
-                    expected = model.forward_eager(
-                        batch.input_ids, batch.positions, batch
-                    )
+                    for module in norms:
+                        module.native_norm = None
+                    try:
+                        expected = model.forward_eager(
+                            batch.input_ids, batch.positions, batch
+                        )
+                    finally:
+                        for module in norms:
+                            module.native_norm = native
                     expected_caches = [cache.clone() for cache in caches]
                     for cache, saved in zip(caches, snapshots):
                         cache.copy_(saved)
@@ -565,6 +629,32 @@ def assert_serial_decode_graph(
                     rejected_before_mutation += 1
                 batch = make_batch([0, 1, 2, 3], [graph_lengths[0]] * 4)
                 before = [cache.clone() for cache in caches]
+                original_epsilon = norms[0].variance_epsilon
+                norms[0].variance_epsilon = original_epsilon * 2
+                try:
+                    assert (
+                        decode_graph.try_replay(batch.input_ids, batch.positions, batch)
+                        is None
+                    )
+                finally:
+                    norms[0].variance_epsilon = original_epsilon
+                if native is not None:
+                    with patch.object(norms[0], "native_norm", None):
+                        assert (
+                            decode_graph.try_replay(
+                                batch.input_ids, batch.positions, batch
+                            )
+                            is None
+                        )
+                    with patch.object(native, "library", None):
+                        assert (
+                            decode_graph.try_replay(
+                                batch.input_ids, batch.positions, batch
+                            )
+                            is None
+                        )
+                else:
+                    pass
                 handle = model.layers[0].register_forward_pre_hook(lambda *_: None)
                 try:
                     assert (
@@ -619,7 +709,7 @@ def assert_serial_decode_graph(
                 attempts = 0
 
                 def fail_second(
-                    inputs: tuple[tuple[torch.Tensor, torch.Tensor], ...]
+                    inputs: tuple[tuple[torch.Tensor, torch.Tensor], ...],
                 ) -> MossSpeechModelOutput:
                     nonlocal attempts
                     attempts += 1
@@ -658,16 +748,19 @@ def assert_serial_decode_graph(
                 all_row_rejection_exact=True,
                 all_row_rejection_count=rejected_before_mutation,
                 runtime_guards_exact=True,
-                runtime_guard_count=7,
+                runtime_guard_count=10 if native is not None else 8,
                 boundary_fallback_exact=True,
                 boundary_lengths=list(boundary_lengths),
                 no_partial_retry=True,
                 exactness_cases=len(cases),
+                native_capture_calls=decode_graph.native_capture_calls,
             )
         finally:
             decode_graph.close()
             decode_graph.close()
     finally:
+        for module, previous in zip(norms, previous_native, strict=True):
+            module.native_norm = previous
         model.decode_input_embedding = original_embedding
         original_embedding.weight.copy_(original_embedding_contents)
         if had_decode_graph:
@@ -678,3 +771,50 @@ def assert_serial_decode_graph(
         model.dual_logits_by_request_id.update(original_logits)
         for module, training in original_training:
             module.training = training
+
+
+def assert_cumulative_ar(
+    model: MossSpeechSGLangModel,
+    optimizations: list[str],
+    projection_batch_size: int = 0,
+    graph_lengths: tuple[int, ...] = (),
+    native_norm_library: str | None = None,
+) -> CumulativeARProof:
+    """Qualify jointly captured native norms and serial row replay against Torch."""
+    selected = set(optimizations) & {
+        "ar-decode-graph",
+        "ar-serial-decode-graph",
+        "native-norm",
+    }
+    assert selected == {"ar-decode-graph", "ar-serial-decode-graph", "native-norm"}
+    assert projection_batch_size == 0 and not graph_lengths
+    assert native_norm_library
+    serial = assert_serial_decode_graph(
+        model, capacity=1024, native_norm_library=native_norm_library
+    )
+    serial_calls = sum(serial["executions"].values())
+    b1_calls = serial["row_replays"] - sum(
+        int(batch) * count for batch, count in serial["executions"].items()
+    )
+    assert b1_calls > 0 and serial_calls > 0 and serial["native_capture_calls"] > 0
+    executions = {
+        "ar-decode-graph": b1_calls,
+        "ar-serial-decode-graph": serial_calls,
+        "native-norm": serial["native_capture_calls"],
+    }
+    return {
+        "optimizations": {
+            feature: {
+                "executions": executions[feature],
+                "complete_heads_exact": True,
+                "all_kv_exact": True,
+            }
+            for feature in sorted(selected)
+        },
+        "complete_heads_exact": True,
+        "all_kv_exact": True,
+        "joint_optimizations": sorted(selected),
+        "joint_complete_heads_exact": True,
+        "joint_all_kv_exact": True,
+        "serial_decode_graph": serial,
+    }

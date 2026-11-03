@@ -40,6 +40,7 @@ class MossSpeechEngineArgs(FactoryArgs):
 
     dtype: str = "bfloat16"
     context_length: int = Field(default=MAX_CONTEXT_TOKENS, ge=1, le=MAX_CONTEXT_TOKENS)
+    native_norm_library: str | None = None
     decode_graph: StrictBool = False
     decode_graph_serial_batch: StrictBool = False
 

@@ -147,3 +147,22 @@ resources. This candidate requires correctness and service measurement before us
 local graph speed does not establish an HTTP latency or quality improvement.
 
 Set `ar_engine.factory.decode_graph_serial_batch: true` together with `decode_graph: true` to opt into request-local serial replay for engine batches of exactly two or four requests. This separate flag defaults to false; the existing B1 path is unchanged. Every request reuses its exact-length B1 entry without padding or a batch-by-length graph bank. All rows, original embedding IDs and disjoint KV destinations are validated before the first replay; unsupported metadata, lengths above 512, batch three and runtime changes fall back as a whole. Replay errors propagate rather than retrying eager after partial KV mutation. Returned dual-head and hidden tensors own their storage. Actual execution emits `MOSS serial batch decode graph replay active batch=2` or `batch=4`; startup and HTTP concurrency do not prove activation. This path requires its own full-checkpoint/HF correctness and end-to-end measurements; model-local timing improvements are not TTFA or RTF results.
+
+
+### Optional native norm pointwise arithmetic
+
+Set `ar_engine.factory.native_norm_library` to an explicitly built shared library. The default is `None`. This SM80 experiment supports BF16 tensors of shapes `(1, 4096)`, `(1, 32, 128)` and `(1, 8, 128)`. It retains the original Torch mean reduction, residual addition and BF16 rounding before multiplication by the weight. Both `no_grad` (the default scheduler mode) and `inference_mode` are supported. Training, gradients and unsupported shapes, types, devices or layouts use the original Torch norm. Every output owns its storage.
+
+From this model directory, build the CUDA source and record its hashes:
+
+```bash
+nvcc -shared -Xcompiler=-fPIC -O3 -std=c++17 -arch=sm_80 --fmad=false \
+  -o /path/to/native_norm.so kernels/decode_norm_native.cu
+sha256sum kernels/decode_norm_native.cu /path/to/native_norm.so
+```
+
+The loader compares the library's compile-time `CUDART_VERSION` with `torch.version.cuda`; this checks the CUDA runtime headers, rather than the NVCC release string. No library compilation occurs during import or request processing. The wheel and sdist contain the CUDA source, and the operator builds the optional library separately.
+
+Use benchmark-client with an explicit candidate SHA and pinned library hash for correctness before comparing service performance. Attention, KV and projection remain eager Torch. Combining this option with another optimization requires its own validation.
+
+When native norm and serial decode Graph are enabled together, the builder installs the norm library before capture. Captures retain normalization owners and library identity; changed normalization configuration or execution policy rejects replay before KV mutation. The combined deployment requires fresh joint complete-head and KV qualification against eager Torch in addition to the independent HF checks.
