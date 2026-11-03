@@ -152,7 +152,7 @@ def test_four_modes_and_mixed_history_bind_one_terminal(case_name: str) -> None:
     assert len(decoded) == len(case.audio_codes)
     assert all(
         sample_rate == 16000 and waveform.numel() == 1600
-        for waveform, sample_rate, _ in decoded
+        for waveform, sample_rate in decoded
     )
     assert pop_decoded_audio(state) == []
     assert "decoded_audio" not in state.to_dict()
@@ -191,7 +191,7 @@ def test_audio_placeholders_bind_sources_in_order_and_reject_ambiguous_sources(
     state = normalize_and_validate(
         Client.build_omni_request(generation), request_id="sources"
     )
-    assert [sample_rate for _, sample_rate, _ in pop_decoded_audio(state)] == [
+    assert [sample_rate for _, sample_rate in pop_decoded_audio(state)] == [
         16000,
         24000,
     ]

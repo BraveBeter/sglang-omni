@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import hashlib
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import fields, replace
@@ -234,7 +233,7 @@ def lower_audio_task(request: GenerateRequest) -> GenerateRequest:
 
 def normalize_turns(
     messages: Sequence[Message], metadata: Mapping[str, object]
-) -> tuple[list[CanonicalTurn], list[tuple[torch.Tensor, int, str]]]:
+) -> tuple[list[CanonicalTurn], list[tuple[torch.Tensor, int]]]:
     turns: list[CanonicalTurn] = []
     audio_sources: list[str] = []
     if not messages:
@@ -310,15 +309,12 @@ def normalize_turns(
             audio_sources = alternate_sources
     else:
         pass
-    decoded_audio: list[tuple[torch.Tensor, int, str]] = []
+    decoded_audio: list[tuple[torch.Tensor, int]] = []
     duration_seconds = 0.0
     for source in audio_sources:
         waveform, sample_rate = load_audio_source(source)
         duration_seconds += waveform.numel() / sample_rate
-        fingerprint = hashlib.blake2b(
-            waveform.numpy().tobytes(), digest_size=16
-        ).hexdigest()
-        decoded_audio.append((waveform, sample_rate, fingerprint))
+        decoded_audio.append((waveform, sample_rate))
     if duration_seconds > MAX_TOTAL_AUDIO_DURATION_SECONDS:
         raise RequestValidationError(
             f"total audio duration exceeds {MAX_TOTAL_AUDIO_DURATION_SECONDS} seconds"

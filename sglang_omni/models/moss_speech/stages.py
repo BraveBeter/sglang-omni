@@ -106,7 +106,7 @@ def create_preprocessing_executor(
         decoded_audio = pop_decoded_audio(state)
         if decoded_audio:
             codes = adapter.encode(
-                [(waveform, sample_rate) for waveform, sample_rate, _ in decoded_audio],
+                decoded_audio,
                 batch_size=encode_batch_size,
             )
         else:

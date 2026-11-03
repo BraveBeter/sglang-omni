@@ -53,4 +53,4 @@ class MossSpeechState(DeclarativeStateBase):
 
     def __post_init__(self) -> None:
         # note (xrluan): Decoded waveforms are consumed before crossing the stage boundary.
-        self.decoded_audio: list[tuple[torch.Tensor, int, str]] = []
+        self.decoded_audio: list[tuple[torch.Tensor, int]] = []
