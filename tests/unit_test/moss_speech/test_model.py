@@ -3,6 +3,7 @@
 
 import os
 from pathlib import Path
+from unittest.mock import patch, sentinel
 
 import pytest
 import torch
@@ -24,6 +25,8 @@ from sglang_omni.models.moss_speech.model_layers import (
 from sglang_omni.models.moss_speech.sglang_model import MossSpeechSGLangModel
 from tests.unit_test.fixtures.accelerator import require_cuda
 from tests.unit_test.fixtures.moss_speech_model import (
+    assert_full_decode_graph,
+    assert_serial_decode_graph,
     checkpoint_weights,
     decode,
     native_runtime,
@@ -296,3 +299,46 @@ def test_native_cuda_prefill_decode_keep_requests_and_tail_kv_independent() -> N
         pytest.skip("Run the accelerator lane without the CPU engine override")
     else:
         assert_native_request_isolation(torch.device("cuda", 0))
+
+
+@pytest.mark.accelerator
+def test_full_decode_graph_matches_eager_and_owns_outputs() -> None:
+    require_cuda()
+    with native_runtime(torch.device("cuda", 0)), torch.no_grad():
+        model = tiny_model(torch.device("cuda", 0)).eval()
+        assert_full_decode_graph(model)
+
+
+@pytest.mark.accelerator
+def test_serial_decode_graph_matches_eager_and_owns_outputs() -> None:
+    require_cuda()
+    with native_runtime(torch.device("cuda", 0)), torch.no_grad():
+        model = tiny_model(torch.device("cuda", 0)).eval()
+        original_embedding = model.decode_input_embedding
+        original_contents = original_embedding.weight.clone()
+        model.decode_graph = sentinel.original_graph
+        original_logits = (torch.ones(3, device="cuda"), torch.ones(2, device="cuda"))
+        model.dual_logits_by_request_id[("retained", "decode")] = original_logits
+        report = assert_serial_decode_graph(model, capacity=16)
+        assert report["executions"]["2"] > 0 and report["executions"]["4"] > 0
+        assert report["no_partial_retry"] and report["boundary_fallback_exact"]
+        assert model.decode_input_embedding is original_embedding
+        assert torch.equal(original_embedding.weight, original_contents)
+        assert model.decode_graph is sentinel.original_graph
+        assert model.dual_logits_by_request_id == {
+            ("retained", "decode"): original_logits
+        }
+        with (
+            patch(
+                "sglang_omni.models.moss_speech.decode_graphs.DecodeGraph.initialize",
+                side_effect=RuntimeError("qualification startup failure"),
+            ),
+            pytest.raises(RuntimeError, match="qualification startup failure"),
+        ):
+            assert_serial_decode_graph(model, capacity=16)
+        assert model.decode_input_embedding is original_embedding
+        assert torch.equal(original_embedding.weight, original_contents)
+        assert model.decode_graph is sentinel.original_graph
+        assert model.dual_logits_by_request_id == {
+            ("retained", "decode"): original_logits
+        }

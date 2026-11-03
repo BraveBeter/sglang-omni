@@ -3,7 +3,7 @@
 
 from typing import ClassVar, Literal
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, StrictBool, model_validator
 
 from sglang_omni.config import (
     EngineArgs,
@@ -40,6 +40,15 @@ class MossSpeechEngineArgs(FactoryArgs):
 
     dtype: str = "bfloat16"
     context_length: int = Field(default=MAX_CONTEXT_TOKENS, ge=1, le=MAX_CONTEXT_TOKENS)
+    decode_graph: StrictBool = False
+    decode_graph_serial_batch: StrictBool = False
+
+    @model_validator(mode="after")
+    def validate_serial_graph(self) -> "MossSpeechEngineArgs":
+        if self.decode_graph_serial_batch and not self.decode_graph:
+            raise ValueError("decode_graph_serial_batch requires decode_graph")
+        else:
+            return self
 
 
 class MossSpeechEngineStage(EngineStageConfig):
