@@ -66,6 +66,7 @@ class MossSpeechVocoderArgs(FactoryArgs):
     cfm_graph_mel_length: int | None = Field(
         default=None, ge=100, le=4000, multiple_of=100
     )
+    direct_lt_library: str | None = None
 
 
 class MossSpeechVocoderStage(StageConfig):

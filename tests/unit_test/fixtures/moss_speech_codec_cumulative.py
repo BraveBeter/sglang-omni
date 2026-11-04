@@ -56,13 +56,19 @@ def assert_cumulative_codec(
     reference_json: str,
     reference_tensors: str,
     optimizations: list[str],
-    vocoder_options: dict[str, bool | int],
+    vocoder_options: dict[str, bool | int | str],
 ) -> CumulativeCodecProof:
     """Preserve fixed HF offline PCM and independently owned Torch stream behavior."""
-    selected = set(optimizations) & {"codec-bias-broadcast", "codec-cfm-graph"}
-    assert selected == {"codec-bias-broadcast", "codec-cfm-graph"}
+    selected = set(optimizations) & {
+        "direct-lt",
+        "codec-bias-broadcast",
+        "codec-cfm-graph",
+    }
+    assert selected == {"direct-lt", "codec-bias-broadcast", "codec-cfm-graph"}
+    library_path = os.environ["MOSS_DIRECT_LT_LIBRARY"]
     assert vocoder_options == {
         "broadcast_attention_bias": True,
+        "direct_lt_library": library_path,
         "cfm_graph_mel_length": 1500,
     }
     reference_path = Path(reference_json)
@@ -99,6 +105,7 @@ def assert_cumulative_codec(
         gpu_id=device.index,
         broadcast_attention_bias=True,
         cfm_graph_mel_length=1500,
+        direct_lt_library=library_path,
     )
     independent: MossSpeechStreamingCodec | None = None
     artifacts: dict[str, torch.Tensor] = {}
@@ -113,16 +120,18 @@ def assert_cumulative_codec(
             torch.cuda.manual_seed_all(42)
             return adapter.decode(code_values, voice, request_id="offline")[1]
 
-    def decode_stream(codec: MossSpeechStreamingCodec, request_id: str) -> torch.Tensor:
+    def decode_stream(
+        codec: MossSpeechStreamingCodec, request_id: str, code_values: list[int]
+    ) -> torch.Tensor:
         codec.begin(request_id, voice.to_dict(), seed=42)
         session = codec.sessions[request_id]
         waveform = torch.cat(
-            codec.push(request_id, codes[:36])
-            + codec.push(request_id, codes[36:], final=True)
+            codec.push(request_id, code_values[:36])
+            + codec.push(request_id, code_values[36:], final=True)
         )
-        assert session.codes == codes and session.cursor == len(codes)
-        assert session.emitted_samples == len(codes) * codec.samples_per_code
-        assert waveform.numel() == len(codes) * codec.samples_per_code
+        assert session.codes == code_values and session.cursor == len(code_values)
+        assert session.emitted_samples == len(code_values) * codec.samples_per_code
+        assert waveform.numel() == len(code_values) * codec.samples_per_code
         assert request_id not in codec.sessions
         return waveform
 
@@ -139,6 +148,9 @@ def assert_cumulative_codec(
         assert executor.offline_codec.decode_lock is not executor.codec.lock
         assert executor.codec.hift is not independent.hift
         assert len(executor.codec.bias_broadcast_processors) == 56
+        direct_owner = executor.codec.direct_lt
+        assert direct_owner is not None
+        direct_calls_after_startup = direct_owner.calls
         for name in reference["case_order"]:
             code_values = oracle[name + ".codes"][0].tolist()
             expected = oracle[name + ".pcm"].squeeze()
@@ -147,8 +159,15 @@ def assert_cumulative_codec(
             torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
             artifacts[name + ".actual_offline_pcm"] = actual.clone().contiguous()
             artifacts[name + ".hf_pcm"] = expected.clone().contiguous()
-        expected_stream = decode_stream(independent, "reference")
+        expected_stream = decode_stream(independent, "reference", codes)
         artifacts["stream.reference_pcm"] = expected_stream.clone().contiguous()
+        expected_short = decode_stream(independent, "short-reference", codes[:6])
+        actual_short = decode_stream(executor.codec, "short-direct-lt", codes[:6])
+        torch.testing.assert_close(actual_short, expected_short, atol=1e-5, rtol=1e-5)
+        assert actual_short.numel() == 6 * executor.codec.samples_per_code
+        assert direct_owner.calls > direct_calls_after_startup
+        artifacts["short.reference_pcm"] = expected_short.clone().contiguous()
+        artifacts["short.actual_pcm"] = actual_short.clone().contiguous()
         held_sessions: list[CodecStreamSession] = []
         first_chunks: list[list[torch.Tensor]] = []
         for request_id in ("live-a", "live-b"):
@@ -218,13 +237,15 @@ def assert_cumulative_codec(
         graph = executor.codec.cfm_graph
         assert graph is not None and graph.replays > 0
         graph_replay_count = graph.replays
+        assert direct_owner.calls > direct_calls_after_startup
         executor.codec.close()
+        assert direct_owner.closed
         actual_offline = decode_offline(executor.offline_codec, codes)
         torch.testing.assert_close(
             actual_offline, oracle["codes511.pcm"].squeeze(), atol=1e-5, rtol=1e-5
         )
         executor.offline_codec.close()
-        actual_stream = decode_stream(executor.codec, "after-offline-close")
+        actual_stream = decode_stream(executor.codec, "after-offline-close", codes)
         torch.testing.assert_close(actual_stream, expected_stream, atol=1e-5, rtol=1e-5)
         assert not executor.codec.sessions and not executor.offline_codec.sessions
         assert pickle.dumps(random.getstate(), protocol=5) == caller_random_state[0]
@@ -255,8 +276,9 @@ def assert_cumulative_codec(
             "executions": {
                 "codec-bias-broadcast": bias_execution_count,
                 "codec-cfm-graph": graph_replay_count,
+                "direct-lt": direct_owner.calls - direct_calls_after_startup,
             },
-            "comparison_scope": "All four full offline cases against frozen independent HF PCM; complete511-code streaming against independently owned unoptimized Torch, with the same pinned voice and code ledger.",
+            "comparison_scope": "All four full offline cases against frozen independent HF PCM; complete511-code and short6-code streaming against independently owned unoptimized Torch. Require actual Lt launches after startup and CFM replays in the same combined configuration.",
             "tensor_artifact": str(artifact_path),
             "tensor_artifact_sha256": hashlib.sha256(
                 artifact_path.read_bytes()

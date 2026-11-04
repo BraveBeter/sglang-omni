@@ -11,6 +11,10 @@ from typing import TypedDict
 import numpy as np
 import torch
 
+from sglang_omni.models.moss_speech.components.cfm_direct_lt import (
+    DirectLtOwner,
+    install_direct_lt,
+)
 from sglang_omni.models.moss_speech.components.cfm_graph import MossSpeechCFMGraph
 from sglang_omni.models.moss_speech.hf_config import MAX_CONTEXT_TOKENS
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.flow import (
@@ -80,6 +84,7 @@ class MossSpeechStreamingCodec:
         codec_path: str | Path | None,
         *,
         chunk_size: int,
+        direct_lt_library: str | None = None,
         device: str | torch.device,
         flow: CausalMaskedDiffWithXvec | None = None,
         hift: HiFTGenerator | None = None,
@@ -145,11 +150,25 @@ class MossSpeechStreamingCodec:
             if broadcast_attention_bias
             else ()
         )
+        self.direct_lt: DirectLtOwner | None = None
+        if direct_lt_library is not None:
+            self.direct_lt = install_direct_lt(
+                self.flow.decoder.estimator, direct_lt_library
+            )
+        else:
+            pass
         self.cfm_graph: MossSpeechCFMGraph | None = None
         if cfm_graph_mel_length is not None:
-            self.cfm_graph = MossSpeechCFMGraph(
-                self.flow.decoder, mel_length=cfm_graph_mel_length
-            )
+            try:
+                self.cfm_graph = MossSpeechCFMGraph(
+                    self.flow.decoder, mel_length=cfm_graph_mel_length
+                )
+            except BaseException:
+                if self.direct_lt is not None:
+                    self.direct_lt.close()
+                else:
+                    pass
+                raise
         else:
             pass
 
@@ -382,10 +401,16 @@ class MossSpeechStreamingCodec:
     def close(self) -> None:
         with self.lock:
             self.sessions.clear()
-            if self.cfm_graph is not None:
-                try:
-                    self.cfm_graph.close()
-                finally:
-                    self.cfm_graph = None
-            else:
-                pass
+            try:
+                if self.cfm_graph is not None:
+                    try:
+                        self.cfm_graph.close()
+                    finally:
+                        self.cfm_graph = None
+                else:
+                    pass
+            finally:
+                if self.direct_lt is not None:
+                    self.direct_lt.close()
+                else:
+                    pass

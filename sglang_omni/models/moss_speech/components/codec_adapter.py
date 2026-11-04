@@ -12,6 +12,10 @@ import torchaudio
 from safetensors.torch import load_file
 from transformers import WhisperFeatureExtractor
 
+from sglang_omni.models.moss_speech.components.cfm_direct_lt import (
+    DirectLtOwner,
+    install_direct_lt,
+)
 from sglang_omni.models.moss_speech.components.voice import (
     CampplusSpeakerEncoder,
     VoiceConditioning,
@@ -46,9 +50,12 @@ class MossSpeechCodecAdapter:
         load_encoder: bool = True,
         load_decoder: bool = True,
         broadcast_attention_bias: bool = False,
+        direct_lt_library: str | None = None,
     ) -> None:
         if type(broadcast_attention_bias) is not bool:
             raise ValueError("broadcast_attention_bias must be a bool")
+        elif direct_lt_library is not None and not load_decoder:
+            raise ValueError("Direct Lt requires the codec decoder")
         else:
             pass
         if dtype is not torch.float32:
@@ -89,6 +96,7 @@ class MossSpeechCodecAdapter:
         self.sessions: set[str] = set()
         self.encoder: WhisperVQEncoder | None = None
         self.feature_extractor: WhisperFeatureExtractor | None = None
+        self.direct_lt: DirectLtOwner | None = None
         self.decoder: AudioDecoder | None = None
         self.speaker_encoder: CampplusSpeakerEncoder | None = None
         if load_encoder:
@@ -105,6 +113,12 @@ class MossSpeechCodecAdapter:
                 device=self.device,
                 broadcast_attention_bias=broadcast_attention_bias,
             ).eval()
+            if direct_lt_library is not None:
+                self.direct_lt = install_direct_lt(
+                    self.decoder.flow.decoder.estimator, direct_lt_library
+                )
+            else:
+                pass
         else:
             pass
 
@@ -249,6 +263,8 @@ class MossSpeechCodecAdapter:
         self.sessions.add(request_id)
         try:
             with self.decode_lock:
+                self.require_open()
+                assert self.decoder is not None
                 waveform = self.decoder.decode(
                     torch.tensor([list(codes)], dtype=torch.long, device=self.device),
                     voice.to_dict(),
@@ -262,11 +278,16 @@ class MossSpeechCodecAdapter:
 
     def close(self) -> None:
         self.is_closed = True
-        self.sessions.clear()
-        self.decoder = None
-        self.encoder = None
-        self.feature_extractor = None
-        self.speaker_encoder = None
+        with self.decode_lock:
+            if self.direct_lt is not None:
+                self.direct_lt.close()
+            else:
+                pass
+            self.sessions.clear()
+            self.decoder = None
+            self.encoder = None
+            self.feature_extractor = None
+            self.speaker_encoder = None
 
     def __enter__(self) -> MossSpeechCodecAdapter:
         return self

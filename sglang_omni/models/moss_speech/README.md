@@ -179,3 +179,26 @@ When native norm and serial decode Graph are enabled together, the builder insta
 `ar_engine.factory.decode_rope_reuse` defaults to `false`. When enabled, inference-only eager decode batches of at least two requests reuse the original-shape cosine/sine tensors within one forward across the compatible shared and modality-tail layers. Frequency construction, FP32 position multiplication, trigonometric operations, BF16 rounding, attention/KV operations and per-request projection shapes are unchanged. No request tensors are retained between forwards.
 
 Prefill, batch-one decode, training/gradient/autocast execution, forward hooks, or incompatible layer head dimensions, RoPE theta, dtype or device retain the per-layer eager path. Successful eligible forwards increment `model.decode_rope_reuse_forwards`; the first emits `batched RoPE reuse active`. These indicate path activation, not a performance guarantee. Independent-HF correctness and matched end-to-end benchmarks must qualify each final candidate/configuration before deployment.
+
+
+### Optional full-affine DirectLt
+
+Set `audio_vocoder.factory.direct_lt_library` to a shared library built from `kernels/cfm_direct_lt.cpp`. The default is `None`. This experiment requires SM80 and cuBLASLt `13.1.1`, checks the actual header and loaded runtime versions, and supports FP32 full lengths `1392`, `1400`, `1424` and `1500` with CFG batch size two. It computes complete projections and returns independently owned outputs. It does not implement a prefix or tail cache, graph capture or LoRA projection.
+
+From this model directory, build against the qualified headers and libraries. Set the two directories for your installation; pip CUDA packages may use `lib` rather than `lib64`:
+
+```bash
+MOSS_CUDA_INCLUDE=/path/to/cuda/include
+MOSS_CUDA_LIB=/path/to/cuda/lib64
+g++ -shared -fPIC -O3 -std=c++17 -I"${MOSS_CUDA_INCLUDE}" \
+  kernels/cfm_direct_lt.cpp "${MOSS_CUDA_LIB}/libcublasLt.so.13" \
+  "${MOSS_CUDA_LIB}/libcudart.so.13" -Wl,-rpath,"${MOSS_CUDA_LIB}" \
+  -o /path/to/cfm_direct_lt.so
+sha256sum kernels/cfm_direct_lt.cpp /path/to/cfm_direct_lt.so
+```
+
+Qualification used Torch `2.14.1+cu130`, CUDA runtime `13.0.96`, cuBLAS `13.1.1.3` and GCC `11.4.0`. For the same Torch comparison policy, set `CUBLAS_WORKSPACE_CONFIG=:4096:8` before launching the service. Use benchmark-client with the exact candidate SHA and library hash for correctness, then compare against a fresh baseline with the same environment. Requalify after changing this stack.
+
+The wrapper preserves parameter identities and state-dict names. Unsupported shape/layout, training, gradient/autocast/TF32, capture, or a different stream, device or serving thread uses the original Torch linear. Each decoder owns a `1 MiB` workspace and serializes native launches. Plans retain descriptors and parameter references; in-place parameter values remain live. Replacing parameter storage destroys the old plan after device synchronization. Closing the owner synchronizes pending launches, releases its plans/workspace, and disables this backend. The wheel and sdist contain the C++ source; build and configure the optional library separately.
+
+When both codec options are enabled, install the Lt wrappers before CFM capture. Captured solver calls retain native matmuls; eligible eager solver calls use Lt. Qualification must observe actual post-startup Lt launches separately from graph replay.
