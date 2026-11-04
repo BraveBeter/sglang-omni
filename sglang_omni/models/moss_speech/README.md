@@ -48,6 +48,8 @@ Other lengths, final chunks, buffered decoding, changed weights or numerical set
 
 `audio_vocoder.factory.broadcast_attention_bias` is an optional strict boolean, defaulting to `false`. When enabled, both streaming and offline codec decoders use a live attention-bias broadcast for plain native CUDA FP32 B2 self-attention, avoiding physical head copies without caching bias values or changing the SDPA backend. Training, autograd, autocast, custom processors/preparers/hooks and unsupported shapes or dtypes retain the stock processor. The public mask-preparation API and checkpoint keys remain unchanged. A first actual optimized call emits `MOSS_CODEC_BIAS_BROADCAST_ACTIVE`; installation alone is not execution evidence. Local operator/Codec checks do not establish HTTP TTFA or RTF benefits.
 
+Relative positional attention releases quadratic score intermediates before masking and softmax; output values and checkpoint keys are unchanged.
+
 ## Requests
 
 The service defaults to port 8000 and accepts /v1/chat/completions. Input content determines the input modality; modalities selects one output modality, text or audio. For a buffered text response:
@@ -99,6 +101,14 @@ The checkpoint supports a total context of 40,960 two-channel rows. Preprocessin
 The eager base has passed local CPU regressions, native CUDA checks, four-mode streaming/buffered service smoke and strict concurrent-versus-serial comparisons on single- and dual-A800 placements. Wheel/sdist contents and a regular wheel installation were also checked. These are local results; upstream H100 CI has not been executed. Calibrated latency/throughput, maximum concurrency and comprehensive quality evaluation remain separate work.
 
 Third-party source revisions, retained notices and outstanding statement scope are documented in [vendored source provenance](../../vendor/moss_speech_codec/VENDORED_SOURCES.md). Checkpoint terms are separate from source terms; no weights are bundled.
+
+The codec releases two local attention-score temporaries before masking and softmax. The arithmetic, tensor contents, relative shift, training behavior, and public configuration remain unchanged; references held by autograd or observers remain valid. No option is required.
+
+The measurements below are historical results from `pr/moss-speech-codec-score-release@286eef64c0ee0d55a3d02457ae3dae657d11ff1c` on eager base `084f62ef13c65fbf33f0c9a3f2cce5e87e0c01d6`. They do not qualify this migration to the 40960-context base; that candidate requires fresh correctness and Quick runs.
+
+Local A800 FP32 checks compared the checkpoint-loaded encoder on chunk 5 and chunk 25 profiles with 36/128/250 generated codes and a 342-code prompt. Across eight fixed cases, peak allocated memory during encoder execution fell by 139–342 MiB (12.5%–18.5%), with flow and HiFT weights resident. Each variant used a separate process, two warmups and three measurements per case. Complete encoder outputs, four streamed PCM cases and one offline PCM case matched the eager baseline exactly. These encoder memory measurements do not establish service latency, maximum concurrency, or a reduction in allocator-reserved memory.
+
+A fixed single-A800 HTTP comparison on English text-to-speech C1/C2 and Chinese speech-to-speech C4 found no latency improvement from score release. Completion-time median point estimates were 0.23%–0.91% higher and TTFA was 0.21%–1.67% higher; full PCM, finish reasons and usage matched the baseline. Each policy had two service starts and three formal groups per profile per start. The verified benefit remains encoder allocated-memory reduction; service peak memory and maximum concurrency were not established.
 
 ## Output and comparison contract
 

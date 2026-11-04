@@ -8,6 +8,7 @@ import os
 import random
 import threading
 import warnings
+import weakref
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,6 +51,9 @@ from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.decoder import (
 )
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.flow_matching import (
     CausalConditionalCFM,
+)
+from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.transformer.attention import (
+    RelPositionMultiHeadedAttention,
 )
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.utils_mask import (
     add_optional_chunk_mask,
@@ -1042,3 +1046,50 @@ def test_cfm_graph_fullweights_streaming_pcm_and_cleanup() -> None:
         codec.close()
         eager.close()
     assert codec.cfm_graph is None and "solve_euler" not in vars(codec.flow.decoder)
+
+
+@pytest.mark.parametrize("retain_observer_references", [False, True])
+def test_relative_attention_releases_score_temporaries(
+    monkeypatch, retain_observer_references
+):
+    references, retained = [], []
+    original_matmul = torch.matmul
+    with scoped_global_rng():
+        module = RelPositionMultiHeadedAttention(2, 8, 0.0).eval()
+        query = torch.randn(1, 3, 8)
+        position = torch.randn(1, 5, 8)
+    original_shift = module.rel_shift
+    original_attention = module.forward_attention
+
+    def observe(tensor):
+        references.append(weakref.ref(tensor))
+        if retain_observer_references:
+            retained.append((tensor, tensor.clone()))
+        return tensor
+
+    def matmul(left, right):
+        result = original_matmul(left, right)
+        return observe(result) if not references else result
+
+    def shift(tensor):
+        return observe(original_shift(tensor))
+
+    def attention(value, scores, mask):
+        assert len(references) == 2
+        assert all(
+            (reference() is not None) == retain_observer_references
+            for reference in references
+        )
+        for tensor, snapshot in retained:
+            torch.testing.assert_close(tensor, snapshot, rtol=0, atol=0)
+        return original_attention(value, scores, mask)
+
+    monkeypatch.setattr(torch, "matmul", matmul)
+    monkeypatch.setattr(module, "rel_shift", shift)
+    monkeypatch.setattr(module, "forward_attention", attention)
+    with torch.no_grad():
+        output, cache = module(
+            query, query, query, torch.ones(1, 3, 3, dtype=torch.bool), position
+        )
+    assert output.shape == query.shape and torch.isfinite(output).all()
+    assert cache.shape == (1, 2, 3, 8)

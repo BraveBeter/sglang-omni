@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 import torch
 from safetensors.torch import load_file, save_file
+from torch.utils.hooks import RemovableHandle
 
 from sglang_omni.models.moss_speech.components.codec_adapter import (
     MossSpeechCodecAdapter,
@@ -24,6 +25,9 @@ from sglang_omni.models.moss_speech.components.streaming_codec import (
 )
 from sglang_omni.models.moss_speech.components.voice import VoiceConditioning
 from sglang_omni.models.moss_speech.stages import create_audio_vocoder_executor
+from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.transformer.attention import (
+    RelPositionMultiHeadedAttention,
+)
 from sglang_omni.vendor.moss_speech_codec.hf_codec.modeling import scoped_global_rng
 
 
@@ -59,8 +63,16 @@ def assert_cumulative_codec(
     vocoder_options: dict[str, bool | int],
 ) -> CumulativeCodecProof:
     """Preserve fixed HF offline PCM and independently owned Torch stream behavior."""
-    selected = set(optimizations) & {"codec-bias-broadcast", "codec-cfm-graph"}
-    assert selected == {"codec-bias-broadcast", "codec-cfm-graph"}
+    selected = set(optimizations) & {
+        "codec-score-release",
+        "codec-bias-broadcast",
+        "codec-cfm-graph",
+    }
+    assert selected == {
+        "codec-score-release",
+        "codec-bias-broadcast",
+        "codec-cfm-graph",
+    }
     assert vocoder_options == {
         "broadcast_attention_bias": True,
         "cfm_graph_mel_length": 1500,
@@ -102,6 +114,8 @@ def assert_cumulative_codec(
     )
     independent: MossSpeechStreamingCodec | None = None
     artifacts: dict[str, torch.Tensor] = {}
+    score_calls: dict[str, int] = {"stream": 0}
+    score_handles: list[RemovableHandle] = []
 
     def decode_offline(
         adapter: MossSpeechCodecAdapter, code_values: list[int]
@@ -139,6 +153,24 @@ def assert_cumulative_codec(
         assert executor.offline_codec.decode_lock is not executor.codec.lock
         assert executor.codec.hift is not independent.hift
         assert len(executor.codec.bias_broadcast_processors) == 56
+
+        def observe_stream_scores(
+            module: RelPositionMultiHeadedAttention,
+            attention_inputs: tuple[torch.Tensor, ...],
+            attention_result: tuple[torch.Tensor, torch.Tensor],
+        ) -> None:
+            assert not module.training
+            assert attention_result[0].shape == attention_inputs[0].shape
+            score_calls["stream"] += 1
+
+        for module in executor.codec.flow.modules():
+            if isinstance(module, RelPositionMultiHeadedAttention):
+                score_handles.append(
+                    module.register_forward_hook(observe_stream_scores)
+                )
+            else:
+                pass
+        assert score_handles
         for name in reference["case_order"]:
             code_values = oracle[name + ".codes"][0].tolist()
             expected = oracle[name + ".pcm"].squeeze()
@@ -218,6 +250,7 @@ def assert_cumulative_codec(
         graph = executor.codec.cfm_graph
         assert graph is not None and graph.replays > 0
         graph_replay_count = graph.replays
+        assert score_calls["stream"] > 0
         executor.codec.close()
         actual_offline = decode_offline(executor.offline_codec, codes)
         torch.testing.assert_close(
@@ -255,6 +288,7 @@ def assert_cumulative_codec(
             "executions": {
                 "codec-bias-broadcast": bias_execution_count,
                 "codec-cfm-graph": graph_replay_count,
+                "codec-score-release": score_calls["stream"],
             },
             "comparison_scope": "All four full offline cases against frozen independent HF PCM; complete511-code streaming against independently owned unoptimized Torch, with the same pinned voice and code ledger.",
             "tensor_artifact": str(artifact_path),
@@ -265,6 +299,8 @@ def assert_cumulative_codec(
             "stream_sample_count": expected_stream.numel(),
         }
     finally:
+        for handle in score_handles:
+            handle.remove()
         executor.stop()
         if independent is not None:
             independent.close()
