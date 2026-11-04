@@ -59,6 +59,7 @@ class MossSpeechEngineBuilder(
         native_norm_library: str | None = None,
         decode_graph: bool = False,
         decode_graph_serial_batch: bool = False,
+        decode_rope_reuse: bool = False,
     ) -> None:
         super().__init__()
         self.native_norm_library = native_norm_library
@@ -77,6 +78,7 @@ class MossSpeechEngineBuilder(
         self.decode_graph_serial_batch = decode_graph_serial_batch
         self.decode_graph = None
         self.streaming = streaming
+        self.decode_rope_reuse = decode_rope_reuse
         self.request_lifecycle: MossSpeechRequestLifecycle | None = None
         if context_length is None:
             pass
@@ -184,6 +186,7 @@ class MossSpeechEngineBuilder(
         model = model_worker.model_runner.model
         assert isinstance(model, MossSpeechSGLangModel)
         model.assert_heads_independent()
+        model.decode_rope_reuse = self.decode_rope_reuse
         configuration = resolved_view(server_args)
         if (
             configuration.max_running_requests

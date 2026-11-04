@@ -56,6 +56,7 @@ class SerialDecodeProof(TypedDict):
     no_partial_retry: bool
     exactness_cases: int
     native_capture_calls: int
+    rope_reuse_executions: int
 
 
 class CumulativeARProof(TypedDict):
@@ -120,7 +121,7 @@ def native_runtime(device: torch.device) -> Iterator[None]:
 
 
 def tiny_model(
-    device: torch.device, *, audio_vocab_size: int = 64
+    device: torch.device, *, audio_vocab_size: int = 64, batch_size: int = 2
 ) -> MossSpeechSGLangModel:
     configuration = MossSpeechConfig(
         vocab_size=256,
@@ -134,7 +135,7 @@ def tiny_model(
         num_modality_layers=1,
         num_hidden_layers=3,
         max_position_embeddings=16,
-        moss_decode_buffer_bs=2,
+        moss_decode_buffer_bs=batch_size,
     )
     model = MossSpeechSGLangModel(configuration, init_device=device)
     generator = torch.Generator(device=device).manual_seed(183)
@@ -201,12 +202,12 @@ def prefill(
     token_count = sum(token_lengths)
     request_pool = ReqToTokenPool(
         size=len(token_lengths),
-        max_context_len=max_context_len,
+        max_context_len=max(max_context_len, max(token_lengths) + 2),
         device=str(device),
         enable_memory_saver=False,
     )
     kv_pool = MHATokenToKVPool(
-        size=max(32, 2 * max_context_len),
+        size=max(32, 2 * max_context_len, token_count + 2 * len(token_lengths)),
         page_size=1,
         dtype=torch.bfloat16,
         head_num=model.config.num_key_value_heads,
@@ -432,8 +433,11 @@ def assert_serial_decode_graph(
     capacity: int = 1024,
     native_norm_library: str | None = None,
     require_native_execution: bool = True,
+    decode_rope_reuse: bool = False,
 ) -> SerialDecodeProof:
     """Qualify actual serial dispatch, complete outputs, KV ownership and fallbacks."""
+    original_rope_enabled = model.decode_rope_reuse
+    rope_executions_before = model.decode_rope_reuse_forwards
     original_embedding = model.decode_input_embedding
     original_embedding_contents = original_embedding.weight.clone()
     had_decode_graph = "decode_graph" in model.__dict__
@@ -446,6 +450,7 @@ def assert_serial_decode_graph(
     previous_native = [module.native_norm for module in norms]
     native = NativeNorm(native_norm_library) if native_norm_library else None
     try:
+        model.decode_rope_reuse = decode_rope_reuse
         for module in norms:
             module.native_norm = native
         device = model.embed_tokens.weight.device
@@ -542,12 +547,17 @@ def assert_serial_decode_graph(
                 )
                 for count in (2, 4)
             )
+            if decode_rope_reuse:
+                cases.extend(([0, 1, 2], [length] * 3) for length in graph_lengths)
+            else:
+                pass
             retained_outputs = []
             with forward_context(ForwardContext(attn_backend=backend)):
                 for order, token_lengths in cases:
                     batch = make_batch(order, token_lengths)
                     for cache, saved in zip(caches, snapshots):
                         cache.copy_(saved)
+                    model.decode_rope_reuse = False
                     for module in norms:
                         module.native_norm = None
                     try:
@@ -555,11 +565,14 @@ def assert_serial_decode_graph(
                             batch.input_ids, batch.positions, batch
                         )
                     finally:
+                        model.decode_rope_reuse = decode_rope_reuse
                         for module in norms:
                             module.native_norm = native
                     expected_caches = [cache.clone() for cache in caches]
                     for cache, saved in zip(caches, snapshots):
                         cache.copy_(saved)
+                    graph_replays_before = decode_graph.hits
+                    rope_reuses_before = model.decode_rope_reuse_forwards
                     actual = model(batch.input_ids, batch.positions, batch)
                     for name in ("text_logits", "audio_logits", "hidden_states"):
                         torch.testing.assert_close(
@@ -577,7 +590,13 @@ def assert_serial_decode_graph(
                     )
                     retained_outputs.append((actual, actual.audio_logits.clone()))
                     actual.text_logits.fill_(float("-inf"))
-                    assert torch.isfinite(actual.next_token_logits).all()
+                    if len(order) == 3:
+                        assert decode_graph.hits == graph_replays_before
+                        assert model.decode_rope_reuse_forwards > rope_reuses_before
+                        assert torch.isfinite(expected.text_logits).all()
+                    else:
+                        assert decode_graph.hits > graph_replays_before
+                        assert torch.isfinite(actual.next_token_logits).all()
                     for i, request_id in enumerate(batch.rids):
                         cached_text, cached_audio = model.dual_logits_by_request_id[
                             (request_id, "decode")
@@ -735,6 +754,11 @@ def assert_serial_decode_graph(
                 for batch_size, count in decode_graph.serial_batches.items()
             }
             assert executions["2"] > 0 and executions["4"] > 0
+            rope_executions = model.decode_rope_reuse_forwards - rope_executions_before
+            if decode_rope_reuse:
+                assert rope_executions > 0
+            else:
+                assert rope_executions == 0
             return dict(
                 batch_sizes=[2, 4],
                 executions=executions,
@@ -754,11 +778,13 @@ def assert_serial_decode_graph(
                 no_partial_retry=True,
                 exactness_cases=len(cases),
                 native_capture_calls=decode_graph.native_capture_calls,
+                rope_reuse_executions=rope_executions,
             )
         finally:
             decode_graph.close()
             decode_graph.close()
     finally:
+        model.decode_rope_reuse = original_rope_enabled
         for module, previous in zip(norms, previous_native, strict=True):
             module.native_norm = previous
         model.decode_input_embedding = original_embedding
@@ -785,12 +811,21 @@ def assert_cumulative_ar(
         "ar-decode-graph",
         "ar-serial-decode-graph",
         "native-norm",
+        "ar-batched-rope",
     }
-    assert selected == {"ar-decode-graph", "ar-serial-decode-graph", "native-norm"}
+    assert selected == {
+        "ar-decode-graph",
+        "ar-serial-decode-graph",
+        "native-norm",
+        "ar-batched-rope",
+    }
     assert projection_batch_size == 0 and not graph_lengths
     assert native_norm_library
     serial = assert_serial_decode_graph(
-        model, capacity=1024, native_norm_library=native_norm_library
+        model,
+        capacity=1024,
+        native_norm_library=native_norm_library,
+        decode_rope_reuse=True,
     )
     serial_calls = sum(serial["executions"].values())
     b1_calls = serial["row_replays"] - sum(
@@ -801,6 +836,7 @@ def assert_cumulative_ar(
         "ar-decode-graph": b1_calls,
         "ar-serial-decode-graph": serial_calls,
         "native-norm": serial["native_capture_calls"],
+        "ar-batched-rope": serial["rope_reuse_executions"],
     }
     return {
         "optimizations": {
@@ -818,3 +854,121 @@ def assert_cumulative_ar(
         "joint_all_kv_exact": True,
         "serial_decode_graph": serial,
     }
+
+
+class BatchedRopeProof(TypedDict):
+    batch_sizes: list[int]
+    executions: dict[str, int]
+    complete_heads_exact: bool
+    all_kv_exact: bool
+    kv_layers: int
+
+
+def qualify_batched_rope(
+    model: MossSpeechSGLangModel, grids: dict[str, torch.Tensor]
+) -> tuple[BatchedRopeProof, dict[str, dict[str, dict[str, torch.Tensor]]]]:
+    """Return real batched final-row logits; the caller owns independent HF comparisons."""
+    assert grids and len({grid.shape[0] for grid in grids.values()}) >= 2
+    assert all(
+        grid.ndim == 2 and grid.shape[1] == 2 and grid.shape[0] >= 2
+        for grid in grids.values()
+    )
+    assert model.decode_input_embedding.num_embeddings >= 4
+    device = model.embed_tokens.weight.device
+    row_runner = RowCommitRunner(model)
+    original_enabled = model.decode_rope_reuse
+    original_training = model.training
+    original_logits = dict(model.dual_logits_by_request_id)
+    original_feedback = model.decode_input_embedding.weight.clone()
+    proof: BatchedRopeProof = {
+        "batch_sizes": [2, 4],
+        "executions": {},
+        "complete_heads_exact": True,
+        "all_kv_exact": True,
+        "kv_layers": model.total_attention_layers,
+    }
+    outputs: dict[str, dict[str, dict[str, torch.Tensor]]] = {}
+    names = sorted(grids, key=lambda name: grids[name].shape[0])
+    try:
+        with torch.inference_mode():
+            model.eval()
+            for batch_size in (2, 4):
+                before = model.decode_rope_reuse_forwards
+                outputs[str(batch_size)] = {}
+                for offset, name in enumerate(names):
+                    anchor = (
+                        names[-1]
+                        if grids[name].shape[0] == grids[names[0]].shape[0]
+                        else names[0]
+                    )
+                    group = [name] + [anchor] * (batch_size - 1)
+                    prompt_embeddings = [
+                        row_runner.rows_to_embeddings(grids[name][:-1].to(device))
+                        for name in group
+                    ]
+                    feedback = torch.cat(
+                        [
+                            row_runner.rows_to_embeddings(grids[name][-1:].to(device))
+                            for name in group
+                        ]
+                    )
+                    lengths = [len(prompt) for prompt in prompt_embeddings]
+                    request_ids = [
+                        f"rope-{batch_size}-{offset}-{index}"
+                        for index in range(batch_size)
+                    ]
+                    model.decode_rope_reuse = False
+                    _, eager_backend = prefill(model, prompt_embeddings, request_ids)
+                    eager_output = decode(
+                        model, eager_backend, lengths, feedback, request_ids
+                    )
+                    model.decode_rope_reuse = True
+                    _, candidate_backend = prefill(
+                        model, prompt_embeddings, request_ids
+                    )
+                    candidate_output = decode(
+                        model, candidate_backend, lengths, feedback, request_ids
+                    )
+                    for actual, expected in (
+                        (candidate_output.text_logits, eager_output.text_logits),
+                        (candidate_output.audio_logits, eager_output.audio_logits),
+                        (candidate_output.hidden_states, eager_output.hidden_states),
+                    ):
+                        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                    for layer_index in model.attention_layer_ids():
+                        for request_index, length in enumerate(lengths, 1):
+                            slots = candidate_backend.req_to_token_pool.req_to_token[
+                                request_index, : length + 1
+                            ].long()
+                            for cache_name in ("get_key_buffer", "get_value_buffer"):
+                                actual = getattr(
+                                    candidate_backend.token_to_kv_pool, cache_name
+                                )(layer_index)[slots]
+                                expected = getattr(
+                                    eager_backend.token_to_kv_pool, cache_name
+                                )(layer_index)[slots]
+                                torch.testing.assert_close(
+                                    actual, expected, rtol=0, atol=0
+                                )
+                    assert (
+                        candidate_output.text_logits is not None
+                        and candidate_output.audio_logits is not None
+                    )
+                    for index, name in enumerate(group):
+                        outputs[str(batch_size)][name] = {
+                            "text": candidate_output.text_logits[index].cpu().clone(),
+                            "audio": candidate_output.audio_logits[index].cpu().clone(),
+                        }
+                proof["executions"][str(batch_size)] = (
+                    model.decode_rope_reuse_forwards - before
+                )
+                assert proof["executions"][str(batch_size)] > 0
+                assert set(outputs[str(batch_size)]) == set(grids)
+    finally:
+        model.decode_rope_reuse = original_enabled
+        model.train(original_training)
+        model.dual_logits_by_request_id.clear()
+        model.dual_logits_by_request_id.update(original_logits)
+        with torch.inference_mode():
+            model.decode_input_embedding.weight.copy_(original_feedback)
+    return proof, outputs

@@ -57,6 +57,30 @@ def reference_rope_frequencies(head_dim: int, theta: float) -> torch.Tensor:
     return 1.0 / (theta**exponents)
 
 
+def reference_rope_terms(
+    positions: torch.Tensor,
+    head_dim: int,
+    theta: float,
+    dtype: torch.dtype,
+    inverse_frequencies: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Preserve reference frequency, trigonometric and output rounding."""
+    if inverse_frequencies is None:
+        inverse_frequencies = reference_rope_frequencies(head_dim, theta).to(
+            positions.device
+        )
+    else:
+        pass
+    with torch.autocast(device_type=positions.device.type, enabled=False):
+        frequencies = (
+            inverse_frequencies[None, :, None] @ positions[None, None, :].float()
+        ).transpose(1, 2)
+        angles = torch.cat((frequencies, frequencies), dim=-1)
+        cosine = angles.cos().to(dtype)[0, :, None, :]
+        sine = angles.sin().to(dtype)[0, :, None, :]
+    return cosine, sine
+
+
 def request_linear(
     hidden_states: torch.Tensor, weight: torch.Tensor, token_lengths: list[int]
 ) -> torch.Tensor:
@@ -156,6 +180,7 @@ class MossSpeechDecoderLayer(torch.nn.Module):
         forward_batch: ForwardBatch,
         token_lengths: list[int],
         residual: torch.Tensor | None = None,
+        rope_terms: tuple[torch.Tensor, torch.Tensor] | None = None,
         rope_frequencies: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
@@ -184,20 +209,16 @@ class MossSpeechDecoderLayer(torch.nn.Module):
             k.reshape(-1, attention.num_kv_heads, attention.head_dim),
             token_lengths,
         )
-        inverse_frequencies = (
-            reference_rope_frequencies(attention.head_dim, attention.rope_theta).to(
-                positions.device
+        if rope_terms is None:
+            cosine, sine = reference_rope_terms(
+                positions,
+                attention.head_dim,
+                attention.rope_theta,
+                q.dtype,
+                inverse_frequencies=rope_frequencies,
             )
-            if rope_frequencies is None
-            else rope_frequencies
-        )
-        with torch.autocast(device_type=positions.device.type, enabled=False):
-            frequencies = (
-                inverse_frequencies[None, :, None] @ positions[None, None, :].float()
-            ).transpose(1, 2)
-            angles = torch.cat((frequencies, frequencies), dim=-1)
-            cosine = angles.cos().to(q.dtype)[0, :, None, :]
-            sine = angles.sin().to(q.dtype)[0, :, None, :]
+        else:
+            cosine, sine = rope_terms
         query_left, query_right = q.chunk(2, dim=-1)
         key_left, key_right = k.chunk(2, dim=-1)
         q = (q * cosine + torch.cat((-query_right, query_left), dim=-1) * sine).reshape(

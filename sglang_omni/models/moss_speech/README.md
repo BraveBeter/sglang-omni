@@ -166,3 +166,10 @@ The loader compares the library's compile-time `CUDART_VERSION` with `torch.vers
 Use benchmark-client with an explicit candidate SHA and pinned library hash for correctness before comparing service performance. Attention, KV and projection remain eager Torch. Combining this option with another optimization requires its own validation.
 
 When native norm and serial decode Graph are enabled together, the builder installs the norm library before capture. Captures retain normalization owners and library identity; changed normalization configuration or execution policy rejects replay before KV mutation. The combined deployment requires fresh joint complete-head and KV qualification against eager Torch in addition to the independent HF checks.
+
+
+### Batched decode RoPE reuse
+
+`ar_engine.factory.decode_rope_reuse` defaults to `false`. When enabled, inference-only eager decode batches of at least two requests reuse the original-shape cosine/sine tensors within one forward across the compatible shared and modality-tail layers. Frequency construction, FP32 position multiplication, trigonometric operations, BF16 rounding, attention/KV operations and per-request projection shapes are unchanged. No request tensors are retained between forwards.
+
+Prefill, batch-one decode, training/gradient/autocast execution, forward hooks, or incompatible layer head dimensions, RoPE theta, dtype or device retain the per-layer eager path. Successful eligible forwards increment `model.decode_rope_reuse_forwards`; the first emits `batched RoPE reuse active`. These indicate path activation, not a performance guarantee. Independent-HF correctness and matched end-to-end benchmarks must qualify each final candidate/configuration before deployment.

@@ -22,6 +22,7 @@ from sglang_omni.models.moss_speech.hf_config import MossSpeechConfig
 from sglang_omni.models.moss_speech.model_layers import (
     MossSpeechDecoderLayer,
     MossSpeechRMSNorm,
+    reference_rope_terms,
     request_linear,
     request_norm,
 )
@@ -59,6 +60,8 @@ class MossSpeechSGLangModel(torch.nn.Module):
             pass
         assert config.audio_vocab_size is not None
         self.config = config
+        self.decode_rope_reuse = False
+        self.decode_rope_reuse_forwards = 0
         self.dtype = torch.bfloat16
         self.hidden_size = config.hidden_size
         self.text_vocab_size = config.vocab_size
@@ -171,9 +174,40 @@ class MossSpeechSGLangModel(torch.nn.Module):
             assert forward_batch.extend_seq_lens_cpu is not None
             token_lengths = list(forward_batch.extend_seq_lens_cpu)
         assert sum(token_lengths) == hidden_states.shape[0]
-        layer_kwargs = (
-            {} if rope_frequencies is None else {"rope_frequencies": rope_frequencies}
-        )
+        rope_terms = None
+        if (
+            self.decode_rope_reuse
+            and is_decode
+            and forward_batch.batch_size >= 2
+            and not self.training
+            and not torch.is_grad_enabled()
+            and not torch.is_autocast_enabled(hidden_states.device.type)
+            and hidden_states.dtype == torch.bfloat16
+            and positions.device == hidden_states.device
+            and all(
+                layer.self_attn.head_dim == self.head_dim
+                and layer.self_attn.rope_theta == self.config.rope_theta
+                and all(
+                    parameter.dtype == hidden_states.dtype
+                    and parameter.device == hidden_states.device
+                    for parameter in (
+                        layer.self_attn.qkv_proj.weight,
+                        layer.self_attn.q_norm.weight,
+                        layer.self_attn.k_norm.weight,
+                    )
+                )
+                for layer in (*self.layers, *self.text_block, *self.audio_block)
+            )
+            and not any(
+                module._forward_hooks or module._forward_pre_hooks
+                for module in self.modules()
+            )  # noqa: leading-underscore  # Torch exposes hooks through these attributes.
+        ):
+            rope_terms = reference_rope_terms(
+                positions, self.head_dim, self.config.rope_theta, hidden_states.dtype
+            )
+        else:
+            pass
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(
@@ -182,7 +216,8 @@ class MossSpeechSGLangModel(torch.nn.Module):
                 forward_batch,
                 token_lengths,
                 residual,
-                **layer_kwargs,
+                rope_frequencies=rope_frequencies,
+                rope_terms=rope_terms,
             )
         text_hidden, text_residual = hidden_states, residual
         audio_hidden = hidden_states.clone()
@@ -194,7 +229,8 @@ class MossSpeechSGLangModel(torch.nn.Module):
                 forward_batch,
                 token_lengths,
                 text_residual,
-                **layer_kwargs,
+                rope_frequencies=rope_frequencies,
+                rope_terms=rope_terms,
             )
         for layer in self.audio_block:
             audio_hidden, audio_residual = layer(
@@ -203,7 +239,8 @@ class MossSpeechSGLangModel(torch.nn.Module):
                 forward_batch,
                 token_lengths,
                 audio_residual,
-                **layer_kwargs,
+                rope_frequencies=rope_frequencies,
+                rope_terms=rope_terms,
             )
         if text_residual is None or audio_residual is None:
             raise RuntimeError("MOSS-Speech requires nonempty modality tails")
@@ -227,6 +264,16 @@ class MossSpeechSGLangModel(torch.nn.Module):
         audio_logits = request_linear(
             audio_final, self.audio_lm_head.weight, token_lengths
         )[last_token_indices, : self.audio_vocab_size]
+        if rope_terms is not None:
+            self.decode_rope_reuse_forwards += 1
+            if self.decode_rope_reuse_forwards == 1:
+                logger.info(
+                    f"batched RoPE reuse active batch_size={forward_batch.batch_size}"
+                )
+            else:
+                pass
+        else:
+            pass
         return MossSpeechModelOutput(
             next_token_logits=text_logits,
             text_logits=text_logits,

@@ -38,6 +38,7 @@ class MossSpeechPreprocessingStage(StageConfig):
 class MossSpeechEngineArgs(FactoryArgs):
     model_config = ConfigDict(extra="forbid")
 
+    decode_rope_reuse: bool = False
     dtype: str = "bfloat16"
     context_length: int = Field(default=MAX_CONTEXT_TOKENS, ge=1, le=MAX_CONTEXT_TOKENS)
     native_norm_library: str | None = None

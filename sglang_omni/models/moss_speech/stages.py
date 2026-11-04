@@ -145,6 +145,7 @@ def create_ar_engine_executor(
     decode_graph: bool = False,
     decode_graph_serial_batch: bool = False,
     native_norm_library: str | None = None,
+    decode_rope_reuse: bool = False,
     device: str | None = None,
     gpu_id: int | None = None,
     total_gpu_memory_fraction: float | None = None,
@@ -166,6 +167,7 @@ def create_ar_engine_executor(
         decode_graph=decode_graph,
         decode_graph_serial_batch=decode_graph_serial_batch,
         native_norm_library=native_norm_library,
+        decode_rope_reuse=decode_rope_reuse,
     ).build(
         model_path,
         device=device,
