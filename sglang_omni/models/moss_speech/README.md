@@ -38,7 +38,13 @@ Both placements use tensor parallel size one: the dual-GPU configuration places 
 
 Use the real-checkpoint smoke below to validate startup, output contracts, and recovery on the target GPUs. Measure deployment capacity and performance separately with fixed requests and output budgets.
 
-Set deployment values through typed stage configuration, for example preprocessing.factory.voice_wav, preprocessing.factory.codec_path, audio_vocoder.factory.codec_path, and ar_engine.engine.max_running_requests. The streaming codec uses chunk_size=25, declared once in the vocoder factory configuration. Optional optimization flags from the experimental branch are not part of this pipeline.
+Set deployment values through typed stage configuration, for example preprocessing.factory.voice_wav, preprocessing.factory.codec_path, audio_vocoder.factory.codec_path, and ar_engine.engine.max_running_requests. The streaming codec uses chunk_size=25, declared once in the vocoder factory configuration. Only the optional codec strategy documented below is included; it remains disabled by default.
+
+### Optional CFM solver graph
+
+The audio_vocoder.factory.cfm_graph_mel_length option defaults to null. Set one total mel-frame length, in multiples of 100 from 100 through 4000, to prepare one CUDA graph at startup with CUDA FP32 eval weights and chunk_size=25. The length includes the complete reference mel and generated mel; choose it explicitly for the configured workload.
+
+Other lengths, final chunks, buffered decoding, changed weights or numerical settings, autocast, and calls on another CUDA stream use the native eager solver. Capture and replay errors propagate. Startup preserves caller RNG, each replay copies all six solver inputs, and returned mel storage remains owned by the request. No additional graph is captured per request. Actual capture and replay must be verified separately from eager fallback and service performance.
 
 `audio_vocoder.factory.broadcast_attention_bias` is an optional strict boolean, defaulting to `false`. When enabled, both streaming and offline codec decoders use a live attention-bias broadcast for plain native CUDA FP32 B2 self-attention, avoiding physical head copies without caching bias values or changing the SDPA backend. Training, autograd, autocast, custom processors/preparers/hooks and unsupported shapes or dtypes retain the stock processor. The public mask-preparation API and checkpoint keys remain unchanged. A first actual optimized call emits `MOSS_CODEC_BIAS_BROADCAST_ACTIVE`; installation alone is not execution evidence. Local operator/Codec checks do not establish HTTP TTFA or RTF benefits.
 

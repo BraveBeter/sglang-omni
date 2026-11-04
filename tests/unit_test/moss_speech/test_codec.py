@@ -6,7 +6,9 @@ import hashlib
 import json
 import os
 import random
+import threading
 import warnings
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -20,11 +22,19 @@ from diffusers.models.attention_processor import Attention, AttnProcessor2_0
 from safetensors.torch import load_file, save_file
 
 import sglang_omni.models.moss_speech.components.voice as voice_module
+from sglang_omni.models.moss_speech.components.cfm_graph import (
+    MossSpeechCFMGraph,
+    SolverInputs,
+)
 from sglang_omni.models.moss_speech.components.codec_adapter import (
     CodecAdapterError,
     MossSpeechCodecAdapter,
 )
-from sglang_omni.models.moss_speech.components.streaming_codec import load_flow_weights
+from sglang_omni.models.moss_speech.components.streaming_codec import (
+    CodecStreamSession,
+    MossSpeechStreamingCodec,
+    load_flow_weights,
+)
 from sglang_omni.models.moss_speech.components.voice import (
     CampplusSpeakerEncoder,
     VoiceConditioning,
@@ -37,6 +47,12 @@ from sglang_omni.models.moss_speech.voice_transport import (
 )
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.decoder import (
     CausalConditionalDecoder,
+)
+from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.flow_matching import (
+    CausalConditionalCFM,
+)
+from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.utils_mask import (
+    add_optional_chunk_mask,
 )
 from sglang_omni.vendor.moss_speech_codec.hf_codec.modeling import scoped_global_rng
 from sglang_omni.vendor.moss_speech_codec.hf_codec.whisper import WhisperVQEncoder
@@ -52,6 +68,7 @@ from tests.unit_test.fixtures.moss_speech_codec import (
     TinyOfflineDecoder,
     audio_payload,
     encoder_adapter,
+    fullweight_streaming_inputs,
     offline_adapter,
     streaming_codec,
     tiny_whisper_config,
@@ -536,3 +553,492 @@ def test_nonstream_audio_accepts_full_torch_seed_range_and_restores_rng(
         assert torch.equal(torch.get_rng_state(), caller_rng)
     finally:
         scheduler.stop()
+
+
+def tiny_cfm_solver(device: torch.device) -> CausalConditionalCFM:
+    with scoped_global_rng(), torch.device(device):
+        return (
+            CausalConditionalCFM(
+                in_channels=240,
+                n_spks=1,
+                spk_emb_dim=80,
+                cfm_params=SimpleNamespace(
+                    sigma_min=1e-6,
+                    solver="euler",
+                    t_scheduler="cosine",
+                    training_cfg_rate=0.2,
+                    inference_cfg_rate=0.7,
+                ),
+                estimator=CausalConditionalDecoder(
+                    in_channels=320,
+                    out_channels=80,
+                    channels=(16,),
+                    dropout=0.0,
+                    attention_head_dim=8,
+                    n_blocks=1,
+                    num_mid_blocks=1,
+                    num_heads=2,
+                    act_fn="gelu",
+                    static_chunk_size=100,
+                    num_decoding_left_chunks=-1,
+                ),
+            )
+            .to(dtype=torch.float32)
+            .eval()
+        )
+
+
+def cfm_solver_inputs(
+    device: torch.device, *, mel_length: int = 100, shift: float = 0.0
+) -> SolverInputs:
+    x = (
+        torch.linspace(-0.2, 0.2, 80 * mel_length, device=device).reshape(
+            1, 80, mel_length
+        )
+        + shift
+    )
+    time_steps = torch.linspace(0, 1 + shift / 10, 11, device=device)
+    time_steps = 1 - torch.cos(time_steps * 0.5 * torch.pi)
+    mel_conditioning = torch.zeros(1, mel_length, 80, device=device).transpose(1, 2)
+    mel_conditioning.copy_(x * 0.3 + shift / 3)
+    return (
+        x,
+        time_steps,
+        x * 0.2 + shift / 7,
+        torch.full((1, 1, mel_length), 1 - shift / 20, device=device),
+        torch.linspace(-0.1, 0.1, 80, device=device).reshape(1, 80) + shift / 5,
+        mel_conditioning,
+    )
+
+
+class CFMTestStream:
+    def __init__(self, events: list[str], name: str) -> None:
+        self.events = events
+        self.name = name
+
+    def synchronize(self) -> None:
+        self.events.append(self.name)
+
+
+class CFMTestReplay:
+    def __init__(self, runner: MossSpeechCFMGraph, events: list[str]) -> None:
+        self.runner = runner
+        self.events = events
+        self.calls = 0
+        self.should_fail = False
+
+    def replay(self) -> None:
+        self.calls += 1
+        if self.should_fail:
+            raise RuntimeError("Injected graph replay failure")
+        else:
+            assert self.runner.inputs is not None and self.runner.output is not None
+            self.runner.output.copy_(
+                self.runner.original_solver(*self.runner.inputs, streaming=True)
+            )
+
+    def reset(self) -> None:
+        self.events.append("reset")
+
+
+def prepared_cpu_cfm_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[MossSpeechCFMGraph, CFMTestReplay, list[str]]:
+    runner = MossSpeechCFMGraph.__new__(MossSpeechCFMGraph)
+    runner.decoder = tiny_cfm_solver(torch.device("cpu"))
+    runner.device = torch.device("cpu")
+    runner.mel_length = 100
+    runner.lock = threading.RLock()
+    runner.original_solver = runner.decoder.solve_euler
+    runner.installed_solver = runner.solve_euler
+    runner.decoder.solve_euler = runner.installed_solver
+    runner.inputs = cfm_solver_inputs(runner.device)
+    runner.output = torch.empty_like(runner.inputs[0])
+    runner.closed = False
+    runner.replays = runner.fallbacks = 0
+    runner.prepared_model_state = runner.model_state()
+    runner.prepared_numerical_context = runner.numerical_context()
+    events: list[str] = []
+    runner.owner_stream = CFMTestStream(events, "owner")
+    runner.capture_stream = CFMTestStream(events, "capture")
+    replay = CFMTestReplay(runner, events)
+    runner.graph = replay
+
+    def allow_test_replay(inputs: SolverInputs, *, streaming: bool) -> bool:
+        return streaming and not runner.closed
+
+    def cpu_device_scope(device: torch.device) -> nullcontext[None]:
+        assert device == torch.device("cpu")
+        return nullcontext()
+
+    monkeypatch.setattr(torch.cuda, "device", cpu_device_scope)
+    monkeypatch.setattr(runner, "can_replay", allow_test_replay)
+    return runner, replay, events
+
+
+def test_cfm_replay_copies_six_inputs_and_keeps_session_mel_tail_owned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later replay must not overwrite an earlier session's retained mel view."""
+    runner, replay, events = prepared_cpu_cfm_graph(monkeypatch)
+    with torch.inference_mode():
+        first_inputs = cfm_solver_inputs(runner.device)
+        assert not MossSpeechCFMGraph.can_replay(runner, first_inputs, streaming=True)
+        expected = runner.original_solver(*first_inputs, streaming=True)
+        first = runner.decoder.solve_euler(*first_inputs, streaming=True)
+        retained_tail = first[:, :, -8:]
+        second_inputs = cfm_solver_inputs(runner.device, shift=0.5)
+        for first_input, second_input in zip(first_inputs, second_inputs, strict=True):
+            assert not torch.equal(first_input, second_input)
+        second_expected = runner.original_solver(*second_inputs, streaming=True)
+        second = runner.decoder.solve_euler(*second_inputs, streaming=True)
+        torch.testing.assert_close(first, expected, rtol=0, atol=0)
+        torch.testing.assert_close(retained_tail, expected[:, :, -8:], rtol=0, atol=0)
+        torch.testing.assert_close(second, second_expected, rtol=0, atol=0)
+        assert runner.replays == replay.calls == 2
+        final_expected = runner.original_solver(*second_inputs, streaming=False)
+        final = runner.decoder.solve_euler(*second_inputs, streaming=False)
+        torch.testing.assert_close(final, final_expected, rtol=0, atol=0)
+        assert runner.replays == 2 and runner.fallbacks == 1
+    runner.close()
+    runner.close()
+    assert "solve_euler" not in vars(runner.decoder)
+    assert events == ["owner", "capture", "reset"]
+
+
+def test_cfm_failed_replay_does_not_duplicate_eager_work_and_preserves_new_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner, replay, events = prepared_cpu_cfm_graph(monkeypatch)
+    eager = Mock(wraps=runner.original_solver)
+    runner.original_solver = eager
+    replay.should_fail = True
+    with torch.inference_mode(), pytest.raises(RuntimeError, match="Injected graph"):
+        runner.decoder.solve_euler(*cfm_solver_inputs(runner.device), streaming=True)
+    eager.assert_not_called()
+    assert replay.calls == 1 and runner.closed and runner.replays == 0
+    newer_hook = Mock(wraps=eager)
+    runner.decoder.solve_euler = newer_hook
+    runner.close()
+    assert runner.decoder.solve_euler is newer_hook
+    assert events == ["owner", "capture", "reset"]
+
+
+@pytest.mark.parametrize("chunk_size", [5, 25])
+def test_cfm_graph_cpu_startup_rejects_explicit_opt_in_without_installing_hook(
+    chunk_size: int,
+) -> None:
+    decoder = tiny_cfm_solver(torch.device("cpu"))
+    original = decoder.solve_euler
+    with pytest.raises(ValueError, match="CUDA FP32"):
+        MossSpeechCFMGraph(decoder, mel_length=100)
+    assert "solve_euler" not in vars(decoder)
+    assert decoder.solve_euler == original
+    with pytest.raises(ValueError, match="CFM|graph|CUDA|chunk"):
+        MossSpeechStreamingCodec(
+            None,
+            chunk_size=chunk_size,
+            device="cpu",
+            flow=SimpleNamespace(decoder=decoder),
+            hift=TinyHiFT(),
+            cfm_graph_mel_length=100,
+        )
+    assert decoder.solve_euler == original
+
+
+@pytest.mark.parametrize("static_chunk_size", [0, 2])
+@pytest.mark.parametrize(
+    "valid_frames,full_expected,chunk_expected",
+    [
+        pytest.param(
+            [True, True, True, True],
+            [True, True, True, True],
+            [
+                [True, True, False, False],
+                [True, True, False, False],
+                [True, True, True, True],
+                [True, True, True, True],
+            ],
+            id="all-valid",
+        ),
+        pytest.param(
+            [False, False, False, False],
+            [True, True, True, True],
+            [[True, True, True, True]] * 4,
+            id="all-empty",
+        ),
+        pytest.param(
+            [False, False, True, False],
+            [False, False, True, False],
+            [
+                [True, True, True, True],
+                [True, True, True, True],
+                [False, False, True, False],
+                [False, False, True, False],
+            ],
+            id="empty-first-chunk",
+        ),
+    ],
+)
+def test_chunk_mask_repairs_only_empty_rows_and_preserves_full_context_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    static_chunk_size: int,
+    valid_frames: list[bool],
+    full_expected: list[bool],
+    chunk_expected: list[list[bool]],
+) -> None:
+    cuda_init = Mock(side_effect=AssertionError("CPU mask initialized CUDA"))
+    capture_query = Mock(side_effect=AssertionError("CPU mask queried CUDA capture"))
+    monkeypatch.setattr(torch.cuda, "_lazy_init", cuda_init)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", capture_query)
+    masks = torch.zeros(1, 1, 8, device="cpu", dtype=torch.bool)[:, :, ::2]
+    masks.copy_(torch.tensor([[valid_frames]], device="cpu"))
+    actual = add_optional_chunk_mask(
+        torch.zeros(1, 4, 1, device="cpu"),
+        masks,
+        use_dynamic_chunk=False,
+        use_dynamic_left_chunk=False,
+        decoding_chunk_size=0,
+        static_chunk_size=static_chunk_size,
+        num_decoding_left_chunks=-1,
+    )
+    expected = chunk_expected if static_chunk_size else [full_expected]
+    torch.testing.assert_close(
+        actual, torch.tensor([expected], device="cpu"), rtol=0, atol=0
+    )
+    if static_chunk_size:
+        assert actual is not masks
+        assert masks.tolist() == [[valid_frames]]
+    else:
+        assert actual is masks
+        assert masks.tolist() == [[full_expected]]
+    assert not masks.is_contiguous()
+    cuda_init.assert_not_called()
+    capture_query.assert_not_called()
+
+
+@pytest.mark.accelerator
+def test_chunk_mask_cuda_graph_replays_empty_row_repair_from_current_input() -> None:
+    """Empty attention rows must be repaired without a host read during capture."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required")
+    else:
+        pass
+    device = torch.device("cuda", 0)
+    for static_chunk_size in (0, 2):
+        features = torch.zeros(1, 4, 1, device=device)
+        masks = torch.ones(1, 1, 8, device=device, dtype=torch.bool)[:, :, ::2]
+        capture_stream = torch.cuda.Stream(device=device)
+        capture_stream.wait_stream(torch.cuda.current_stream(device))
+        graph = torch.cuda.CUDAGraph()
+        try:
+            with torch.inference_mode(), torch.cuda.stream(capture_stream):
+                for _ in range(3):
+                    add_optional_chunk_mask(
+                        features, masks, False, False, 0, static_chunk_size, -1
+                    )
+            torch.cuda.current_stream(device).wait_stream(capture_stream)
+            with torch.inference_mode(), torch.cuda.graph(graph, stream=capture_stream):
+                actual = add_optional_chunk_mask(
+                    features, masks, False, False, 0, static_chunk_size, -1
+                )
+            torch.cuda.current_stream(device).wait_stream(capture_stream)
+            if static_chunk_size:
+                assert actual is not masks
+            else:
+                assert actual is masks
+            for valid_frames in (
+                [False, False, False, False],
+                [False, False, True, False],
+                [True, True, True, True],
+            ):
+                masks.copy_(torch.tensor([[valid_frames]], device=device))
+                graph.replay()
+                expected = []
+                for query_index in range(4 if static_chunk_size else 1):
+                    row = [
+                        is_valid
+                        and (
+                            not static_chunk_size
+                            or frame_index // static_chunk_size
+                            <= query_index // static_chunk_size
+                        )
+                        for frame_index, is_valid in enumerate(valid_frames)
+                    ]
+                    expected.append(row if any(row) else [True] * 4)
+                torch.testing.assert_close(
+                    actual.cpu(), torch.tensor([expected], device="cpu"), rtol=0, atol=0
+                )
+                expected_input = valid_frames if static_chunk_size else expected[0]
+                assert masks.cpu().tolist() == [[expected_input]]
+                assert not masks.is_contiguous()
+        finally:
+            capture_stream.synchronize()
+            graph.reset()
+
+
+@pytest.mark.accelerator
+def test_cfm_cuda_graph_matches_native_solver_and_preserves_owned_outputs() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required")
+    else:
+        pass
+    device = torch.device("cuda", 0)
+    decoder = tiny_cfm_solver(device)
+    assert all(
+        parameter.device == device and parameter.dtype == torch.float32
+        for parameter in decoder.parameters()
+    )
+    original = decoder.solve_euler
+    cpu_rng = torch.get_rng_state().clone()
+    cuda_rng = torch.cuda.get_rng_state(device).clone()
+    caller_flags = (
+        torch.backends.cudnn.benchmark,
+        torch.backends.cudnn.deterministic,
+    )
+    runner = MossSpeechCFMGraph(decoder, mel_length=100)
+    assert torch.equal(torch.get_rng_state(), cpu_rng)
+    assert torch.equal(torch.cuda.get_rng_state(device), cuda_rng)
+    assert (
+        torch.backends.cudnn.benchmark,
+        torch.backends.cudnn.deterministic,
+    ) == caller_flags
+    try:
+        with (
+            torch.inference_mode(),
+            torch.backends.cudnn.flags(
+                enabled=torch.backends.cudnn.enabled,
+                benchmark=False,
+                deterministic=True,
+                allow_tf32=torch.backends.cudnn.allow_tf32,
+            ),
+        ):
+            first_inputs = cfm_solver_inputs(device)
+            first_expected = original(*first_inputs, streaming=True)
+            assert runner.can_replay(first_inputs, streaming=True)
+            first = decoder.solve_euler(*first_inputs, streaming=True)
+            first_tail = first[:, :, -8:]
+            second_inputs = cfm_solver_inputs(device, shift=0.5)
+            second_expected = original(*second_inputs, streaming=True)
+            second = decoder.solve_euler(*second_inputs, streaming=True)
+            torch.testing.assert_close(first, first_expected, rtol=0, atol=0)
+            torch.testing.assert_close(
+                first_tail, first_expected[:, :, -8:], rtol=0, atol=0
+            )
+            torch.testing.assert_close(second, second_expected, rtol=0, atol=0)
+            assert runner.replays == 2
+            for inputs, streaming in (
+                (cfm_solver_inputs(device, mel_length=200), True),
+                (second_inputs, False),
+            ):
+                expected = original(*inputs, streaming=streaming)
+                actual = decoder.solve_euler(*inputs, streaming=streaming)
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            assert runner.replays == 2 and runner.fallbacks == 2
+            decoder.train()
+            assert not runner.can_replay(second_inputs, streaming=True)
+            decoder.eval()
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                assert not runner.can_replay(second_inputs, streaming=True)
+            with torch.backends.cudnn.flags(
+                enabled=not torch.backends.cudnn.enabled,
+                benchmark=False,
+                deterministic=True,
+                allow_tf32=torch.backends.cudnn.allow_tf32,
+            ):
+                assert not runner.can_replay(second_inputs, streaming=True)
+            assert runner.can_replay(second_inputs, streaming=True)
+            with torch.backends.cudnn.flags(
+                enabled=torch.backends.cudnn.enabled,
+                benchmark=False,
+                deterministic=True,
+                allow_tf32=not torch.backends.cudnn.allow_tf32,
+            ):
+                assert not runner.can_replay(second_inputs, streaming=True)
+            with torch.backends.cudnn.flags(
+                enabled=torch.backends.cudnn.enabled,
+                benchmark=True,
+                deterministic=True,
+                allow_tf32=torch.backends.cudnn.allow_tf32,
+            ):
+                assert not runner.can_replay(second_inputs, streaming=True)
+            with torch.cuda.stream(torch.cuda.Stream(device=device)):
+                assert not runner.can_replay(second_inputs, streaming=True)
+            decoder.inference_cfg_rate = 0.5
+            expected = original(*second_inputs, streaming=True)
+            actual = decoder.solve_euler(*second_inputs, streaming=True)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            decoder.inference_cfg_rate = 0.7
+            next(decoder.parameters()).add_(0.01)
+            expected = original(*second_inputs, streaming=True)
+            actual = decoder.solve_euler(*second_inputs, streaming=True)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            assert runner.replays == 2 and runner.fallbacks == 4
+            assert torch.equal(torch.get_rng_state(), cpu_rng)
+            assert torch.equal(torch.cuda.get_rng_state(device), cuda_rng)
+    finally:
+        runner.close()
+    assert "solve_euler" not in vars(decoder)
+
+
+@pytest.mark.accelerator
+def test_cfm_graph_fullweights_streaming_pcm_and_cleanup() -> None:
+    """Real graph replay preserves full native streaming PCM and session isolation."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required")
+    else:
+        pass
+    codec_path, voice, codes = fullweight_streaming_inputs()
+    eager = MossSpeechStreamingCodec(codec_path, chunk_size=25, device="cuda:0")
+    eager.begin("eager", voice, seed=42)
+    expected = torch.cat(eager.push("eager", codes, final=True)).cpu()
+    assert expected.numel() == len(codes) * eager.samples_per_code
+    first_hop = 25 + (-voice["prompt_token"].shape[1]) % 25
+    mel_length = (voice["prompt_token"].shape[1] + first_hop) * 4
+    codec = MossSpeechStreamingCodec(
+        None,
+        chunk_size=25,
+        device="cuda:0",
+        flow=eager.flow,
+        hift=eager.hift,
+        cfm_graph_mel_length=mel_length,
+    )
+    graph = codec.cfm_graph
+    assert graph is not None and graph.graph is not None and graph.output is not None
+    retained: dict[str, list[torch.Tensor]] = {}
+    sessions: dict[str, CodecStreamSession] = {}
+    try:
+        for request_id in ("graph-a", "graph-b", "cancelled"):
+            codec.begin(request_id, voice, seed=42)
+            sessions[request_id] = codec.sessions[request_id]
+            retained[request_id] = codec.push(
+                request_id, codes[: first_hop + codec.flow.pre_lookahead_len]
+            )
+            assert len(retained[request_id]) == 1
+        assert graph.replays == 3, "Ineligible eager fallback cannot qualify the graph"
+        codec.cleanup("cancelled")
+        codec.begin("invalid", voice, seed=42)
+        with pytest.raises(ValueError, match="Invalid streaming audio code"):
+            codec.push("invalid", [-1])
+        assert set(codec.sessions) == {"graph-a", "graph-b"}
+        for request_id in ("graph-a", "graph-b"):
+            retained[request_id].extend(
+                codec.push(
+                    request_id,
+                    codes[first_hop + codec.flow.pre_lookahead_len :],
+                    final=True,
+                )
+            )
+            actual = torch.cat(retained[request_id]).cpu()
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            assert sessions[request_id].ledger[-1]["final"]
+            assert (
+                sessions[request_id].emitted_samples
+                == len(codes) * codec.samples_per_code
+            )
+        assert not codec.sessions
+        assert graph.replays == 3 and graph.fallbacks > 0
+    finally:
+        codec.close()
+        eager.close()
+    assert codec.cfm_graph is None and "solve_euler" not in vars(codec.flow.decoder)

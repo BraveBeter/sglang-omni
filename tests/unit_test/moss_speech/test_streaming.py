@@ -5,11 +5,13 @@ import copy
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 import torch
 
 from sglang_omni.client.types import GenerateRequest, Message
+from sglang_omni.models.moss_speech.components.cfm_graph import MossSpeechCFMGraph
 from sglang_omni.models.moss_speech.payload_types import (
     AUDIO_PAD_TOKEN_ID,
     EOSP_TOKEN_ID,
@@ -521,3 +523,32 @@ def test_codec_rejects_context_overflow_and_releases_session(
         assert not scheduler.codec.sessions
     finally:
         scheduler.stop()
+
+
+@pytest.mark.parametrize("graph_close_fails", [False, True])
+def test_vocoder_shutdown_releases_prepared_graph_and_request_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, graph_close_fails: bool
+) -> None:
+    scheduler = vocoder(tmp_path, monkeypatch)
+    graph = Mock(spec=MossSpeechCFMGraph)
+    if graph_close_fails:
+        graph.close.side_effect = RuntimeError("Injected graph close failure")
+    else:
+        pass
+    offline_close = Mock(wraps=scheduler.offline_codec.close)
+    monkeypatch.setattr(scheduler.offline_codec, "close", offline_close)
+    scheduler.codec.cfm_graph = graph
+    scheduler.handle_streaming_new_request("kept", audio_payload("kept", [3, 4]))
+    scheduler.handle_stream_chunk("kept", audio_chunk([3, 4]))
+    assert scheduler.codec.sessions
+    if graph_close_fails:
+        with pytest.raises(RuntimeError, match="graph close"):
+            scheduler.stop()
+    else:
+        scheduler.stop()
+    offline_close.assert_called_once_with()
+    assert scheduler.offline_codec.decoder is None
+    assert scheduler.codec.cfm_graph is None
+    assert not scheduler.codec.sessions and not scheduler.stream_states
+    scheduler.stop()
+    graph.close.assert_called_once_with()
