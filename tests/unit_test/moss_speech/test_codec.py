@@ -11,7 +11,7 @@ import warnings
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import msgpack
 import numpy as np
@@ -40,6 +40,7 @@ from sglang_omni.models.moss_speech.components.voice import (
     VoiceConditioning,
     compute_voice_mel,
 )
+from sglang_omni.models.moss_speech.hf_config import MAX_CONTEXT_TOKENS
 from sglang_omni.models.moss_speech.voice_transport import (
     pack_voice_payload,
     unpack_voice_payload,
@@ -438,6 +439,120 @@ def test_eager_streaming_sample_ledger_keeps_short_boundaries_and_final_code(
     assert session.ledger[-1]["final"] is True
     assert sum(entry["final"] for entry in session.ledger) == 1
     assert session.cursor == code_count and not codec.sessions
+
+
+@pytest.mark.parametrize(
+    "chunk_size,prompt_length", [(5, 2), (5, 5), (25, 2), (25, 25)]
+)
+def test_unready_stream_accumulates_codes_without_entering_rng_or_cudnn_scopes(
+    chunk_size: int, prompt_length: int
+) -> None:
+    codec = streaming_codec(chunk_size=chunk_size)
+    voice = voice_tensors()
+    voice["prompt_token"] = torch.zeros((1, prompt_length), dtype=torch.int32)
+    voice["prompt_feat"] = torch.zeros((1, prompt_length * 4, 80))
+    codec.begin("audio", voice, seed=19)
+    session = codec.sessions["audio"]
+    hop = chunk_size + (-prompt_length) % chunk_size
+    threshold = hop + codec.flow.pre_lookahead_len
+    caller_rng, request_rng = torch.get_rng_state().clone(), session.cpu_rng.clone()
+    with (
+        patch.object(torch.random, "fork_rng", side_effect=AssertionError("RNG scope")),
+        patch.object(
+            torch.backends.cudnn, "flags", side_effect=AssertionError("cuDNN scope")
+        ),
+    ):
+        for code in range(threshold - 1):
+            assert codec.push("audio", [code]) == []
+        assert codec.push("audio", []) == []
+    assert session.codes == list(range(threshold - 1))
+    assert session.cursor == 0 and session.emitted_samples == 0
+    assert session.ledger == [] and session.cache is None
+    assert not session.final_requested and session.device_rng is None
+    assert torch.equal(session.cpu_rng, request_rng)
+    assert torch.equal(torch.get_rng_state(), caller_rng)
+    waveforms = codec.push("audio", [threshold - 1])
+    samples = hop * codec.samples_per_code - codec.source_cache_len
+    assert len(waveforms) == 1 and waveforms[0].numel() == samples
+    assert session.cursor == hop
+    assert session.ledger == [
+        {"available": threshold, "cursor_before": 0, "samples": samples, "final": False}
+    ]
+    codec.close()
+
+
+@pytest.mark.parametrize("latched", [False, True])
+def test_unready_short_stream_still_enters_rng_scope_and_flushes_when_final(
+    latched: bool,
+) -> None:
+    codec = streaming_codec()
+    codec.begin("audio", voice_tensors(), seed=19)
+    session = codec.sessions["audio"]
+    assert codec.push("audio", [7]) == []
+    session.final_requested = latched
+    caller_rng = torch.get_rng_state().clone()
+    with (
+        patch.object(
+            torch.random, "fork_rng", wraps=torch.random.fork_rng
+        ) as rng_scope,
+        patch.object(
+            torch.backends.cudnn, "flags", wraps=torch.backends.cudnn.flags
+        ) as cudnn_scope,
+    ):
+        waveforms = codec.push("audio", [], final=not latched)
+    assert rng_scope.call_count == cudnn_scope.call_count == 1
+    assert sum(waveform.numel() for waveform in waveforms) == codec.samples_per_code
+    assert session.cursor == 1 and session.final_requested
+    assert session.ledger == [
+        {"available": 1, "cursor_before": 0, "samples": 1920, "final": True}
+    ]
+    assert torch.equal(torch.get_rng_state(), caller_rng)
+    assert not codec.sessions
+
+
+@pytest.mark.parametrize(
+    "codes,error",
+    [([True], "Invalid"), ([0] * MAX_CONTEXT_TOKENS, str(MAX_CONTEXT_TOKENS))],
+)
+def test_unready_stream_fast_return_keeps_validation_and_session_cleanup(
+    codes: list[int], error: str
+) -> None:
+    codec = streaming_codec()
+    codec.begin("failed", voice_tensors(), seed=19)
+    codec.begin("kept", voice_tensors(), seed=23)
+    caller_rng = torch.get_rng_state().clone()
+    kept_rng = codec.sessions["kept"].cpu_rng.clone()
+    assert codec.push("failed", [7]) == []
+    with (
+        patch.object(torch.random, "fork_rng", side_effect=AssertionError("RNG scope")),
+        patch.object(
+            torch.backends.cudnn, "flags", side_effect=AssertionError("cuDNN scope")
+        ),
+        pytest.raises(ValueError, match=error),
+    ):
+        codec.push("failed", codes)
+    assert set(codec.sessions) == {"kept"}
+    assert torch.equal(codec.sessions["kept"].cpu_rng, kept_rng)
+    assert torch.equal(torch.get_rng_state(), caller_rng)
+    codec.close()
+
+
+def test_unready_stream_accepts_codes_beyond_the_old_length_limit() -> None:
+    codec = streaming_codec(chunk_size=25)
+    codec.begin("audio", voice_tensors(), seed=19)
+    codec.push("audio", [7] * 512)
+    session = codec.sessions["audio"]
+    cursor = session.cursor
+    caller_rng, request_rng = torch.get_rng_state().clone(), session.cpu_rng.clone()
+    with patch.object(
+        torch.random, "fork_rng", side_effect=AssertionError("RNG scope")
+    ):
+        assert codec.push("audio", [8]) == []
+    assert len(session.codes) == 513 and session.codes[-1] == 8
+    assert session.cursor == cursor
+    assert torch.equal(torch.get_rng_state(), caller_rng)
+    assert torch.equal(session.cpu_rng, request_rng)
+    codec.close()
 
 
 def test_stream_rng_isolation_survives_interleaving_and_abort() -> None:

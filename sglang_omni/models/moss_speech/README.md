@@ -100,6 +100,15 @@ The eager base has passed local CPU regressions, native CUDA checks, four-mode s
 
 Third-party source revisions, retained notices and outstanding statement scope are documented in [vendored source provenance](../../vendor/moss_speech_codec/VENDORED_SOURCES.md). Checkpoint terms are separate from source terms; no weights are bundled.
 
+Waiting streaming-codec pushes validate and store codes before returning when the next hop and lookahead are not ready. These pushes skip CPU/CUDA RNG and cuDNN scopes while preserving per-session RNG, context-budget validation, final flushing and failure cleanup. No configuration setting is required. End-to-end performance must be measured for the actual deployment.
+
+The boundary regressions cover the trained chunk profiles, final requests, session isolation and the context limit:
+
+```bash
+SGLANG_USE_CPU_ENGINE=1 python -m pytest \
+  tests/unit_test/moss_speech/test_codec.py -k unready -v
+```
+
 ## Output and comparison contract
 
 Each generated row contains a text token and an audio token. A modality-pad text token selects the audio channel; text-channel end-of-text and message-end tokens terminate generation. EOSP closes the audio segment and returns the finite-state machine to text mode; EOSP in an inactive channel does not terminate the request.

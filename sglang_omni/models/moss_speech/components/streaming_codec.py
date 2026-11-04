@@ -243,6 +243,14 @@ class MossSpeechStreamingCodec:
                     return []
                 else:
                     pass
+                if (
+                    not session.final_requested
+                    and len(session.codes) - session.cursor
+                    < self.next_hop(session) + self.flow.pre_lookahead_len
+                ):
+                    return []
+                else:
+                    pass
                 waveforms: list[torch.Tensor] = []
                 with (
                     torch.random.fork_rng(devices=devices),

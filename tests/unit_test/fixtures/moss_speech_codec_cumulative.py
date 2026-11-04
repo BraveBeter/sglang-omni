@@ -59,8 +59,16 @@ def assert_cumulative_codec(
     vocoder_options: dict[str, bool | int],
 ) -> CumulativeCodecProof:
     """Preserve fixed HF offline PCM and independently owned Torch stream behavior."""
-    selected = set(optimizations) & {"codec-bias-broadcast", "codec-cfm-graph"}
-    assert selected == {"codec-bias-broadcast", "codec-cfm-graph"}
+    selected = set(optimizations) & {
+        "codec-unready-return",
+        "codec-bias-broadcast",
+        "codec-cfm-graph",
+    }
+    assert selected == {
+        "codec-unready-return",
+        "codec-bias-broadcast",
+        "codec-cfm-graph",
+    }
     assert vocoder_options == {
         "broadcast_attention_bias": True,
         "cfm_graph_mel_length": 1500,
@@ -151,10 +159,20 @@ def assert_cumulative_codec(
         artifacts["stream.reference_pcm"] = expected_stream.clone().contiguous()
         held_sessions: list[CodecStreamSession] = []
         first_chunks: list[list[torch.Tensor]] = []
+        unready_execution_count = 0
         for request_id in ("live-a", "live-b"):
             executor.codec.begin(request_id, voice.to_dict(), seed=42)
             held_sessions.append(executor.codec.sessions[request_id])
-            first_chunks.append(executor.codec.push(request_id, codes[:36]))
+            session = held_sessions[-1]
+            with patch.object(
+                torch.random,
+                "fork_rng",
+                side_effect=AssertionError("Unready stream entered RNG scope"),
+            ):
+                early = executor.codec.push(request_id, codes[:1])
+            assert early == [] and session.codes == codes[:1] and session.cursor == 0
+            unready_execution_count += 1
+            first_chunks.append(executor.codec.push(request_id, codes[1:36]))
         assert all(first_chunks) and set(executor.codec.sessions) == {
             "live-a",
             "live-b",
@@ -255,6 +273,7 @@ def assert_cumulative_codec(
             "executions": {
                 "codec-bias-broadcast": bias_execution_count,
                 "codec-cfm-graph": graph_replay_count,
+                "codec-unready-return": unready_execution_count,
             },
             "comparison_scope": "All four full offline cases against frozen independent HF PCM; complete511-code streaming against independently owned unoptimized Torch, with the same pinned voice and code ledger.",
             "tensor_artifact": str(artifact_path),
