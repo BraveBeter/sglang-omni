@@ -205,13 +205,16 @@ def create_audio_vocoder_executor(
         broadcast_attention_bias=broadcast_attention_bias,
     )
     try:
+        assert offline_codec.decoder is not None
         streaming_codec = MossSpeechStreamingCodec(
             codec_directory,
             chunk_size=chunk_size,
             device=concrete_device,
             broadcast_attention_bias=broadcast_attention_bias,
+            hift=offline_codec.decoder.hift,
         )
     except BaseException:
         offline_codec.close()
         raise
+    offline_codec.decode_lock = streaming_codec.lock
     return MossSpeechStreamingVocoder(streaming_codec, offline_codec)
