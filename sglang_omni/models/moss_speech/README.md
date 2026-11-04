@@ -109,6 +109,9 @@ SGLANG_USE_CPU_ENGINE=1 python -m pytest \
   tests/unit_test/moss_speech/test_codec.py -k unready -v
 ```
 
+
+Streaming PCM and speech-overlap samples remain on the host after HiFT synthesis; mel and source conditioning stay on the codec device. This avoids an overlap waveform round trip while preserving the existing float64 window arithmetic, request RNG, hop sizes, and sample ledger.
+
 ## Output and comparison contract
 
 Each generated row contains a text token and an audio token. A modality-pad text token selects the audio channel; text-channel end-of-text and message-end tokens terminate generation. EOSP closes the audio segment and returns the finite-state machine to text mode; EOSP in an inactive channel does not terminate the request.

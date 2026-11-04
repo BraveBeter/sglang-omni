@@ -62,7 +62,9 @@ class TinyFlow(torch.nn.Module):
         finalize: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         generated_codes = token.shape[1] - (0 if finalize else self.pre_lookahead_len)
-        predicted_mel = torch.randn(1, 80, generated_codes * self.token_mel_ratio)
+        predicted_mel = torch.randn(
+            1, 80, generated_codes * self.token_mel_ratio, device=token.device
+        )
         return predicted_mel, predicted_mel
 
 
