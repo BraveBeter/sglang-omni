@@ -188,3 +188,10 @@ When native norm and serial decode Graph are enabled together, the builder insta
 `ar_engine.factory.decode_rope_reuse` defaults to `false`. When enabled, inference-only eager decode batches of at least two requests reuse the original-shape cosine/sine tensors within one forward across the compatible shared and modality-tail layers. Frequency construction, FP32 position multiplication, trigonometric operations, BF16 rounding, attention/KV operations and per-request projection shapes are unchanged. No request tensors are retained between forwards.
 
 Prefill, batch-one decode, training/gradient/autocast execution, forward hooks, or incompatible layer head dimensions, RoPE theta, dtype or device retain the per-layer eager path. Successful eligible forwards increment `model.decode_rope_reuse_forwards`; the first emits `batched RoPE reuse active`. These indicate path activation, not a performance guarantee. Independent-HF correctness and matched end-to-end benchmarks must qualify each final candidate/configuration before deployment.
+
+
+### Experimental streaming Flow BF16 stages
+
+The optional `audio_vocoder.factory.flow_precision` selects a fixed streaming-estimator policy: `ffn_first`, `ffn`, `attention_first`, `attention`, `convolutions_first`, `convolutions`, or `m1` for all three families. The default `None` retains the existing FP32 Codec. Selected operators execute under local BF16 autocast and return FP32 tensors; parameter storage, normalization, time conditioning, CFG/Euler, HiFT and request caches retain FP32. The offline decoder retains its original path. Policies install once per Codec owner and restore on close, rather than switching shared weights between requests.
+
+This option requires CUDA and excludes the existing FP32-only CFM graph. It requires an independent approximate-inference correctness and quality contract; converting outputs back to FP32 does not restore their original values. Strict FP32 measurements remain valid only for their original compute paths.

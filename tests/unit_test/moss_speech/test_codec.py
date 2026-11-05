@@ -41,6 +41,7 @@ from sglang_omni.models.moss_speech.components.voice import (
     VoiceConditioning,
     compute_voice_mel,
 )
+from sglang_omni.models.moss_speech.config import MossSpeechVocoderArgs
 from sglang_omni.models.moss_speech.hf_config import MAX_CONTEXT_TOKENS
 from sglang_omni.models.moss_speech.voice_transport import (
     pack_voice_payload,
@@ -1202,3 +1203,28 @@ def test_flow_bf16_scope_preserves_fp32_solver_and_restores_on_error(
     assert torch.equal(caller_rng, torch.get_rng_state())
     for name, parameter in decoder.state_dict().items():
         assert torch.equal(parameter, original_weights[name])
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "ffn_first",
+        "ffn",
+        "attention_first",
+        "attention",
+        "convolutions_first",
+        "convolutions",
+        "m1",
+    ],
+)
+def test_bf16_flow_rejects_unqualified_fp32_graph_combination(stage: str) -> None:
+    with pytest.raises(ValueError, match="excludes the FP32 CFM graph"):
+        MossSpeechVocoderArgs(flow_precision=stage, cfm_graph_mel_length=1500)
+    with pytest.raises(ValueError, match="without an FP32 CFM graph"):
+        MossSpeechStreamingCodec(
+            None,
+            chunk_size=25,
+            device="cuda:0",
+            flow_precision=stage,
+            cfm_graph_mel_length=1500,
+        )

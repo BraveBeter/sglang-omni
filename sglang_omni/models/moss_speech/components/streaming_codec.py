@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import threading
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
@@ -12,6 +13,10 @@ import numpy as np
 import torch
 
 from sglang_omni.models.moss_speech.components.cfm_graph import MossSpeechCFMGraph
+from sglang_omni.models.moss_speech.components.flow_precision import (
+    FlowBF16Scope,
+    FlowPrecisionProfile,
+)
 from sglang_omni.models.moss_speech.hf_config import MAX_CONTEXT_TOKENS
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.flow import (
     CausalMaskedDiffWithXvec,
@@ -85,6 +90,7 @@ class MossSpeechStreamingCodec:
         hift: HiFTGenerator | None = None,
         broadcast_attention_bias: bool = False,
         cfm_graph_mel_length: int | None = None,
+        flow_precision: FlowPrecisionProfile | None = None,
     ) -> None:
         if type(broadcast_attention_bias) is not bool:
             raise ValueError("broadcast_attention_bias must be a bool")
@@ -92,6 +98,14 @@ class MossSpeechStreamingCodec:
             pass
         if chunk_size not in (5, 25):
             raise ValueError("Streaming chunk size must match trained profile 5 or 25")
+        else:
+            pass
+        if flow_precision is not None and (
+            torch.device(device).type != "cuda" or cfm_graph_mel_length is not None
+        ):
+            raise ValueError(
+                "BF16 Flow serving requires CUDA without an FP32 CFM graph"
+            )
         else:
             pass
         self.chunk_size = chunk_size
@@ -145,6 +159,30 @@ class MossSpeechStreamingCodec:
             if broadcast_attention_bias
             else ()
         )
+        self.flow_precision: FlowPrecisionProfile | None = flow_precision
+        self.precision_context: ExitStack = ExitStack()
+        self.precision_scopes: tuple[FlowBF16Scope, ...] = ()
+        if flow_precision is not None:
+            if type(flow) is not CausalMaskedDiffWithXvec:
+                raise ValueError("BF16 precision requires the native Flow model")
+            else:
+                stages = (
+                    ("ffn", "attention", "convolutions")
+                    if flow_precision == "m1"
+                    else (flow_precision,)
+                )
+            try:
+                self.precision_scopes = tuple(
+                    self.precision_context.enter_context(
+                        FlowBF16Scope(flow.decoder.estimator, stage)
+                    )
+                    for stage in stages
+                )
+            except BaseException:
+                self.precision_context.close()
+                raise
+        else:
+            pass
         self.cfm_graph: MossSpeechCFMGraph | None = None
         if cfm_graph_mel_length is not None:
             self.cfm_graph = MossSpeechCFMGraph(
@@ -390,10 +428,14 @@ class MossSpeechStreamingCodec:
     def close(self) -> None:
         with self.lock:
             self.sessions.clear()
-            if self.cfm_graph is not None:
-                try:
-                    self.cfm_graph.close()
-                finally:
-                    self.cfm_graph = None
-            else:
-                pass
+            try:
+                self.precision_context.close()
+            finally:
+                self.precision_scopes = ()
+                if self.cfm_graph is not None:
+                    try:
+                        self.cfm_graph.close()
+                    finally:
+                        self.cfm_graph = None
+                else:
+                    pass

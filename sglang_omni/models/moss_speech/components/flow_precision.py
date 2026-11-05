@@ -21,6 +21,8 @@ FlowPrecisionStage = Literal[
     "convolutions",
 ]
 
+FlowPrecisionProfile = FlowPrecisionStage | Literal["m1"]
+
 
 class TensorForward(Protocol):
     def __call__(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
