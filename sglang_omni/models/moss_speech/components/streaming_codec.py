@@ -162,27 +162,7 @@ class MossSpeechStreamingCodec:
         self.flow_precision: FlowPrecisionProfile | None = flow_precision
         self.precision_context: ExitStack = ExitStack()
         self.precision_scopes: tuple[FlowBF16Scope, ...] = ()
-        if flow_precision is not None:
-            if type(flow) is not CausalMaskedDiffWithXvec:
-                raise ValueError("BF16 precision requires the native Flow model")
-            else:
-                stages = (
-                    ("ffn", "attention", "convolutions")
-                    if flow_precision == "m1"
-                    else (flow_precision,)
-                )
-            try:
-                self.precision_scopes = tuple(
-                    self.precision_context.enter_context(
-                        FlowBF16Scope(flow.decoder.estimator, stage)
-                    )
-                    for stage in stages
-                )
-            except BaseException:
-                self.precision_context.close()
-                raise
-        else:
-            pass
+        self.activate_precision()
         self.cfm_graph: MossSpeechCFMGraph | None = None
         if cfm_graph_mel_length is not None:
             self.cfm_graph = MossSpeechCFMGraph(
@@ -191,10 +171,38 @@ class MossSpeechStreamingCodec:
         else:
             pass
 
+    def activate_precision(self) -> None:
+        if self.flow_precision is not None and not self.precision_scopes:
+            if type(self.flow) is not CausalMaskedDiffWithXvec:
+                raise ValueError("BF16 precision requires the native Flow model")
+            else:
+                stages = (
+                    ("ffn", "attention", "convolutions")
+                    if self.flow_precision == "m1"
+                    else (
+                        ("ffn", "attention")
+                        if self.flow_precision == "ffn_attention"
+                        else (self.flow_precision,)
+                    )
+                )
+            try:
+                self.precision_scopes = tuple(
+                    self.precision_context.enter_context(
+                        FlowBF16Scope(self.flow.decoder.estimator, stage)
+                    )
+                    for stage in stages
+                )
+            except BaseException:
+                self.precision_context.close()
+                raise
+        else:
+            pass
+
     def begin(
         self, request_id: str, voice: dict[str, torch.Tensor], *, seed: int
     ) -> None:
         with self.lock:
+            self.activate_precision()
             if request_id in self.sessions:
                 raise ValueError(f"Codec session is already active: {request_id}")
             else:

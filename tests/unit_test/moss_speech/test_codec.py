@@ -8,7 +8,7 @@ import os
 import random
 import threading
 import warnings
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -50,6 +50,9 @@ from sglang_omni.models.moss_speech.voice_transport import (
 )
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.decoder import (
     CausalConditionalDecoder,
+)
+from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.flow import (
+    CausalMaskedDiffWithXvec,
 )
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.flow_matching import (
     CausalConditionalCFM,
@@ -1215,6 +1218,7 @@ def test_flow_bf16_scope_preserves_fp32_solver_and_restores_on_error(
         "convolutions_first",
         "convolutions",
         "m1",
+        "ffn_attention",
     ],
 )
 def test_bf16_flow_rejects_unqualified_fp32_graph_combination(stage: str) -> None:
@@ -1228,3 +1232,36 @@ def test_bf16_flow_rejects_unqualified_fp32_graph_combination(stage: str) -> Non
             flow_precision=stage,
             cfm_graph_mel_length=1500,
         )
+
+
+@pytest.mark.parametrize("stage", ["ffn", "ffn_attention"])
+@torch.no_grad()
+def test_bf16_owner_close_and_reactivate_keeps_same_precision(stage: str) -> None:
+    flow = CausalMaskedDiffWithXvec.__new__(CausalMaskedDiffWithXvec)
+    torch.nn.Module.__init__(flow)
+    flow.decoder = tiny_cfm_solver(torch.device("cpu"))
+    codec = MossSpeechStreamingCodec.__new__(MossSpeechStreamingCodec)
+    codec.flow = flow
+    codec.flow_precision = stage
+    codec.precision_context = ExitStack()
+    codec.precision_scopes = ()
+    codec.sessions = {}
+    codec.lock = threading.Lock()
+    codec.cfm_graph = None
+    inputs = cfm_solver_inputs(torch.device("cpu"), mel_length=8)
+    original = flow.decoder.solve_euler(*inputs, streaming=True)
+    codec.activate_precision()
+    first = flow.decoder.solve_euler(*inputs, streaming=True)
+    codec.activate_precision()
+    assert torch.equal(first, flow.decoder.solve_euler(*inputs, streaming=True))
+    assert all(
+        operator.forward.bf16_executions > 0
+        for scope in codec.precision_scopes
+        for operator in scope.operators
+    )
+    codec.close()
+    assert not codec.precision_scopes
+    assert torch.equal(original, flow.decoder.solve_euler(*inputs, streaming=True))
+    codec.activate_precision()
+    assert torch.equal(first, flow.decoder.solve_euler(*inputs, streaming=True))
+    codec.close()

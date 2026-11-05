@@ -21,7 +21,7 @@ FlowPrecisionStage = Literal[
     "convolutions",
 ]
 
-FlowPrecisionProfile = FlowPrecisionStage | Literal["m1"]
+FlowPrecisionProfile = FlowPrecisionStage | Literal["m1", "ffn_attention"]
 
 
 class TensorForward(Protocol):

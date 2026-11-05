@@ -7,7 +7,7 @@ import os
 import pickle
 import random
 from pathlib import Path
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -48,6 +48,9 @@ class CumulativeCodecProof(TypedDict):
     tensor_artifact_sha256: str
     stream_code_count: int
     stream_sample_count: int
+    precision_contract: NotRequired[str]
+    same_precision_pcm_exact: NotRequired[bool]
+    cross_precision_statistics: NotRequired[dict[str, float]]
 
 
 @torch.no_grad()
@@ -56,23 +59,38 @@ def assert_cumulative_codec(
     reference_json: str,
     reference_tensors: str,
     optimizations: list[str],
-    vocoder_options: dict[str, bool | int],
+    vocoder_options: dict[str, bool | int | str],
 ) -> CumulativeCodecProof:
     """Preserve fixed HF offline PCM and independently owned Torch stream behavior."""
+    is_bf16 = "codec-flow-bf16" in optimizations
     selected = set(optimizations) & {
         "codec-unready-return",
         "codec-bias-broadcast",
         "codec-cfm-graph",
+        "codec-flow-bf16",
     }
-    assert selected == {
+    expected_features = {
         "codec-unready-return",
         "codec-bias-broadcast",
-        "codec-cfm-graph",
+        "codec-flow-bf16" if is_bf16 else "codec-cfm-graph",
     }
-    assert vocoder_options == {
-        "broadcast_attention_bias": True,
-        "cfm_graph_mel_length": 1500,
-    }
+    assert selected == expected_features
+    if is_bf16:
+        assert os.environ["MOSS_PRECISION_CONTRACT"] == "e13-bf16-approx-v1"
+        assert vocoder_options.get("flow_precision") in (
+            "ffn",
+            "attention",
+            "ffn_attention",
+        )
+        assert vocoder_options == {
+            "broadcast_attention_bias": True,
+            "flow_precision": vocoder_options["flow_precision"],
+        }
+    else:
+        assert vocoder_options == {
+            "broadcast_attention_bias": True,
+            "cfm_graph_mel_length": 1500,
+        }
     reference_path = Path(reference_json)
     tensors_path = Path(reference_tensors)
     reference = json.loads(reference_path.read_text())
@@ -105,11 +123,12 @@ def assert_cumulative_codec(
         codec_path=codec_path,
         device=device.type,
         gpu_id=device.index,
-        broadcast_attention_bias=True,
-        cfm_graph_mel_length=1500,
+        **vocoder_options,
     )
     independent: MossSpeechStreamingCodec | None = None
     artifacts: dict[str, torch.Tensor] = {}
+    precision_statistics: dict[str, float] = {}
+    precision_execution_count = 0
 
     def decode_offline(
         adapter: MossSpeechCodecAdapter, code_values: list[int]
@@ -157,6 +176,46 @@ def assert_cumulative_codec(
             artifacts[name + ".hf_pcm"] = expected.clone().contiguous()
         expected_stream = decode_stream(independent, "reference")
         artifacts["stream.reference_pcm"] = expected_stream.clone().contiguous()
+        if is_bf16:
+            serial_bf16 = decode_stream(executor.codec, "bf16-serial")
+            assert serial_bf16.shape == expected_stream.shape
+            assert torch.isfinite(serial_bf16).all()
+            difference = serial_bf16 - expected_stream
+            precision_statistics = {
+                "pcm_max_abs": float(difference.abs().max()),
+                "pcm_relative_l2": float(
+                    torch.linalg.vector_norm(difference)
+                    / torch.linalg.vector_norm(expected_stream)
+                ),
+                "pcm_tensor_cosine": float(
+                    torch.nn.functional.cosine_similarity(
+                        serial_bf16.reshape(1, -1), expected_stream.reshape(1, -1)
+                    )
+                ),
+            }
+            artifacts["stream.bf16_serial_pcm"] = serial_bf16.clone().contiguous()
+            expected_stream = serial_bf16
+            for name in reference["case_order"]:
+                boundary_codes = oracle[name + ".codes"][0].tolist()
+                request_id = "bf16-boundary-" + name
+                executor.codec.begin(request_id, voice.to_dict(), seed=7)
+                boundary_session = executor.codec.sessions[request_id]
+                boundary_pcm = torch.cat(
+                    executor.codec.push(request_id, boundary_codes, final=True)
+                )
+                assert torch.isfinite(boundary_pcm).all()
+                assert (
+                    boundary_pcm.numel()
+                    == boundary_session.emitted_samples
+                    == len(boundary_codes) * executor.codec.samples_per_code
+                )
+                assert (
+                    boundary_session.cursor == len(boundary_codes)
+                    and not executor.codec.sessions
+                )
+                artifacts[name + ".bf16_stream_pcm"] = boundary_pcm.contiguous()
+        else:
+            pass
         held_sessions: list[CodecStreamSession] = []
         first_chunks: list[list[torch.Tensor]] = []
         unready_execution_count = 0
@@ -216,7 +275,12 @@ def assert_cumulative_codec(
                 actual.dtype == expected_stream.dtype
                 and actual.shape == expected_stream.shape
             )
-            torch.testing.assert_close(actual, expected_stream, atol=1e-5, rtol=1e-5)
+            if is_bf16:
+                assert torch.equal(actual, expected_stream)
+            else:
+                torch.testing.assert_close(
+                    actual, expected_stream, atol=1e-5, rtol=1e-5
+                )
             assert session.codes == codes and session.cursor == len(codes)
             assert (
                 session.emitted_samples
@@ -234,8 +298,32 @@ def assert_cumulative_codec(
             processor.broadcast_calls for processor in processors
         )
         graph = executor.codec.cfm_graph
-        assert graph is not None and graph.replays > 0
-        graph_replay_count = graph.replays
+        if is_bf16:
+            assert graph is None
+            operators = [
+                operator
+                for scope in executor.codec.precision_scopes
+                for operator in scope.operators
+            ]
+            assert operators and all(
+                operator.forward.bf16_executions == operator.forward.executions > 0
+                for operator in operators
+            )
+            assert all(
+                parameter.dtype == torch.float32
+                for parameter in executor.codec.flow.parameters()
+            )
+            assert all(
+                parameter.dtype == torch.float32
+                for parameter in executor.codec.hift.parameters()
+            )
+            precision_execution_count = sum(
+                operator.forward.bf16_executions for operator in operators
+            )
+            graph_replay_count = 0
+        else:
+            assert graph is not None and graph.replays > 0
+            graph_replay_count = graph.replays
         executor.codec.close()
         actual_offline = decode_offline(executor.offline_codec, codes)
         torch.testing.assert_close(
@@ -243,7 +331,12 @@ def assert_cumulative_codec(
         )
         executor.offline_codec.close()
         actual_stream = decode_stream(executor.codec, "after-offline-close")
-        torch.testing.assert_close(actual_stream, expected_stream, atol=1e-5, rtol=1e-5)
+        if is_bf16:
+            assert torch.equal(actual_stream, expected_stream)
+        else:
+            torch.testing.assert_close(
+                actual_stream, expected_stream, atol=1e-5, rtol=1e-5
+            )
         assert not executor.codec.sessions and not executor.offline_codec.sessions
         assert pickle.dumps(random.getstate(), protocol=5) == caller_random_state[0]
         assert pickle.dumps(np.random.get_state(), protocol=5) == caller_random_state[1]
@@ -265,17 +358,35 @@ def assert_cumulative_codec(
                 "pcm_atol": 1e-5,
                 "pcm_rtol": 1e-5,
             },
-            "joint_pcm_within_frozen_tolerance": True,
+            "joint_pcm_within_frozen_tolerance": not is_bf16,
+            **(
+                {
+                    "precision_contract": "e13-bf16-approx-v1",
+                    "same_precision_pcm_exact": True,
+                    "cross_precision_statistics": precision_statistics,
+                }
+                if is_bf16
+                else {}
+            ),
             "code_ledger_exact": True,
             "request_state_isolation_exact": True,
             "rng_isolation_exact": True,
             "cleanup_exact": True,
             "executions": {
                 "codec-bias-broadcast": bias_execution_count,
-                "codec-cfm-graph": graph_replay_count,
+                **(
+                    {"codec-flow-bf16": precision_execution_count}
+                    if is_bf16
+                    else {"codec-cfm-graph": graph_replay_count}
+                ),
                 "codec-unready-return": unready_execution_count,
             },
-            "comparison_scope": "All four full offline cases against frozen independent HF PCM; complete511-code streaming against independently owned unoptimized Torch, with the same pinned voice and code ledger.",
+            "comparison_scope": (
+                "BF16: unchanged offline HF tolerance; streaming numeric differences diagnostic only; same-config serial/interleaved PCM exact. Quality gates must be scored separately. "
+                if is_bf16
+                else ""
+            )
+            + "All four full offline cases against frozen independent HF PCM; complete511-code streaming against independently owned unoptimized Torch, with the same pinned voice and code ledger.",
             "tensor_artifact": str(artifact_path),
             "tensor_artifact_sha256": hashlib.sha256(
                 artifact_path.read_bytes()
