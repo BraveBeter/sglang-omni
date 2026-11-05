@@ -30,6 +30,10 @@ from sglang_omni.models.moss_speech.components.codec_adapter import (
     CodecAdapterError,
     MossSpeechCodecAdapter,
 )
+from sglang_omni.models.moss_speech.components.flow_batch import (
+    EqualLengthFlowBatch,
+    FlowBatchInput,
+)
 from sglang_omni.models.moss_speech.components.streaming_codec import (
     CodecStreamSession,
     MossSpeechStreamingCodec,
@@ -1157,3 +1161,57 @@ def test_cfm_graph_fullweights_streaming_pcm_and_cleanup() -> None:
         codec.close()
         eager.close()
     assert codec.cfm_graph is None and "solve_euler" not in vars(codec.flow.decoder)
+
+
+@pytest.mark.parametrize("batch_size", [1, 2, 3, 4])
+@torch.inference_mode()
+def test_equal_length_flow_cfg_pairing_and_output_ownership(batch_size: int) -> None:
+    decoder = tiny_cfm_solver(torch.device("cpu"))
+    requests = []
+    for index in range(batch_size):
+        noise, timestep_grid, mean, mask, speaker, conditioning = cfm_solver_inputs(
+            torch.device("cpu"), mel_length=8, shift=index / 20
+        )
+        timestep_grid = 1 - torch.cos(torch.linspace(0, 1, 11) * 0.5 * torch.pi)
+        requests.append(
+            FlowBatchInput(
+                request_id=f"request-{index}",
+                noise=noise,
+                timestep_grid=timestep_grid,
+                encoded_mel=mean,
+                mask=mask,
+                speaker_embedding=speaker,
+                conditioning_mel=conditioning,
+                streaming=True,
+            )
+        )
+    expected = {
+        request.request_id: decoder.solve_euler(
+            request.noise,
+            request.timestep_grid,
+            request.encoded_mel,
+            request.mask,
+            request.speaker_embedding,
+            request.conditioning_mel,
+            streaming=request.streaming,
+        )
+        for request in requests
+    }
+    snapshots = [request.noise.clone() for request in requests]
+    caller_rng = torch.get_rng_state().clone()
+    runner = EqualLengthFlowBatch(decoder)
+    actual = runner.solve(requests)
+    held = {request_id: value.clone() for request_id, value in actual.items()}
+    runner.solve(requests)
+    for index, request in enumerate(requests):
+        torch.testing.assert_close(
+            actual[request.request_id],
+            expected[request.request_id],
+            atol=1e-5,
+            rtol=1e-5,
+        )
+        assert torch.equal(actual[request.request_id], held[request.request_id])
+        assert torch.equal(request.noise, snapshots[index])
+    assert torch.equal(caller_rng, torch.get_rng_state())
+    assert sum(runner.executions.values()) == (2 if batch_size in (2, 4) else 0)
+    assert runner.fallback_requests == (0 if batch_size in (2, 4) else 2 * batch_size)
