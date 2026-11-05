@@ -30,6 +30,7 @@ from sglang_omni.models.moss_speech.components.codec_adapter import (
     CodecAdapterError,
     MossSpeechCodecAdapter,
 )
+from sglang_omni.models.moss_speech.components.flow_precision import FlowBF16Scope
 from sglang_omni.models.moss_speech.components.streaming_codec import (
     CodecStreamSession,
     MossSpeechStreamingCodec,
@@ -1157,3 +1158,47 @@ def test_cfm_graph_fullweights_streaming_pcm_and_cleanup() -> None:
         codec.close()
         eager.close()
     assert codec.cfm_graph is None and "solve_euler" not in vars(codec.flow.decoder)
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "ffn_first",
+        "ffn",
+        "attention_first",
+        "attention",
+        "convolutions_first",
+        "convolutions",
+    ],
+)
+@torch.no_grad()
+def test_flow_bf16_scope_preserves_fp32_solver_and_restores_on_error(
+    stage: str,
+) -> None:
+    decoder = tiny_cfm_solver(torch.device("cpu"))
+    inputs = cfm_solver_inputs(torch.device("cpu"), mel_length=8)
+    baseline = decoder.solve_euler(*inputs, streaming=True)
+    original_weights = {
+        name: value.clone() for name, value in decoder.state_dict().items()
+    }
+    caller_rng = torch.get_rng_state().clone()
+    scope = FlowBF16Scope(decoder.estimator, stage)
+    with pytest.raises(RuntimeError, match="cancelled"):
+        with scope:
+            actual = decoder.solve_euler(*inputs, streaming=True)
+            assert actual.dtype == torch.float32 and torch.isfinite(actual).all()
+            assert all(
+                operator.forward.bf16_executions > 0 for operator in scope.operators
+            )
+            assert all(
+                operator.forward.last_compute_dtype == torch.bfloat16
+                for operator in scope.operators
+            )
+            assert all(
+                parameter.dtype == torch.float32 for parameter in decoder.parameters()
+            )
+            raise RuntimeError("cancelled")
+    assert torch.equal(decoder.solve_euler(*inputs, streaming=True), baseline)
+    assert torch.equal(caller_rng, torch.get_rng_state())
+    for name, parameter in decoder.state_dict().items():
+        assert torch.equal(parameter, original_weights[name])
