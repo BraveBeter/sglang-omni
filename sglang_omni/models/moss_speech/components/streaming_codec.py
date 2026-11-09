@@ -113,6 +113,7 @@ class MossSpeechStreamingCodec:
             in (
                 "ffn_attention_sdpa",
                 "ffn_attention_sdpa_resident",
+                "ffn_attention_sdpa_storage",
             )
             and not broadcast_attention_bias
         ):
@@ -197,6 +198,7 @@ class MossSpeechStreamingCodec:
                             "ffn_attention",
                             "ffn_attention_sdpa",
                             "ffn_attention_sdpa_resident",
+                            "ffn_attention_sdpa_storage",
                         )
                         else (self.flow_precision,)
                     )
@@ -208,10 +210,19 @@ class MossSpeechStreamingCodec:
                             self.flow.decoder.estimator,
                             stage,
                             bf16_sdpa=self.flow_precision
-                            in ("ffn_attention_sdpa", "ffn_attention_sdpa_resident")
+                            in (
+                                "ffn_attention_sdpa",
+                                "ffn_attention_sdpa_resident",
+                                "ffn_attention_sdpa_storage",
+                            )
                             and stage == "attention",
                             resident_weights=self.flow_precision
-                            == "ffn_attention_sdpa_resident",
+                            in (
+                                "ffn_attention_sdpa_resident",
+                                "ffn_attention_sdpa_storage",
+                            ),
+                            store_bf16_parameters=self.flow_precision
+                            == "ffn_attention_sdpa_storage",
                         )
                     )
                     for stage in stages

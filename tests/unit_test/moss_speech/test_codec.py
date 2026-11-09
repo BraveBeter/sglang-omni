@@ -1225,6 +1225,7 @@ def test_flow_bf16_scope_preserves_fp32_solver_and_restores_on_error(
         "ffn_attention",
         "ffn_attention_sdpa",
         "ffn_attention_sdpa_resident",
+        "ffn_attention_sdpa_storage",
     ],
 )
 def test_bf16_flow_rejects_unqualified_fp32_graph_combination(stage: str) -> None:
@@ -1242,7 +1243,13 @@ def test_bf16_flow_rejects_unqualified_fp32_graph_combination(stage: str) -> Non
 
 @pytest.mark.parametrize(
     "stage",
-    ["ffn", "ffn_attention", "ffn_attention_sdpa", "ffn_attention_sdpa_resident"],
+    [
+        "ffn",
+        "ffn_attention",
+        "ffn_attention_sdpa",
+        "ffn_attention_sdpa_resident",
+        "ffn_attention_sdpa_storage",
+    ],
 )
 @torch.no_grad()
 def test_bf16_owner_close_and_reactivate_keeps_same_precision(stage: str) -> None:
@@ -1319,6 +1326,104 @@ def test_resident_bf16_rejects_active_lora() -> None:
     layer.set_lora_layer(LoRALinearLayer(256, 512, rank=4))
     with pytest.raises(ValueError, match="unadapted FP32 Linear"):
         BF16Forward(layer, layer.forward, resident_weights=True).prepare()
+
+
+@pytest.mark.parametrize(
+    "device", ["cpu", pytest.param("cuda", marks=pytest.mark.accelerator)]
+)
+def test_bf16_parameter_storage_matches_resident_and_restores_exact_weights(
+    device: str,
+) -> None:
+    """BF16 GPU storage must share compute buffers and recover exact FP32 masters."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is required")
+    else:
+        pass
+    with scoped_global_rng(), torch.no_grad():
+        layer = torch.nn.Linear(256, 512).to(device).eval()
+        weights = {
+            name: parameter.detach().cpu().clone()
+            for name, parameter in layer.named_parameters()
+        }
+        identities = {
+            name: id(parameter) for name, parameter in layer.named_parameters()
+        }
+        inputs = [
+            torch.randn(2, frames, 256, device=device) for frames in (17, 65, 1512)
+        ]
+        resident = BF16Forward(layer, layer.forward, resident_weights=True)
+        resident.prepare()
+        expected = [resident(hidden_states) for hidden_states in inputs]
+        resident.release()
+        stored = BF16Forward(
+            layer, layer.forward, resident_weights=True, store_bf16_parameters=True
+        )
+        stored.prepare()
+        assert layer.weight.dtype == layer.bias.dtype == torch.bfloat16
+        assert layer.weight.data_ptr() == stored.resident_weight.data_ptr()
+        assert layer.bias.data_ptr() == stored.resident_bias.data_ptr()
+        assert stored.cpu_backup_parameter_bytes == 2 * stored.resident_parameter_bytes
+        for name, backup in stored.fp32_cpu_parameters.items():
+            assert backup.device.type == "cpu" and backup.dtype is torch.float32
+            assert torch.equal(backup, weights[name])
+        for hidden_states, reference in zip(inputs, expected, strict=True):
+            assert torch.equal(stored(hidden_states), reference)
+        stored.release()
+        assert stored.cpu_backup_parameter_bytes == stored.resident_parameter_bytes == 0
+        for name, parameter in layer.named_parameters():
+            assert (
+                id(parameter) == identities[name] and parameter.dtype is torch.float32
+            )
+            assert torch.equal(parameter.cpu(), weights[name])
+
+
+def test_bf16_parameter_storage_rejects_training_and_gradient_calls() -> None:
+    """Inference storage must not silently run training on rounded parameters."""
+    layer = torch.nn.Linear(8, 16).eval()
+    stored = BF16Forward(
+        layer, layer.forward, resident_weights=True, store_bf16_parameters=True
+    )
+    stored.prepare()
+    with pytest.raises(RuntimeError, match="no-grad evaluation"):
+        stored(torch.randn(1, 8))
+    with torch.no_grad(), pytest.raises(RuntimeError, match="no-grad evaluation"):
+        layer.train()
+        stored(torch.randn(1, 8))
+    stored.release()
+    with pytest.raises(ValueError, match="idle evaluation"):
+        stored.prepare()
+    layer.eval()
+    with pytest.raises(ValueError, match="resident inference"):
+        BF16Forward(layer, layer.forward, store_bf16_parameters=True)
+
+
+def test_bf16_parameter_storage_partial_entry_restores_fp32(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interrupted activation must recover already offloaded exact weights."""
+    decoder = tiny_cfm_solver(torch.device("cpu"))
+    weights = {
+        name: parameter.clone() for name, parameter in decoder.named_parameters()
+    }
+    scope = FlowBF16Scope(
+        decoder.estimator, "ffn", resident_weights=True, store_bf16_parameters=True
+    )
+
+    def fail() -> None:
+        raise MemoryError("storage preparation failed")
+
+    monkeypatch.setattr(scope.operators[1].forward, "prepare", fail)
+    with pytest.raises(MemoryError, match="storage preparation failed"):
+        scope.__enter__()
+    assert not scope.active
+    for name, parameter in decoder.named_parameters():
+        assert parameter.dtype is torch.float32 and torch.equal(
+            parameter, weights[name]
+        )
+    assert all("forward" not in vars(operator.module) for operator in scope.operators)
+    assert all(
+        operator.forward.cpu_backup_parameter_bytes == 0 for operator in scope.operators
+    )
 
 
 def test_resident_bf16_failed_entry_releases_partial_state(

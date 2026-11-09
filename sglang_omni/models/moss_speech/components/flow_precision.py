@@ -33,7 +33,11 @@ FlowPrecisionStage = Literal[
 FlowPrecisionProfile = (
     FlowPrecisionStage
     | Literal[
-        "m1", "ffn_attention", "ffn_attention_sdpa", "ffn_attention_sdpa_resident"
+        "m1",
+        "ffn_attention",
+        "ffn_attention_sdpa",
+        "ffn_attention_sdpa_resident",
+        "ffn_attention_sdpa_storage",
     ]
 )
 
@@ -51,10 +55,17 @@ class BF16Forward:
         original: TensorForward,
         *,
         resident_weights: bool = False,
+        store_bf16_parameters: bool = False,
     ) -> None:
+        if store_bf16_parameters and not resident_weights:
+            raise ValueError("BF16 parameter storage requires resident inference")
+        else:
+            pass
         self.module = module
         self.original = original
         self.resident_weights: bool = resident_weights
+        self.store_bf16_parameters: bool = store_bf16_parameters
+        self.fp32_cpu_parameters: dict[str, torch.Tensor] = {}
         self.resident_weight: torch.Tensor | None = None
         self.resident_bias: torch.Tensor | None = None
         self.parameter_copies: int = 0
@@ -68,6 +79,13 @@ class BF16Forward:
             tensor.numel() * tensor.element_size()
             for tensor in (self.resident_weight, self.resident_bias)
             if tensor is not None
+        )
+
+    @property
+    def cpu_backup_parameter_bytes(self) -> int:
+        return sum(
+            tensor.numel() * tensor.element_size()
+            for tensor in self.fp32_cpu_parameters.values()
         )
 
     def prepare(self) -> None:
@@ -88,19 +106,57 @@ class BF16Forward:
                     "Resident BF16 requires unadapted FP32 Linear parameters"
                 )
             else:
+                if self.store_bf16_parameters and (
+                    module.training
+                    or any(
+                        parameter.grad is not None for parameter in module.parameters()
+                    )
+                ):
+                    raise ValueError(
+                        "BF16 parameter storage requires idle evaluation parameters"
+                    )
+                else:
+                    pass
                 self.resident_weight = module.weight.detach().bfloat16()
                 self.resident_bias = (
                     module.bias.detach().bfloat16() if module.bias is not None else None
                 )
                 self.parameter_copies += 1 + int(module.bias is not None)
+                if self.store_bf16_parameters:
+                    self.fp32_cpu_parameters = {
+                        name: parameter.detach().to(device="cpu", copy=True)
+                        for name, parameter in module.named_parameters(recurse=False)
+                    }
+                    module.weight.data = self.resident_weight
+                    if module.bias is not None:
+                        module.bias.data = self.resident_bias
+                    else:
+                        pass
+                else:
+                    pass
         else:
             pass
 
     def release(self) -> None:
+        for name, parameter in self.module.named_parameters(recurse=False):
+            if name in self.fp32_cpu_parameters:
+                parameter.data = self.fp32_cpu_parameters.pop(name).to(parameter.device)
+            else:
+                pass
         self.resident_weight = None
         self.resident_bias = None
 
     def __call__(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.fp32_cpu_parameters and (
+            self.module.training
+            or torch.is_grad_enabled()
+            or hidden_states.dtype != torch.float32
+        ):
+            raise RuntimeError(
+                "BF16 parameter storage requires no-grad evaluation and FP32 inputs"
+            )
+        else:
+            pass
         if (
             self.module.training
             or hidden_states.dtype != torch.float32
@@ -123,6 +179,12 @@ class BF16Forward:
                         logger.info(
                             f"MOSS_FLOW_BF16_RESIDENT_ACTIVE bytes={self.resident_parameter_bytes}"
                         )
+                        if self.store_bf16_parameters:
+                            logger.info(
+                                f"MOSS_FLOW_BF16_STORAGE_ACTIVE cpu_backup_bytes={self.cpu_backup_parameter_bytes}"
+                            )
+                        else:
+                            pass
                     else:
                         pass
             else:
@@ -151,6 +213,7 @@ class FlowBF16Scope:
         *,
         bf16_sdpa: bool = False,
         resident_weights: bool = False,
+        store_bf16_parameters: bool = False,
     ) -> None:
         if resident_weights and stage not in ("ffn", "attention"):
             raise ValueError(
@@ -215,7 +278,10 @@ class FlowBF16Scope:
                         name=name,
                         module=module,
                         forward=BF16Forward(
-                            module, module.forward, resident_weights=resident_weights
+                            module,
+                            module.forward,
+                            resident_weights=resident_weights,
+                            store_bf16_parameters=store_bf16_parameters,
                         ),
                     )
                 )

@@ -55,6 +55,8 @@ class CumulativeCodecProof(TypedDict):
     bf16_weight_residency: NotRequired[bool]
     resident_weight_bytes: NotRequired[int]
     resident_parameter_copies: NotRequired[int]
+    bf16_parameter_storage: NotRequired[bool]
+    fp32_cpu_backup_bytes: NotRequired[int]
 
 
 @torch.no_grad()
@@ -69,6 +71,7 @@ def assert_cumulative_codec(
     is_bf16 = "codec-flow-bf16" in optimizations
     is_bf16_sdpa = "codec-sdpa-bf16" in optimizations
     is_resident = "codec-resident-bf16" in optimizations
+    is_storage = "codec-storage-bf16" in optimizations
     selected = set(optimizations) & {
         "codec-unready-return",
         "codec-bias-broadcast",
@@ -76,6 +79,7 @@ def assert_cumulative_codec(
         "codec-flow-bf16",
         "codec-sdpa-bf16",
         "codec-resident-bf16",
+        "codec-storage-bf16",
     }
     expected_features = {
         "codec-unready-return",
@@ -90,6 +94,11 @@ def assert_cumulative_codec(
         expected_features.add("codec-resident-bf16")
     else:
         pass
+    if is_storage:
+        expected_features.add("codec-storage-bf16")
+        assert is_resident and is_bf16_sdpa
+    else:
+        pass
     assert selected == expected_features
     if is_bf16:
         assert os.environ["MOSS_PRECISION_CONTRACT"] == "e13-bf16-approx-v1"
@@ -99,6 +108,7 @@ def assert_cumulative_codec(
             "ffn_attention",
             "ffn_attention_sdpa",
             "ffn_attention_sdpa_resident",
+            "ffn_attention_sdpa_storage",
         )
         assert vocoder_options == {
             "broadcast_attention_bias": True,
@@ -106,10 +116,18 @@ def assert_cumulative_codec(
         }
         assert is_bf16_sdpa == (
             vocoder_options["flow_precision"]
-            in ("ffn_attention_sdpa", "ffn_attention_sdpa_resident")
+            in (
+                "ffn_attention_sdpa",
+                "ffn_attention_sdpa_resident",
+                "ffn_attention_sdpa_storage",
+            )
         )
         assert is_resident == (
-            vocoder_options["flow_precision"] == "ffn_attention_sdpa_resident"
+            vocoder_options["flow_precision"]
+            in ("ffn_attention_sdpa_resident", "ffn_attention_sdpa_storage")
+        )
+        assert is_storage == (
+            vocoder_options["flow_precision"] == "ffn_attention_sdpa_storage"
         )
     else:
         assert vocoder_options == {
@@ -337,6 +355,7 @@ def assert_cumulative_codec(
             pass
         resident_weight_bytes = 0
         resident_parameter_copies = 0
+        fp32_cpu_backup_bytes = 0
         graph = executor.codec.cfm_graph
         if is_bf16:
             assert graph is None
@@ -367,10 +386,36 @@ def assert_cumulative_codec(
                 )
             else:
                 pass
-            assert all(
-                parameter.dtype == torch.float32
-                for parameter in executor.codec.flow.parameters()
-            )
+            selected_parameters = {
+                id(parameter)
+                for operator in operators
+                for parameter in operator.module.parameters()
+            }
+            for parameter in executor.codec.flow.parameters():
+                expected_dtype = (
+                    torch.bfloat16
+                    if is_storage and id(parameter) in selected_parameters
+                    else torch.float32
+                )
+                assert parameter.dtype is expected_dtype
+            if is_storage:
+                for operator in operators:
+                    assert operator.forward.store_bf16_parameters
+                    assert (
+                        operator.module.weight.data_ptr()
+                        == operator.forward.resident_weight.data_ptr()
+                    )
+                    assert all(
+                        backup.device.type == "cpu" and backup.dtype is torch.float32
+                        for backup in operator.forward.fp32_cpu_parameters.values()
+                    )
+                fp32_cpu_backup_bytes = sum(
+                    operator.forward.cpu_backup_parameter_bytes
+                    for operator in operators
+                )
+                assert fp32_cpu_backup_bytes == 2 * resident_weight_bytes
+            else:
+                pass
             assert all(
                 parameter.dtype == torch.float32
                 for parameter in executor.codec.hift.parameters()
@@ -440,10 +485,23 @@ def assert_cumulative_codec(
                 if is_resident
                 else {}
             ),
+            **(
+                {
+                    "bf16_parameter_storage": True,
+                    "fp32_cpu_backup_bytes": fp32_cpu_backup_bytes,
+                }
+                if is_storage
+                else {}
+            ),
             "executions": {
                 **(
                     {"codec-resident-bf16": precision_execution_count}
                     if is_resident
+                    else {}
+                ),
+                **(
+                    {"codec-storage-bf16": precision_execution_count}
+                    if is_storage
                     else {}
                 ),
                 **({"codec-sdpa-bf16": sdpa_execution_count} if is_bf16_sdpa else {}),
