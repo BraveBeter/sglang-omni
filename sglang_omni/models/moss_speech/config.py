@@ -76,7 +76,7 @@ class MossSpeechVocoderArgs(FactoryArgs):
         if self.flow_precision is not None and self.cfm_graph_mel_length is not None:
             raise ValueError("BF16 Flow precision excludes the FP32 CFM graph")
         elif (
-            self.flow_precision == "ffn_attention_sdpa"
+            self.flow_precision in ("ffn_attention_sdpa", "ffn_attention_sdpa_resident")
             and not self.broadcast_attention_bias
         ):
             raise ValueError("BF16 SDPA requires live bias broadcasting")

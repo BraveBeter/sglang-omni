@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Scoped component BF16 experiments with FP32 estimator boundaries."""
 
+import logging
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Literal, Protocol
 
 import torch
+import torch.nn.functional as F
 from diffusers.models.attention_processor import Attention
+from diffusers.models.lora import LoRACompatibleLinear
 from torch import nn
 
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.decoder import (
@@ -15,6 +18,8 @@ from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.decoder import (
 from sglang_omni.vendor.moss_speech_codec.matcha_components.bias_broadcast import (
     LiveBiasBroadcastProcessor,
 )
+
+logger = logging.getLogger(__name__)
 
 FlowPrecisionStage = Literal[
     "ffn_first",
@@ -26,7 +31,10 @@ FlowPrecisionStage = Literal[
 ]
 
 FlowPrecisionProfile = (
-    FlowPrecisionStage | Literal["m1", "ffn_attention", "ffn_attention_sdpa"]
+    FlowPrecisionStage
+    | Literal[
+        "m1", "ffn_attention", "ffn_attention_sdpa", "ffn_attention_sdpa_resident"
+    ]
 )
 
 
@@ -37,19 +45,89 @@ class TensorForward(Protocol):
 class BF16Forward:
     """Run one original operator under autocast and retain its FP32 interface."""
 
-    def __init__(self, module: nn.Module, original: TensorForward) -> None:
+    def __init__(
+        self,
+        module: nn.Module,
+        original: TensorForward,
+        *,
+        resident_weights: bool = False,
+    ) -> None:
         self.module = module
         self.original = original
+        self.resident_weights: bool = resident_weights
+        self.resident_weight: torch.Tensor | None = None
+        self.resident_bias: torch.Tensor | None = None
+        self.parameter_copies: int = 0
         self.executions: int = 0
         self.bf16_executions: int = 0
         self.last_compute_dtype: torch.dtype | None = None
 
+    @property
+    def resident_parameter_bytes(self) -> int:
+        return sum(
+            tensor.numel() * tensor.element_size()
+            for tensor in (self.resident_weight, self.resident_bias)
+            if tensor is not None
+        )
+
+    def prepare(self) -> None:
+        if self.resident_weights:
+            module = self.module
+            if (
+                type(module) not in (nn.Linear, LoRACompatibleLinear)
+                or (
+                    type(module) is LoRACompatibleLinear
+                    and module.lora_layer is not None
+                )
+                or any(
+                    parameter.dtype is not torch.float32
+                    for parameter in module.parameters()
+                )
+            ):
+                raise ValueError(
+                    "Resident BF16 requires unadapted FP32 Linear parameters"
+                )
+            else:
+                self.resident_weight = module.weight.detach().bfloat16()
+                self.resident_bias = (
+                    module.bias.detach().bfloat16() if module.bias is not None else None
+                )
+                self.parameter_copies += 1 + int(module.bias is not None)
+        else:
+            pass
+
+    def release(self) -> None:
+        self.resident_weight = None
+        self.resident_bias = None
+
     def __call__(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if self.module.training or hidden_states.dtype != torch.float32:
+        if (
+            self.module.training
+            or hidden_states.dtype != torch.float32
+            or (self.resident_weights and torch.is_grad_enabled())
+        ):
             return self.original(hidden_states)
         else:
-            with torch.autocast(hidden_states.device.type, dtype=torch.bfloat16):
-                output = self.original(hidden_states)
+            if self.resident_weights:
+                if self.resident_weight is None:
+                    raise RuntimeError(
+                        "Resident BF16 requires an active precision scope"
+                    )
+                else:
+                    output = F.linear(
+                        hidden_states.bfloat16(),
+                        self.resident_weight,
+                        self.resident_bias,
+                    )
+                    if self.executions == 0:
+                        logger.info(
+                            f"MOSS_FLOW_BF16_RESIDENT_ACTIVE bytes={self.resident_parameter_bytes}"
+                        )
+                    else:
+                        pass
+            else:
+                with torch.autocast(hidden_states.device.type, dtype=torch.bfloat16):
+                    output = self.original(hidden_states)
             self.executions += 1
             self.bf16_executions += int(output.dtype == torch.bfloat16)
             self.last_compute_dtype = output.dtype
@@ -64,7 +142,7 @@ class PrecisionOperator:
 
 
 class FlowBF16Scope:
-    """Temporarily select estimator operators without changing parameter storage."""
+    """Select estimator operators and optionally retain BF16 compute-weight copies."""
 
     def __init__(
         self,
@@ -72,7 +150,14 @@ class FlowBF16Scope:
         stage: FlowPrecisionStage,
         *,
         bf16_sdpa: bool = False,
+        resident_weights: bool = False,
     ) -> None:
+        if resident_weights and stage not in ("ffn", "attention"):
+            raise ValueError(
+                "Resident BF16 requires the complete FFN or attention stage"
+            )
+        else:
+            pass
         if bf16_sdpa and stage != "attention":
             raise ValueError(
                 "BF16 SDPA requires the complete attention projection stage"
@@ -129,7 +214,9 @@ class FlowBF16Scope:
                     PrecisionOperator(
                         name=name,
                         module=module,
-                        forward=BF16Forward(module, module.forward),
+                        forward=BF16Forward(
+                            module, module.forward, resident_weights=resident_weights
+                        ),
                     )
                 )
             else:
@@ -151,12 +238,17 @@ class FlowBF16Scope:
         ):
             raise ValueError("Precision scope requires unmodified operator forwards")
         else:
-            for operator in self.operators:
-                operator.module.forward = operator.forward
-            for processor in self.sdpa_processors:
-                processor.use_bf16_sdpa = True
-            self.active = True
-            return self
+            try:
+                for operator in self.operators:
+                    operator.forward.prepare()
+                    operator.module.forward = operator.forward
+                for processor in self.sdpa_processors:
+                    processor.use_bf16_sdpa = True
+                self.active = True
+                return self
+            except BaseException:
+                self.__exit__(None, None, None)
+                raise
 
     def __exit__(
         self,
@@ -171,4 +263,5 @@ class FlowBF16Scope:
                 delattr(operator.module, "forward")
             else:
                 pass
+            operator.forward.release()
         self.active = False

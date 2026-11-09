@@ -19,6 +19,7 @@ import pytest
 import soundfile
 import torch
 from diffusers.models.attention_processor import Attention, AttnProcessor2_0
+from diffusers.models.lora import LoRACompatibleLinear, LoRALinearLayer
 from safetensors.torch import load_file, save_file
 
 import sglang_omni.models.moss_speech.components.voice as voice_module
@@ -30,7 +31,10 @@ from sglang_omni.models.moss_speech.components.codec_adapter import (
     CodecAdapterError,
     MossSpeechCodecAdapter,
 )
-from sglang_omni.models.moss_speech.components.flow_precision import FlowBF16Scope
+from sglang_omni.models.moss_speech.components.flow_precision import (
+    BF16Forward,
+    FlowBF16Scope,
+)
 from sglang_omni.models.moss_speech.components.streaming_codec import (
     CodecStreamSession,
     MossSpeechStreamingCodec,
@@ -1220,6 +1224,7 @@ def test_flow_bf16_scope_preserves_fp32_solver_and_restores_on_error(
         "m1",
         "ffn_attention",
         "ffn_attention_sdpa",
+        "ffn_attention_sdpa_resident",
     ],
 )
 def test_bf16_flow_rejects_unqualified_fp32_graph_combination(stage: str) -> None:
@@ -1235,7 +1240,10 @@ def test_bf16_flow_rejects_unqualified_fp32_graph_combination(stage: str) -> Non
         )
 
 
-@pytest.mark.parametrize("stage", ["ffn", "ffn_attention", "ffn_attention_sdpa"])
+@pytest.mark.parametrize(
+    "stage",
+    ["ffn", "ffn_attention", "ffn_attention_sdpa", "ffn_attention_sdpa_resident"],
+)
 @torch.no_grad()
 def test_bf16_owner_close_and_reactivate_keeps_same_precision(stage: str) -> None:
     flow = CausalMaskedDiffWithXvec.__new__(CausalMaskedDiffWithXvec)
@@ -1267,6 +1275,72 @@ def test_bf16_owner_close_and_reactivate_keeps_same_precision(stage: str) -> Non
     codec.activate_precision()
     assert torch.equal(first, flow.decoder.solve_euler(*inputs, streaming=True))
     codec.close()
+
+
+@pytest.mark.parametrize(
+    "device", ["cpu", pytest.param("cuda", marks=pytest.mark.accelerator)]
+)
+def test_resident_bf16_linear_matches_autocast_and_releases_copies(device: str) -> None:
+    """Resident inference must preserve autocast output, FP32 masters and gradients."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is required")
+    else:
+        pass
+    with scoped_global_rng():
+        layer = torch.nn.Linear(256, 512).to(device).eval()
+        control = BF16Forward(layer, layer.forward)
+        resident = BF16Forward(layer, layer.forward, resident_weights=True)
+        weights = {name: value.clone() for name, value in layer.state_dict().items()}
+        resident.prepare()
+        assert resident.resident_weight is not None
+        pointer = resident.resident_weight.data_ptr()
+        copies = resident.parameter_copies
+        with torch.no_grad():
+            for frames in (17, 65, 1512):
+                hidden_states = torch.randn(2, frames, 256, device=device)
+                assert torch.equal(resident(hidden_states), control(hidden_states))
+                assert resident.resident_weight.data_ptr() == pointer
+                assert resident.parameter_copies == copies
+        assert resident.bf16_executions == 3 and resident.resident_parameter_bytes > 0
+        for name, value in layer.state_dict().items():
+            assert value.dtype is torch.float32 and torch.equal(value, weights[name])
+        resident.release()
+        assert resident.resident_parameter_bytes == 0
+        hidden_states = torch.randn(1, 256, device=device, requires_grad=True)
+        result = resident(hidden_states)
+        assert torch.equal(result, layer(hidden_states))
+        result.sum().backward()
+        assert layer.weight.grad is not None and torch.isfinite(layer.weight.grad).all()
+
+
+def test_resident_bf16_rejects_active_lora() -> None:
+    """A cached plain linear must never silently drop an active adapter."""
+    layer = LoRACompatibleLinear(256, 512).eval()
+    layer.set_lora_layer(LoRALinearLayer(256, 512, rank=4))
+    with pytest.raises(ValueError, match="unadapted FP32 Linear"):
+        BF16Forward(layer, layer.forward, resident_weights=True).prepare()
+
+
+def test_resident_bf16_failed_entry_releases_partial_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed cache allocation must not leave installed forwards or owned tensors."""
+    decoder = tiny_cfm_solver(torch.device("cpu"))
+    scope = FlowBF16Scope(decoder.estimator, "ffn", resident_weights=True)
+
+    def fail() -> None:
+        raise MemoryError("resident preparation failed")
+
+    monkeypatch.setattr(scope.operators[1].forward, "prepare", fail)
+    with pytest.raises(MemoryError, match="resident preparation failed"):
+        scope.__enter__()
+    assert not scope.active
+    assert all("forward" not in vars(operator.module) for operator in scope.operators)
+    assert all(
+        operator.forward.resident_parameter_bytes == 0 for operator in scope.operators
+    )
+    with pytest.raises(ValueError, match="complete FFN or attention"):
+        FlowBF16Scope(decoder.estimator, "convolutions", resident_weights=True)
 
 
 def test_bf16_sdpa_requires_live_bias_and_full_projection_stage() -> None:

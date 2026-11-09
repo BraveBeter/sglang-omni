@@ -52,6 +52,9 @@ class CumulativeCodecProof(TypedDict):
     same_precision_pcm_exact: NotRequired[bool]
     cross_precision_statistics: NotRequired[dict[str, float]]
     bf16_sdpa_mask_broadcast: NotRequired[bool]
+    bf16_weight_residency: NotRequired[bool]
+    resident_weight_bytes: NotRequired[int]
+    resident_parameter_copies: NotRequired[int]
 
 
 @torch.no_grad()
@@ -65,12 +68,14 @@ def assert_cumulative_codec(
     """Preserve fixed HF offline PCM and independently owned Torch stream behavior."""
     is_bf16 = "codec-flow-bf16" in optimizations
     is_bf16_sdpa = "codec-sdpa-bf16" in optimizations
+    is_resident = "codec-resident-bf16" in optimizations
     selected = set(optimizations) & {
         "codec-unready-return",
         "codec-bias-broadcast",
         "codec-cfm-graph",
         "codec-flow-bf16",
         "codec-sdpa-bf16",
+        "codec-resident-bf16",
     }
     expected_features = {
         "codec-unready-return",
@@ -81,6 +86,10 @@ def assert_cumulative_codec(
         expected_features.add("codec-sdpa-bf16")
     else:
         pass
+    if is_resident:
+        expected_features.add("codec-resident-bf16")
+    else:
+        pass
     assert selected == expected_features
     if is_bf16:
         assert os.environ["MOSS_PRECISION_CONTRACT"] == "e13-bf16-approx-v1"
@@ -89,13 +98,18 @@ def assert_cumulative_codec(
             "attention",
             "ffn_attention",
             "ffn_attention_sdpa",
+            "ffn_attention_sdpa_resident",
         )
         assert vocoder_options == {
             "broadcast_attention_bias": True,
             "flow_precision": vocoder_options["flow_precision"],
         }
         assert is_bf16_sdpa == (
-            vocoder_options["flow_precision"] == "ffn_attention_sdpa"
+            vocoder_options["flow_precision"]
+            in ("ffn_attention_sdpa", "ffn_attention_sdpa_resident")
+        )
+        assert is_resident == (
+            vocoder_options["flow_precision"] == "ffn_attention_sdpa_resident"
         )
     else:
         assert vocoder_options == {
@@ -321,6 +335,8 @@ def assert_cumulative_codec(
             )
         else:
             pass
+        resident_weight_bytes = 0
+        resident_parameter_copies = 0
         graph = executor.codec.cfm_graph
         if is_bf16:
             assert graph is None
@@ -333,6 +349,24 @@ def assert_cumulative_codec(
                 operator.forward.bf16_executions == operator.forward.executions > 0
                 for operator in operators
             )
+            if is_resident:
+                assert all(
+                    operator.forward.resident_weights
+                    and operator.forward.resident_weight is not None
+                    and operator.forward.resident_weight.dtype is torch.bfloat16
+                    and operator.forward.resident_parameter_bytes > 0
+                    and operator.forward.parameter_copies
+                    == 1 + int(operator.forward.resident_bias is not None)
+                    for operator in operators
+                )
+                resident_weight_bytes = sum(
+                    operator.forward.resident_parameter_bytes for operator in operators
+                )
+                resident_parameter_copies = sum(
+                    operator.forward.parameter_copies for operator in operators
+                )
+            else:
+                pass
             assert all(
                 parameter.dtype == torch.float32
                 for parameter in executor.codec.flow.parameters()
@@ -397,7 +431,21 @@ def assert_cumulative_codec(
             "rng_isolation_exact": True,
             "cleanup_exact": True,
             **({"bf16_sdpa_mask_broadcast": True} if is_bf16_sdpa else {}),
+            **(
+                {
+                    "bf16_weight_residency": True,
+                    "resident_weight_bytes": resident_weight_bytes,
+                    "resident_parameter_copies": resident_parameter_copies,
+                }
+                if is_resident
+                else {}
+            ),
             "executions": {
+                **(
+                    {"codec-resident-bf16": precision_execution_count}
+                    if is_resident
+                    else {}
+                ),
                 **({"codec-sdpa-bf16": sdpa_execution_count} if is_bf16_sdpa else {}),
                 "codec-bias-broadcast": bias_execution_count,
                 **(

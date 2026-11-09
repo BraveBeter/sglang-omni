@@ -108,7 +108,14 @@ class MossSpeechStreamingCodec:
             )
         else:
             pass
-        if flow_precision == "ffn_attention_sdpa" and not broadcast_attention_bias:
+        if (
+            flow_precision
+            in (
+                "ffn_attention_sdpa",
+                "ffn_attention_sdpa_resident",
+            )
+            and not broadcast_attention_bias
+        ):
             raise ValueError("BF16 SDPA requires live bias broadcasting")
         else:
             pass
@@ -186,7 +193,11 @@ class MossSpeechStreamingCodec:
                     else (
                         ("ffn", "attention")
                         if self.flow_precision
-                        in ("ffn_attention", "ffn_attention_sdpa")
+                        in (
+                            "ffn_attention",
+                            "ffn_attention_sdpa",
+                            "ffn_attention_sdpa_resident",
+                        )
                         else (self.flow_precision,)
                     )
                 )
@@ -196,8 +207,11 @@ class MossSpeechStreamingCodec:
                         FlowBF16Scope(
                             self.flow.decoder.estimator,
                             stage,
-                            bf16_sdpa=self.flow_precision == "ffn_attention_sdpa"
+                            bf16_sdpa=self.flow_precision
+                            in ("ffn_attention_sdpa", "ffn_attention_sdpa_resident")
                             and stage == "attention",
+                            resident_weights=self.flow_precision
+                            == "ffn_attention_sdpa_resident",
                         )
                     )
                     for stage in stages
