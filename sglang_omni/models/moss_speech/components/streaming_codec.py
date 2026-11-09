@@ -108,6 +108,10 @@ class MossSpeechStreamingCodec:
             )
         else:
             pass
+        if flow_precision == "ffn_attention_sdpa" and not broadcast_attention_bias:
+            raise ValueError("BF16 SDPA requires live bias broadcasting")
+        else:
+            pass
         self.chunk_size = chunk_size
         self.device = torch.device(device)
         if cfm_graph_mel_length is not None and (
@@ -181,14 +185,20 @@ class MossSpeechStreamingCodec:
                     if self.flow_precision == "m1"
                     else (
                         ("ffn", "attention")
-                        if self.flow_precision == "ffn_attention"
+                        if self.flow_precision
+                        in ("ffn_attention", "ffn_attention_sdpa")
                         else (self.flow_precision,)
                     )
                 )
             try:
                 self.precision_scopes = tuple(
                     self.precision_context.enter_context(
-                        FlowBF16Scope(self.flow.decoder.estimator, stage)
+                        FlowBF16Scope(
+                            self.flow.decoder.estimator,
+                            stage,
+                            bf16_sdpa=self.flow_precision == "ffn_attention_sdpa"
+                            and stage == "attention",
+                        )
                     )
                     for stage in stages
                 )

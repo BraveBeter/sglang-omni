@@ -51,6 +51,7 @@ class CumulativeCodecProof(TypedDict):
     precision_contract: NotRequired[str]
     same_precision_pcm_exact: NotRequired[bool]
     cross_precision_statistics: NotRequired[dict[str, float]]
+    bf16_sdpa_mask_broadcast: NotRequired[bool]
 
 
 @torch.no_grad()
@@ -63,17 +64,23 @@ def assert_cumulative_codec(
 ) -> CumulativeCodecProof:
     """Preserve fixed HF offline PCM and independently owned Torch stream behavior."""
     is_bf16 = "codec-flow-bf16" in optimizations
+    is_bf16_sdpa = "codec-sdpa-bf16" in optimizations
     selected = set(optimizations) & {
         "codec-unready-return",
         "codec-bias-broadcast",
         "codec-cfm-graph",
         "codec-flow-bf16",
+        "codec-sdpa-bf16",
     }
     expected_features = {
         "codec-unready-return",
         "codec-bias-broadcast",
         "codec-flow-bf16" if is_bf16 else "codec-cfm-graph",
     }
+    if is_bf16_sdpa:
+        expected_features.add("codec-sdpa-bf16")
+    else:
+        pass
     assert selected == expected_features
     if is_bf16:
         assert os.environ["MOSS_PRECISION_CONTRACT"] == "e13-bf16-approx-v1"
@@ -81,11 +88,15 @@ def assert_cumulative_codec(
             "ffn",
             "attention",
             "ffn_attention",
+            "ffn_attention_sdpa",
         )
         assert vocoder_options == {
             "broadcast_attention_bias": True,
             "flow_precision": vocoder_options["flow_precision"],
         }
+        assert is_bf16_sdpa == (
+            vocoder_options["flow_precision"] == "ffn_attention_sdpa"
+        )
     else:
         assert vocoder_options == {
             "broadcast_attention_bias": True,
@@ -297,6 +308,19 @@ def assert_cumulative_codec(
         bias_execution_count = sum(
             processor.broadcast_calls for processor in processors
         )
+        sdpa_execution_count = 0
+        if is_bf16_sdpa:
+            assert all(
+                processor.bf16_sdpa_calls == processor.broadcast_calls > 0
+                and processor.last_sdpa_dtype == torch.bfloat16
+                and processor.last_head_stride == 0
+                for processor in processors
+            )
+            sdpa_execution_count = sum(
+                processor.bf16_sdpa_calls for processor in processors
+            )
+        else:
+            pass
         graph = executor.codec.cfm_graph
         if is_bf16:
             assert graph is None
@@ -372,7 +396,9 @@ def assert_cumulative_codec(
             "request_state_isolation_exact": True,
             "rng_isolation_exact": True,
             "cleanup_exact": True,
+            **({"bf16_sdpa_mask_broadcast": True} if is_bf16_sdpa else {}),
             "executions": {
+                **({"codec-sdpa-bf16": sdpa_execution_count} if is_bf16_sdpa else {}),
                 "codec-bias-broadcast": bias_execution_count,
                 **(
                     {"codec-flow-bf16": precision_execution_count}

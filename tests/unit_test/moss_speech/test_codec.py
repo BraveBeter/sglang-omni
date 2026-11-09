@@ -1219,6 +1219,7 @@ def test_flow_bf16_scope_preserves_fp32_solver_and_restores_on_error(
         "convolutions",
         "m1",
         "ffn_attention",
+        "ffn_attention_sdpa",
     ],
 )
 def test_bf16_flow_rejects_unqualified_fp32_graph_combination(stage: str) -> None:
@@ -1234,12 +1235,13 @@ def test_bf16_flow_rejects_unqualified_fp32_graph_combination(stage: str) -> Non
         )
 
 
-@pytest.mark.parametrize("stage", ["ffn", "ffn_attention"])
+@pytest.mark.parametrize("stage", ["ffn", "ffn_attention", "ffn_attention_sdpa"])
 @torch.no_grad()
 def test_bf16_owner_close_and_reactivate_keeps_same_precision(stage: str) -> None:
     flow = CausalMaskedDiffWithXvec.__new__(CausalMaskedDiffWithXvec)
     torch.nn.Module.__init__(flow)
     flow.decoder = tiny_cfm_solver(torch.device("cpu"))
+    install_broadcast_bias_attention(flow.decoder.estimator)
     codec = MossSpeechStreamingCodec.__new__(MossSpeechStreamingCodec)
     codec.flow = flow
     codec.flow_precision = stage
@@ -1265,3 +1267,72 @@ def test_bf16_owner_close_and_reactivate_keeps_same_precision(stage: str) -> Non
     codec.activate_precision()
     assert torch.equal(first, flow.decoder.solve_euler(*inputs, streaming=True))
     codec.close()
+
+
+def test_bf16_sdpa_requires_live_bias_and_full_projection_stage() -> None:
+    decoder = tiny_cfm_solver(torch.device("cpu"))
+    with pytest.raises(ValueError, match="complete attention"):
+        FlowBF16Scope(decoder.estimator, "ffn", bf16_sdpa=True)
+    with pytest.raises(ValueError, match="live bias"):
+        FlowBF16Scope(decoder.estimator, "attention", bf16_sdpa=True)
+    with pytest.raises(ValueError, match="live bias"):
+        MossSpeechVocoderArgs(flow_precision="ffn_attention_sdpa")
+    with pytest.raises(ValueError, match="live bias"):
+        MossSpeechStreamingCodec(
+            None, chunk_size=25, device="cuda:0", flow_precision="ffn_attention_sdpa"
+        )
+    processors = install_broadcast_bias_attention(decoder.estimator)
+    scope = FlowBF16Scope(decoder.estimator, "attention", bf16_sdpa=True)
+    with pytest.raises(RuntimeError, match="cancelled"):
+        with scope:
+            assert processors and all(
+                processor.use_bf16_sdpa for processor in processors
+            )
+            raise RuntimeError("cancelled")
+    assert all(not processor.use_bf16_sdpa for processor in processors)
+
+
+@pytest.mark.accelerator
+@pytest.mark.parametrize("frame_count", [17, 65, 1500, 1512])
+@torch.no_grad()
+def test_bf16_sdpa_preserves_live_mask_and_fp32_boundary(frame_count: int) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for BF16 SDPA")
+    else:
+        pass
+    with scoped_global_rng():
+        attention = Attention(query_dim=256, heads=8, dim_head=64).cuda().eval()
+        original = attention.processor
+        processor = install_broadcast_bias_attention(attention)[0]
+        processor.use_bf16_sdpa = True
+        hidden_states = torch.randn(2, frame_count, 256, device="cuda")
+        attention_bias = torch.zeros(2, frame_count, frame_count, device="cuda")
+        visible_frames = frame_count // 2
+        attention_bias[:, :, visible_frames:] = -1.0e10
+        original_bias = attention_bias.clone()
+        rng_before = torch.cuda.get_rng_state().clone()
+        output = attention(hidden_states, attention_mask=attention_bias)
+        assert output.dtype == torch.float32 and torch.isfinite(output).all()
+        assert processor.last_sdpa_dtype == torch.bfloat16
+        assert processor.bf16_sdpa_calls == processor.broadcast_calls == 1
+        assert processor.last_head_stride == 0 and torch.equal(
+            attention_bias, original_bias
+        )
+        held_output = output.clone()
+        hidden_states[:, visible_frames:] += 100
+        masked = attention(hidden_states, attention_mask=attention_bias)
+        assert torch.equal(masked[:, :visible_frames], output[:, :visible_frames])
+        attention_bias[:, :, -1] = 0
+        changed = attention(hidden_states, attention_mask=attention_bias)
+        assert not torch.equal(changed[:, :visible_frames], output[:, :visible_frames])
+        assert torch.equal(output, held_output)
+        assert processor.bf16_sdpa_calls == processor.broadcast_calls == 3
+        assert torch.equal(rng_before, torch.cuda.get_rng_state())
+        processor.use_bf16_sdpa = False
+        expected = original(attention, hidden_states, attention_mask=attention_bias)
+        restored = attention(hidden_states, attention_mask=attention_bias)
+        assert torch.equal(restored, expected)
+        assert (
+            processor.last_sdpa_dtype == torch.float32
+            and processor.bf16_sdpa_calls == 3
+        )

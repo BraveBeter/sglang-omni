@@ -6,10 +6,14 @@ from types import TracebackType
 from typing import Literal, Protocol
 
 import torch
+from diffusers.models.attention_processor import Attention
 from torch import nn
 
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.decoder import (
     CausalConditionalDecoder,
+)
+from sglang_omni.vendor.moss_speech_codec.matcha_components.bias_broadcast import (
+    LiveBiasBroadcastProcessor,
 )
 
 FlowPrecisionStage = Literal[
@@ -21,7 +25,9 @@ FlowPrecisionStage = Literal[
     "convolutions",
 ]
 
-FlowPrecisionProfile = FlowPrecisionStage | Literal["m1", "ffn_attention"]
+FlowPrecisionProfile = (
+    FlowPrecisionStage | Literal["m1", "ffn_attention", "ffn_attention_sdpa"]
+)
 
 
 class TensorForward(Protocol):
@@ -61,8 +67,34 @@ class FlowBF16Scope:
     """Temporarily select estimator operators without changing parameter storage."""
 
     def __init__(
-        self, estimator: CausalConditionalDecoder, stage: FlowPrecisionStage
+        self,
+        estimator: CausalConditionalDecoder,
+        stage: FlowPrecisionStage,
+        *,
+        bf16_sdpa: bool = False,
     ) -> None:
+        if bf16_sdpa and stage != "attention":
+            raise ValueError(
+                "BF16 SDPA requires the complete attention projection stage"
+            )
+        else:
+            processors: list[LiveBiasBroadcastProcessor] = []
+        if bf16_sdpa:
+            for module in estimator.modules():
+                if type(module) is Attention:
+                    if type(module.processor) is not LiveBiasBroadcastProcessor:
+                        raise ValueError("BF16 SDPA requires live bias broadcasting")
+                    else:
+                        processors.append(module.processor)
+                else:
+                    pass
+            if not processors:
+                raise ValueError("No live attention processors matched BF16 SDPA")
+            else:
+                pass
+        else:
+            pass
+        self.sdpa_processors: tuple[LiveBiasBroadcastProcessor, ...] = tuple(processors)
         if stage not in (
             "ffn_first",
             "ffn",
@@ -112,13 +144,17 @@ class FlowBF16Scope:
             self.active: bool = False
 
     def __enter__(self) -> "FlowBF16Scope":
-        if self.active or any(
-            "forward" in vars(operator.module) for operator in self.operators
+        if (
+            self.active
+            or any("forward" in vars(operator.module) for operator in self.operators)
+            or any(processor.use_bf16_sdpa for processor in self.sdpa_processors)
         ):
             raise ValueError("Precision scope requires unmodified operator forwards")
         else:
             for operator in self.operators:
                 operator.module.forward = operator.forward
+            for processor in self.sdpa_processors:
+                processor.use_bf16_sdpa = True
             self.active = True
             return self
 
@@ -128,6 +164,8 @@ class FlowBF16Scope:
         exception: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
+        for processor in self.sdpa_processors:
+            processor.use_bf16_sdpa = False
         for operator in reversed(self.operators):
             if operator.module.forward is operator.forward:
                 delattr(operator.module, "forward")
