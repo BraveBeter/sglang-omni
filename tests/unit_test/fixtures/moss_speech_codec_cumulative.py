@@ -7,7 +7,7 @@ import os
 import pickle
 import random
 from pathlib import Path
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -25,6 +25,7 @@ from sglang_omni.models.moss_speech.components.streaming_codec import (
 from sglang_omni.models.moss_speech.components.voice import VoiceConditioning
 from sglang_omni.models.moss_speech.stages import create_audio_vocoder_executor
 from sglang_omni.vendor.moss_speech_codec.hf_codec.modeling import scoped_global_rng
+from tests.unit_test.fixtures.moss_speech_codec_async import assert_async_codec
 
 
 class CumulativeCodecReference(TypedDict):
@@ -48,6 +49,8 @@ class CumulativeCodecProof(TypedDict):
     tensor_artifact_sha256: str
     stream_code_count: int
     stream_sample_count: int
+    async_flow_slots: NotRequired[int]
+    async_pcm_exact: NotRequired[bool]
 
 
 @torch.no_grad()
@@ -59,6 +62,39 @@ def assert_cumulative_codec(
     vocoder_options: dict[str, bool | int],
 ) -> CumulativeCodecProof:
     """Preserve fixed HF offline PCM and independently owned Torch stream behavior."""
+    if "codec-async" in optimizations:
+        assert vocoder_options.get("codec_flow_slots") == 2
+        proof = assert_cumulative_codec(
+            codec_path,
+            reference_json,
+            reference_tensors,
+            [name for name in optimizations if name != "codec-async"],
+            {
+                name: value
+                for name, value in vocoder_options.items()
+                if name != "codec_flow_slots"
+            },
+        )
+        asynchronous = assert_async_codec(codec_path, reference_tensors)
+        artifact_path = Path(proof["tensor_artifact"])
+        tensors = load_file(str(artifact_path), device="cpu")
+        tensors.update(asynchronous["artifacts"])
+        save_file(tensors, str(artifact_path))
+        proof["tensor_artifact_sha256"] = hashlib.sha256(
+            artifact_path.read_bytes()
+        ).hexdigest()
+        proof["optimizations"].append("codec-async")
+        proof["optimizations"].sort()
+        for feature, count in asynchronous["executions"].items():
+            proof["executions"][feature] = proof["executions"].get(feature, 0) + count
+        proof["async_flow_slots"] = asynchronous["flow_slots"]
+        proof["async_pcm_exact"] = asynchronous["pcm_exact"]
+        proof[
+            "comparison_scope"
+        ] += " Actual two-slot async511-code streams additionally match independent Torch within frozen tolerance and their own solo PCM exactly under reordered partners, RNG, late cancellation, Flow failure and retry."
+        return proof
+    else:
+        pass
     selected = set(optimizations) & {
         "codec-unready-return",
         "codec-bias-broadcast",

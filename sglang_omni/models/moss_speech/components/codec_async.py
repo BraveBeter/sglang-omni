@@ -2,6 +2,7 @@
 """Bounded B1 Flow streams with one owner for HiFT and session commits."""
 
 import copy
+import logging
 import threading
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_futures
@@ -18,6 +19,8 @@ from sglang_omni.models.moss_speech.hf_config import MAX_CONTEXT_TOKENS
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.flow import (
     CausalMaskedDiffWithXvec,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(kw_only=True)
@@ -44,6 +47,7 @@ class CodecFlowSlot:
         self.flow = flow
         self.stream = torch.cuda.Stream(device=codec.device)
         self.graph: MossSpeechCFMGraph | None = None
+        self.completions: int = 0
         self.executor = ThreadPoolExecutor(max_workers=1)
         try:
             self.executor.submit(self.prepare, mel_length).result()
@@ -131,6 +135,7 @@ class MossSpeechAsyncCodec:
         self.completed_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
         self.record_timing = record_timing
         self.closed = False
+        self.has_logged_activation = False
         flows = [codec.flow] + [
             copy.deepcopy(codec.flow) for _ in range(flow_slots - 1)
         ]
@@ -270,6 +275,18 @@ class MossSpeechAsyncCodec:
                 else:
                     pass
                 waveforms[request_id] = waveform
+                operation.slot.completions += 1
+                if not self.has_logged_activation and all(
+                    slot.completions for slot in self.slots
+                ):
+                    logger.info(
+                        "MOSS_CODEC_ASYNC_ACTIVE flow_slots=%s cudnn_enabled=%s",
+                        len(self.slots),
+                        torch.backends.cudnn.enabled,
+                    )
+                    self.has_logged_activation = True
+                else:
+                    pass
             except Exception as error:
                 release_slot = True
                 if self.codec.sessions.get(request_id) is operation.session:
