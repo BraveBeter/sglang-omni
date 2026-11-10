@@ -13,6 +13,9 @@ import numpy as np
 import torch
 
 from sglang_omni.models.moss_speech.components.cfm_graph import MossSpeechCFMGraph
+from sglang_omni.models.moss_speech.components.encoder_precision import (
+    FlowEncoderBF16Scope,
+)
 from sglang_omni.models.moss_speech.components.flow_precision import (
     FlowBF16Scope,
     FlowPrecisionProfile,
@@ -114,6 +117,7 @@ class MossSpeechStreamingCodec:
                 "ffn_attention_sdpa",
                 "ffn_attention_sdpa_resident",
                 "ffn_attention_sdpa_storage",
+                "ffn_attention_sdpa_storage_encoder",
             )
             and not broadcast_attention_bias
         ):
@@ -173,7 +177,7 @@ class MossSpeechStreamingCodec:
         )
         self.flow_precision: FlowPrecisionProfile | None = flow_precision
         self.precision_context: ExitStack = ExitStack()
-        self.precision_scopes: tuple[FlowBF16Scope, ...] = ()
+        self.precision_scopes: tuple[FlowBF16Scope | FlowEncoderBF16Scope, ...] = ()
         self.activate_precision()
         self.cfm_graph: MossSpeechCFMGraph | None = None
         if cfm_graph_mel_length is not None:
@@ -189,24 +193,30 @@ class MossSpeechStreamingCodec:
                 raise ValueError("BF16 precision requires the native Flow model")
             else:
                 stages = (
-                    ("ffn", "attention", "convolutions")
-                    if self.flow_precision == "m1"
+                    ("ffn", "attention", "encoder")
+                    if self.flow_precision == "ffn_attention_sdpa_storage_encoder"
                     else (
-                        ("ffn", "attention")
-                        if self.flow_precision
-                        in (
-                            "ffn_attention",
-                            "ffn_attention_sdpa",
-                            "ffn_attention_sdpa_resident",
-                            "ffn_attention_sdpa_storage",
+                        ("ffn", "attention", "convolutions")
+                        if self.flow_precision == "m1"
+                        else (
+                            ("ffn", "attention")
+                            if self.flow_precision
+                            in (
+                                "ffn_attention",
+                                "ffn_attention_sdpa",
+                                "ffn_attention_sdpa_resident",
+                                "ffn_attention_sdpa_storage",
+                            )
+                            else (self.flow_precision,)
                         )
-                        else (self.flow_precision,)
                     )
                 )
             try:
                 self.precision_scopes = tuple(
                     self.precision_context.enter_context(
-                        FlowBF16Scope(
+                        FlowEncoderBF16Scope(self.flow.encoder, "full")
+                        if stage == "encoder"
+                        else FlowBF16Scope(
                             self.flow.decoder.estimator,
                             stage,
                             bf16_sdpa=self.flow_precision
@@ -214,15 +224,20 @@ class MossSpeechStreamingCodec:
                                 "ffn_attention_sdpa",
                                 "ffn_attention_sdpa_resident",
                                 "ffn_attention_sdpa_storage",
+                                "ffn_attention_sdpa_storage_encoder",
                             )
                             and stage == "attention",
                             resident_weights=self.flow_precision
                             in (
                                 "ffn_attention_sdpa_resident",
                                 "ffn_attention_sdpa_storage",
+                                "ffn_attention_sdpa_storage_encoder",
                             ),
                             store_bf16_parameters=self.flow_precision
-                            == "ffn_attention_sdpa_storage",
+                            in (
+                                "ffn_attention_sdpa_storage",
+                                "ffn_attention_sdpa_storage_encoder",
+                            ),
                         )
                     )
                     for stage in stages

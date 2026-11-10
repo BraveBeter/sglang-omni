@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 import torch
 from safetensors.torch import load_file, save_file
+from torch import nn
 from transformers import WhisperFeatureExtractor
 
 import sglang_omni.models.moss_speech.components.codec_adapter as codec_adapter_module
@@ -36,6 +37,9 @@ from sglang_omni.models.moss_speech.voice_transport import (
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.proto.request import OmniRequest, StagePayload
 from sglang_omni.scheduling.message import OutgoingMessage
+from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.transformer.upsample_encoder import (
+    UpsampleConformerEncoder,
+)
 from sglang_omni.vendor.moss_speech_codec.hf_codec.modeling import scoped_global_rng
 from sglang_omni.vendor.moss_speech_codec.hf_codec.utils import WhisperVQConfig
 from sglang_omni.vendor.moss_speech_codec.hf_codec.whisper import WhisperVQEncoder
@@ -305,3 +309,26 @@ def fullweight_streaming_inputs() -> tuple[Path, dict[str, torch.Tensor], list[i
     assert voice["prompt_feat"].shape == (1, prompt_count * 4, 80)
     assert voice["embedding"].shape == (1, 192)
     return codec_path, voice, codes
+
+
+def tiny_condition_encoder(device: torch.device) -> UpsampleConformerEncoder:
+    encoder = (
+        UpsampleConformerEncoder(
+            input_size=512,
+            output_size=512,
+            attention_heads=8,
+            linear_units=32,
+            num_blocks=1,
+            input_layer="linear",
+            pos_enc_layer_type="rel_pos_espnet",
+            selfattention_layer_type="rel_selfattn",
+            use_cnn_module=False,
+            macaron_style=False,
+            upsample_stride=4,
+            static_chunk_size=25,
+        )
+        .to(device)
+        .eval()
+    )
+    encoder.up_encoders = nn.ModuleList(encoder.up_encoders[:1])
+    return encoder

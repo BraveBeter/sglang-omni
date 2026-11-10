@@ -18,6 +18,9 @@ from safetensors.torch import load_file, save_file
 from sglang_omni.models.moss_speech.components.codec_adapter import (
     MossSpeechCodecAdapter,
 )
+from sglang_omni.models.moss_speech.components.encoder_precision import (
+    FlowEncoderBF16Scope,
+)
 from sglang_omni.models.moss_speech.components.streaming_codec import (
     CodecStreamSession,
     MossSpeechStreamingCodec,
@@ -57,6 +60,10 @@ class CumulativeCodecProof(TypedDict):
     resident_parameter_copies: NotRequired[int]
     bf16_parameter_storage: NotRequired[bool]
     fp32_cpu_backup_bytes: NotRequired[int]
+    bf16_flow_encoder: NotRequired[bool]
+    encoder_bf16_executions: NotRequired[int]
+    encoder_bf16_convolution_executions: NotRequired[int]
+    encoder_fp32_boundaries: NotRequired[bool]
 
 
 @torch.no_grad()
@@ -72,6 +79,7 @@ def assert_cumulative_codec(
     is_bf16_sdpa = "codec-sdpa-bf16" in optimizations
     is_resident = "codec-resident-bf16" in optimizations
     is_storage = "codec-storage-bf16" in optimizations
+    is_encoder = "codec-encoder-bf16" in optimizations
     selected = set(optimizations) & {
         "codec-unready-return",
         "codec-bias-broadcast",
@@ -80,6 +88,7 @@ def assert_cumulative_codec(
         "codec-sdpa-bf16",
         "codec-resident-bf16",
         "codec-storage-bf16",
+        "codec-encoder-bf16",
     }
     expected_features = {
         "codec-unready-return",
@@ -99,6 +108,11 @@ def assert_cumulative_codec(
         assert is_resident and is_bf16_sdpa
     else:
         pass
+    if is_encoder:
+        assert is_storage
+        expected_features.add("codec-encoder-bf16")
+    else:
+        pass
     assert selected == expected_features
     if is_bf16:
         assert os.environ["MOSS_PRECISION_CONTRACT"] == "e13-bf16-approx-v1"
@@ -109,6 +123,7 @@ def assert_cumulative_codec(
             "ffn_attention_sdpa",
             "ffn_attention_sdpa_resident",
             "ffn_attention_sdpa_storage",
+            "ffn_attention_sdpa_storage_encoder",
         )
         assert vocoder_options == {
             "broadcast_attention_bias": True,
@@ -120,14 +135,23 @@ def assert_cumulative_codec(
                 "ffn_attention_sdpa",
                 "ffn_attention_sdpa_resident",
                 "ffn_attention_sdpa_storage",
+                "ffn_attention_sdpa_storage_encoder",
             )
         )
         assert is_resident == (
             vocoder_options["flow_precision"]
-            in ("ffn_attention_sdpa_resident", "ffn_attention_sdpa_storage")
+            in (
+                "ffn_attention_sdpa_resident",
+                "ffn_attention_sdpa_storage",
+                "ffn_attention_sdpa_storage_encoder",
+            )
         )
         assert is_storage == (
-            vocoder_options["flow_precision"] == "ffn_attention_sdpa_storage"
+            vocoder_options["flow_precision"]
+            in ("ffn_attention_sdpa_storage", "ffn_attention_sdpa_storage_encoder")
+        )
+        assert is_encoder == (
+            vocoder_options["flow_precision"] == "ffn_attention_sdpa_storage_encoder"
         )
     else:
         assert vocoder_options == {
@@ -427,6 +451,35 @@ def assert_cumulative_codec(
         else:
             assert graph is not None and graph.replays > 0
             graph_replay_count = graph.replays
+        encoder_execution_count = 0
+        encoder_convolution_count = 0
+        if is_encoder:
+            encoder_scopes = [
+                scope
+                for scope in executor.codec.precision_scopes
+                if isinstance(scope, FlowEncoderBF16Scope)
+            ]
+            assert len(encoder_scopes) == 1
+            encoder_scope = encoder_scopes[0]
+            assert encoder_scope.mode == "full" and encoder_scope.forward.executions > 0
+            assert encoder_scope.forward.last_output_dtype is torch.float32
+            assert encoder_scope.forward.last_mask_dtype is torch.bool
+            assert all(
+                operator.forward.executions > 0
+                and operator.forward.last_compute_dtype is torch.float32
+                for operator in encoder_scope.fp32_operators
+            )
+            assert (
+                encoder_scope.convolution_executions
+                == encoder_scope.bf16_convolution_executions
+                > 0
+            )
+            encoder_execution_count = sum(
+                operator.forward.bf16_executions for operator in encoder_scope.operators
+            )
+            encoder_convolution_count = encoder_scope.bf16_convolution_executions
+        else:
+            pass
         executor.codec.close()
         actual_offline = decode_offline(executor.offline_codec, codes)
         torch.testing.assert_close(
@@ -493,7 +546,22 @@ def assert_cumulative_codec(
                 if is_storage
                 else {}
             ),
+            **(
+                {
+                    "bf16_flow_encoder": True,
+                    "encoder_bf16_executions": encoder_execution_count,
+                    "encoder_bf16_convolution_executions": encoder_convolution_count,
+                    "encoder_fp32_boundaries": True,
+                }
+                if is_encoder
+                else {}
+            ),
             "executions": {
+                **(
+                    {"codec-encoder-bf16": encoder_execution_count}
+                    if is_encoder
+                    else {}
+                ),
                 **(
                     {"codec-resident-bf16": precision_execution_count}
                     if is_resident

@@ -81,6 +81,7 @@ from tests.unit_test.fixtures.moss_speech_codec import (
     fullweight_streaming_inputs,
     offline_adapter,
     streaming_codec,
+    tiny_condition_encoder,
     tiny_whisper_config,
     vocoder,
     voice_tensors,
@@ -1226,6 +1227,7 @@ def test_flow_bf16_scope_preserves_fp32_solver_and_restores_on_error(
         "ffn_attention_sdpa",
         "ffn_attention_sdpa_resident",
         "ffn_attention_sdpa_storage",
+        "ffn_attention_sdpa_storage_encoder",
     ],
 )
 def test_bf16_flow_rejects_unqualified_fp32_graph_combination(stage: str) -> None:
@@ -1249,6 +1251,7 @@ def test_bf16_flow_rejects_unqualified_fp32_graph_combination(stage: str) -> Non
         "ffn_attention_sdpa",
         "ffn_attention_sdpa_resident",
         "ffn_attention_sdpa_storage",
+        "ffn_attention_sdpa_storage_encoder",
     ],
 )
 @torch.no_grad()
@@ -1256,6 +1259,13 @@ def test_bf16_owner_close_and_reactivate_keeps_same_precision(stage: str) -> Non
     flow = CausalMaskedDiffWithXvec.__new__(CausalMaskedDiffWithXvec)
     torch.nn.Module.__init__(flow)
     flow.decoder = tiny_cfm_solver(torch.device("cpu"))
+    if stage == "ffn_attention_sdpa_storage_encoder":
+        flow.encoder = tiny_condition_encoder(torch.device("cpu"))
+        encoder_inputs = torch.randn(1, 17, 512)
+        encoder_lengths = torch.tensor([17])
+        encoder_reference = flow.encoder(encoder_inputs, encoder_lengths)[0]
+    else:
+        pass
     install_broadcast_bias_attention(flow.decoder.estimator)
     codec = MossSpeechStreamingCodec.__new__(MossSpeechStreamingCodec)
     codec.flow = flow
@@ -1269,6 +1279,10 @@ def test_bf16_owner_close_and_reactivate_keeps_same_precision(stage: str) -> Non
     original = flow.decoder.solve_euler(*inputs, streaming=True)
     codec.activate_precision()
     first = flow.decoder.solve_euler(*inputs, streaming=True)
+    if stage == "ffn_attention_sdpa_storage_encoder":
+        encoder_first = flow.encoder(encoder_inputs, encoder_lengths)[0]
+    else:
+        pass
     codec.activate_precision()
     assert torch.equal(first, flow.decoder.solve_euler(*inputs, streaming=True))
     assert all(
@@ -1279,8 +1293,20 @@ def test_bf16_owner_close_and_reactivate_keeps_same_precision(stage: str) -> Non
     codec.close()
     assert not codec.precision_scopes
     assert torch.equal(original, flow.decoder.solve_euler(*inputs, streaming=True))
+    if stage == "ffn_attention_sdpa_storage_encoder":
+        assert torch.equal(
+            encoder_reference, flow.encoder(encoder_inputs, encoder_lengths)[0]
+        )
+    else:
+        pass
     codec.activate_precision()
     assert torch.equal(first, flow.decoder.solve_euler(*inputs, streaming=True))
+    if stage == "ffn_attention_sdpa_storage_encoder":
+        assert torch.equal(
+            encoder_first, flow.encoder(encoder_inputs, encoder_lengths)[0]
+        )
+    else:
+        pass
     codec.close()
 
 
