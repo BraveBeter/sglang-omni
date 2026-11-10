@@ -20,6 +20,7 @@ class LiveBiasBroadcastProcessor:
         self.fallback_calls: int = 0
         self.last_head_stride: int | None = None
         self.use_bf16_sdpa: bool = False
+        self.bf16_inputs: bool = False
         self.bf16_sdpa_calls: int = 0
         self.last_sdpa_dtype: torch.dtype | None = None
 
@@ -41,7 +42,8 @@ class LiveBiasBroadcastProcessor:
             or torch.is_grad_enabled()
             or torch.is_autocast_enabled("cuda")
             or hidden_states.device.type != "cuda"
-            or hidden_states.dtype is not torch.float32
+            or hidden_states.dtype
+            is not (torch.bfloat16 if self.bf16_inputs else torch.float32)
             or hidden_states.ndim != 3
             or hidden_states.shape[0] != 2
             or not hidden_states.is_contiguous()
@@ -58,7 +60,7 @@ class LiveBiasBroadcastProcessor:
                 for layer in attn.modules()
             )
             or attention_mask is None
-            or attention_mask.dtype is not torch.float32
+            or attention_mask.dtype is not hidden_states.dtype
             or attention_mask.device != hidden_states.device
             or attention_mask.ndim != 3
             or attention_mask.shape[0] != hidden_states.shape[0]

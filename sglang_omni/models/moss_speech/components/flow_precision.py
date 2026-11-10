@@ -38,6 +38,7 @@ FlowPrecisionProfile = (
         "ffn_attention_sdpa",
         "ffn_attention_sdpa_resident",
         "ffn_attention_sdpa_storage",
+        "full_flow_bf16",
     ]
 )
 

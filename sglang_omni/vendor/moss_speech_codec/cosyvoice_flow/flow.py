@@ -49,6 +49,7 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         self.only_mask_loss = only_mask_loss
         self.token_mel_ratio = token_mel_ratio
         self.pre_lookahead_len = pre_lookahead_len
+        self.inference_dtype: torch.dtype | None = None
 
     @torch.inference_mode()
     def inference(
@@ -64,6 +65,12 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         finalize,
     ):
         assert token.shape[0] == 1
+        if self.inference_dtype is not None:
+            assert not self.training and not torch.is_grad_enabled()
+            embedding = embedding.to(self.inference_dtype)
+            prompt_feat = prompt_feat.to(self.inference_dtype)
+        else:
+            pass
         # xvec projection
         embedding = F.normalize(embedding, dim=1)
         embedding = self.spk_embed_affine_layer(embedding)

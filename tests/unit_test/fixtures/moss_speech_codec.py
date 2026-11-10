@@ -6,6 +6,7 @@ import json
 import os
 import queue
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -13,6 +14,7 @@ from safetensors.torch import load_file, save_file
 from transformers import WhisperFeatureExtractor
 
 import sglang_omni.models.moss_speech.components.codec_adapter as codec_adapter_module
+from sglang_omni.models.moss_speech.components.cfm_graph import SolverInputs
 from sglang_omni.models.moss_speech.components.codec_adapter import (
     MossSpeechCodecAdapter,
 )
@@ -36,9 +38,21 @@ from sglang_omni.models.moss_speech.voice_transport import (
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.proto.request import OmniRequest, StagePayload
 from sglang_omni.scheduling.message import OutgoingMessage
+from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.decoder import (
+    CausalConditionalDecoder,
+)
+from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.flow import (
+    CausalMaskedDiffWithXvec,
+)
+from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.flow_matching import (
+    CausalConditionalCFM,
+)
 from sglang_omni.vendor.moss_speech_codec.hf_codec.modeling import scoped_global_rng
 from sglang_omni.vendor.moss_speech_codec.hf_codec.utils import WhisperVQConfig
 from sglang_omni.vendor.moss_speech_codec.hf_codec.whisper import WhisperVQEncoder
+from sglang_omni.vendor.moss_speech_codec.matcha_components.bias_broadcast import (
+    install_broadcast_bias_attention,
+)
 from tests.unit_test.fixtures.moss_speech_codec_cumulative import (
     assert_cumulative_codec as assert_cumulative_codec,
 )
@@ -305,3 +319,72 @@ def fullweight_streaming_inputs() -> tuple[Path, dict[str, torch.Tensor], list[i
     assert voice["prompt_feat"].shape == (1, prompt_count * 4, 80)
     assert voice["embedding"].shape == (1, 192)
     return codec_path, voice, codes
+
+
+def tiny_cfm_solver(
+    device: torch.device, *, native_attention: bool = False
+) -> CausalConditionalCFM:
+    with scoped_global_rng(), torch.device(device):
+        return (
+            CausalConditionalCFM(
+                in_channels=240,
+                n_spks=1,
+                spk_emb_dim=80,
+                cfm_params=SimpleNamespace(
+                    sigma_min=1e-6,
+                    solver="euler",
+                    t_scheduler="cosine",
+                    training_cfg_rate=0.2,
+                    inference_cfg_rate=0.7,
+                ),
+                estimator=CausalConditionalDecoder(
+                    in_channels=320,
+                    out_channels=80,
+                    channels=(16,),
+                    dropout=0.0,
+                    attention_head_dim=64 if native_attention else 8,
+                    n_blocks=1,
+                    num_mid_blocks=1,
+                    num_heads=8 if native_attention else 2,
+                    act_fn="gelu",
+                    static_chunk_size=100,
+                    num_decoding_left_chunks=-1,
+                ),
+            )
+            .to(dtype=torch.float32)
+            .eval()
+        )
+
+
+def cfm_solver_inputs(
+    device: torch.device, *, mel_length: int = 100, shift: float = 0.0
+) -> SolverInputs:
+    x = (
+        torch.linspace(-0.2, 0.2, 80 * mel_length, device=device).reshape(
+            1, 80, mel_length
+        )
+        + shift
+    )
+    time_steps = torch.linspace(0, 1 + shift / 10, 11, device=device)
+    time_steps = 1 - torch.cos(time_steps * 0.5 * torch.pi)
+    mel_conditioning = torch.zeros(1, mel_length, 80, device=device).transpose(1, 2)
+    mel_conditioning.copy_(x * 0.3 + shift / 3)
+    return (
+        x,
+        time_steps,
+        x * 0.2 + shift / 7,
+        torch.full((1, 1, mel_length), 1 - shift / 20, device=device),
+        torch.linspace(-0.1, 0.1, 80, device=device).reshape(1, 80) + shift / 5,
+        mel_conditioning,
+    )
+
+
+def tiny_full_flow(device: torch.device) -> CausalMaskedDiffWithXvec:
+    with scoped_global_rng():
+        flow = CausalMaskedDiffWithXvec.__new__(CausalMaskedDiffWithXvec)
+        torch.nn.Module.__init__(flow)
+        flow.encoder = torch.nn.Linear(80, 80).to(device)
+        flow.decoder = tiny_cfm_solver(device, native_attention=True)
+        flow.inference_dtype = None
+        install_broadcast_bias_attention(flow.decoder.estimator)
+        return flow.eval()

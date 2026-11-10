@@ -11,6 +11,8 @@ class SinusoidalPosEmb(torch.nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
+        self.compute_dtype: torch.dtype = torch.float32
+        self.last_compute_dtype: torch.dtype | None = None
         assert self.dim % 2 == 0, "SinusoidalPosEmb requires dim to be even"
 
     def forward(self, x, scale=1000):
@@ -19,9 +21,12 @@ class SinusoidalPosEmb(torch.nn.Module):
         device = x.device
         half_dim = self.dim // 2
         emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device).float() * -emb)
+        emb = torch.exp(
+            torch.arange(half_dim, device=device).to(self.compute_dtype) * -emb
+        )
         emb = scale * x.unsqueeze(1) * emb.unsqueeze(0)
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        self.last_compute_dtype = emb.dtype
         return emb
 
 

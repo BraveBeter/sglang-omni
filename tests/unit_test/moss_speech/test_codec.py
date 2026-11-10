@@ -58,9 +58,6 @@ from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.decoder import (
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.flow import (
     CausalMaskedDiffWithXvec,
 )
-from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.flow_matching import (
-    CausalConditionalCFM,
-)
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.utils_mask import (
     add_optional_chunk_mask,
 )
@@ -77,10 +74,12 @@ from tests.unit_test.fixtures.moss_speech_codec import (
     TinyHiFT,
     TinyOfflineDecoder,
     audio_payload,
+    cfm_solver_inputs,
     encoder_adapter,
     fullweight_streaming_inputs,
     offline_adapter,
     streaming_codec,
+    tiny_cfm_solver,
     tiny_whisper_config,
     vocoder,
     voice_tensors,
@@ -677,62 +676,6 @@ def test_nonstream_audio_accepts_full_torch_seed_range_and_restores_rng(
         assert torch.equal(torch.get_rng_state(), caller_rng)
     finally:
         scheduler.stop()
-
-
-def tiny_cfm_solver(device: torch.device) -> CausalConditionalCFM:
-    with scoped_global_rng(), torch.device(device):
-        return (
-            CausalConditionalCFM(
-                in_channels=240,
-                n_spks=1,
-                spk_emb_dim=80,
-                cfm_params=SimpleNamespace(
-                    sigma_min=1e-6,
-                    solver="euler",
-                    t_scheduler="cosine",
-                    training_cfg_rate=0.2,
-                    inference_cfg_rate=0.7,
-                ),
-                estimator=CausalConditionalDecoder(
-                    in_channels=320,
-                    out_channels=80,
-                    channels=(16,),
-                    dropout=0.0,
-                    attention_head_dim=8,
-                    n_blocks=1,
-                    num_mid_blocks=1,
-                    num_heads=2,
-                    act_fn="gelu",
-                    static_chunk_size=100,
-                    num_decoding_left_chunks=-1,
-                ),
-            )
-            .to(dtype=torch.float32)
-            .eval()
-        )
-
-
-def cfm_solver_inputs(
-    device: torch.device, *, mel_length: int = 100, shift: float = 0.0
-) -> SolverInputs:
-    x = (
-        torch.linspace(-0.2, 0.2, 80 * mel_length, device=device).reshape(
-            1, 80, mel_length
-        )
-        + shift
-    )
-    time_steps = torch.linspace(0, 1 + shift / 10, 11, device=device)
-    time_steps = 1 - torch.cos(time_steps * 0.5 * torch.pi)
-    mel_conditioning = torch.zeros(1, mel_length, 80, device=device).transpose(1, 2)
-    mel_conditioning.copy_(x * 0.3 + shift / 3)
-    return (
-        x,
-        time_steps,
-        x * 0.2 + shift / 7,
-        torch.full((1, 1, mel_length), 1 - shift / 20, device=device),
-        torch.linspace(-0.1, 0.1, 80, device=device).reshape(1, 80) + shift / 5,
-        mel_conditioning,
-    )
 
 
 class CFMTestStream:

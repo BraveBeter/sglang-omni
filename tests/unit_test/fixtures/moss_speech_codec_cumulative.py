@@ -18,6 +18,9 @@ from safetensors.torch import load_file, save_file
 from sglang_omni.models.moss_speech.components.codec_adapter import (
     MossSpeechCodecAdapter,
 )
+from sglang_omni.models.moss_speech.components.full_flow_precision import (
+    FullFlowBF16Scope,
+)
 from sglang_omni.models.moss_speech.components.streaming_codec import (
     CodecStreamSession,
     MossSpeechStreamingCodec,
@@ -57,6 +60,11 @@ class CumulativeCodecProof(TypedDict):
     resident_parameter_copies: NotRequired[int]
     bf16_parameter_storage: NotRequired[bool]
     fp32_cpu_backup_bytes: NotRequired[int]
+    full_flow_bf16: NotRequired[bool]
+    bf16_solver_steps: NotRequired[int]
+    bf16_solver_state_exact_dtype: NotRequired[bool]
+    full_flow_bf16_parameter_bytes: NotRequired[int]
+    full_flow_cpu_backup_bytes: NotRequired[int]
 
 
 @torch.no_grad()
@@ -68,8 +76,9 @@ def assert_cumulative_codec(
     vocoder_options: dict[str, bool | int | str],
 ) -> CumulativeCodecProof:
     """Preserve fixed HF offline PCM and independently owned Torch stream behavior."""
-    is_bf16 = "codec-flow-bf16" in optimizations
-    is_bf16_sdpa = "codec-sdpa-bf16" in optimizations
+    is_full = "codec-full-flow-bf16" in optimizations
+    is_bf16 = "codec-flow-bf16" in optimizations or is_full
+    is_bf16_sdpa = "codec-sdpa-bf16" in optimizations or is_full
     is_resident = "codec-resident-bf16" in optimizations
     is_storage = "codec-storage-bf16" in optimizations
     selected = set(optimizations) & {
@@ -80,13 +89,18 @@ def assert_cumulative_codec(
         "codec-sdpa-bf16",
         "codec-resident-bf16",
         "codec-storage-bf16",
+        "codec-full-flow-bf16",
     }
     expected_features = {
         "codec-unready-return",
         "codec-bias-broadcast",
-        "codec-flow-bf16" if is_bf16 else "codec-cfm-graph",
+        (
+            "codec-full-flow-bf16"
+            if is_full
+            else ("codec-flow-bf16" if is_bf16 else "codec-cfm-graph")
+        ),
     }
-    if is_bf16_sdpa:
+    if "codec-sdpa-bf16" in optimizations:
         expected_features.add("codec-sdpa-bf16")
     else:
         pass
@@ -100,7 +114,13 @@ def assert_cumulative_codec(
     else:
         pass
     assert selected == expected_features
-    if is_bf16:
+    if is_full:
+        assert os.environ["MOSS_PRECISION_CONTRACT"] == "e13-bf16-approx-v1"
+        assert vocoder_options == {
+            "broadcast_attention_bias": True,
+            "flow_precision": "full_flow_bf16",
+        }
+    elif is_bf16:
         assert os.environ["MOSS_PRECISION_CONTRACT"] == "e13-bf16-approx-v1"
         assert vocoder_options.get("flow_precision") in (
             "ffn",
@@ -357,7 +377,44 @@ def assert_cumulative_codec(
         resident_parameter_copies = 0
         fp32_cpu_backup_bytes = 0
         graph = executor.codec.cfm_graph
-        if is_bf16:
+        full_parameter_bytes = 0
+        full_backup_bytes = 0
+        if is_full:
+            assert graph is None and len(executor.codec.precision_scopes) == 1
+            full_scope = executor.codec.precision_scopes[0]
+            assert isinstance(full_scope, FullFlowBF16Scope) and full_scope.active
+            assert all(
+                parameter.dtype is torch.bfloat16
+                for parameter in executor.codec.flow.parameters()
+            )
+            assert all(
+                parameter.dtype is torch.float32
+                for parameter in executor.codec.hift.parameters()
+            )
+            assert all(
+                state.backup.device.type == "cpu"
+                and state.backup.dtype is torch.float32
+                for state in full_scope.parameters
+            )
+            assert executor.codec.flow.decoder.solver_dtype is torch.bfloat16
+            assert (
+                executor.codec.flow.decoder.solver_state_dtypes == [torch.bfloat16] * 10
+            )
+            assert (
+                executor.codec.flow.decoder.estimator.time_embeddings.compute_dtype
+                is torch.bfloat16
+            )
+            assert all(
+                processor.fallback_calls == 0 for processor in full_scope.processors
+            )
+            precision_execution_count = (
+                executor.codec.flow.decoder.solver_precision_steps
+            )
+            full_parameter_bytes = full_scope.bf16_parameter_bytes
+            full_backup_bytes = full_scope.fp32_cpu_backup_bytes
+            assert full_backup_bytes == 2 * full_parameter_bytes > 0
+            graph_replay_count = 0
+        elif is_bf16:
             assert graph is None
             operators = [
                 operator
@@ -493,6 +550,17 @@ def assert_cumulative_codec(
                 if is_storage
                 else {}
             ),
+            **(
+                {
+                    "full_flow_bf16": True,
+                    "bf16_solver_steps": precision_execution_count,
+                    "bf16_solver_state_exact_dtype": True,
+                    "full_flow_bf16_parameter_bytes": full_parameter_bytes,
+                    "full_flow_cpu_backup_bytes": full_backup_bytes,
+                }
+                if is_full
+                else {}
+            ),
             "executions": {
                 **(
                     {"codec-resident-bf16": precision_execution_count}
@@ -504,10 +572,18 @@ def assert_cumulative_codec(
                     if is_storage
                     else {}
                 ),
-                **({"codec-sdpa-bf16": sdpa_execution_count} if is_bf16_sdpa else {}),
+                **(
+                    {"codec-sdpa-bf16": sdpa_execution_count}
+                    if "codec-sdpa-bf16" in selected
+                    else {}
+                ),
                 "codec-bias-broadcast": bias_execution_count,
                 **(
-                    {"codec-flow-bf16": precision_execution_count}
+                    {
+                        (
+                            "codec-full-flow-bf16" if is_full else "codec-flow-bf16"
+                        ): precision_execution_count
+                    }
                     if is_bf16
                     else {"codec-cfm-graph": graph_replay_count}
                 ),

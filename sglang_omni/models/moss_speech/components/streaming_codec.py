@@ -17,6 +17,9 @@ from sglang_omni.models.moss_speech.components.flow_precision import (
     FlowBF16Scope,
     FlowPrecisionProfile,
 )
+from sglang_omni.models.moss_speech.components.full_flow_precision import (
+    FullFlowBF16Scope,
+)
 from sglang_omni.models.moss_speech.hf_config import MAX_CONTEXT_TOKENS
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.flow import (
     CausalMaskedDiffWithXvec,
@@ -114,6 +117,7 @@ class MossSpeechStreamingCodec:
                 "ffn_attention_sdpa",
                 "ffn_attention_sdpa_resident",
                 "ffn_attention_sdpa_storage",
+                "full_flow_bf16",
             )
             and not broadcast_attention_bias
         ):
@@ -173,7 +177,7 @@ class MossSpeechStreamingCodec:
         )
         self.flow_precision: FlowPrecisionProfile | None = flow_precision
         self.precision_context: ExitStack = ExitStack()
-        self.precision_scopes: tuple[FlowBF16Scope, ...] = ()
+        self.precision_scopes: tuple[FlowBF16Scope | FullFlowBF16Scope, ...] = ()
         self.activate_precision()
         self.cfm_graph: MossSpeechCFMGraph | None = None
         if cfm_graph_mel_length is not None:
@@ -184,6 +188,13 @@ class MossSpeechStreamingCodec:
             pass
 
     def activate_precision(self) -> None:
+        if self.flow_precision == "full_flow_bf16" and not self.precision_scopes:
+            self.precision_scopes = (
+                self.precision_context.enter_context(FullFlowBF16Scope(self.flow)),
+            )
+            return
+        else:
+            pass
         if self.flow_precision is not None and not self.precision_scopes:
             if type(self.flow) is not CausalMaskedDiffWithXvec:
                 raise ValueError("BF16 precision requires the native Flow model")
