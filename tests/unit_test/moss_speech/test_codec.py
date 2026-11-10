@@ -30,6 +30,7 @@ from sglang_omni.models.moss_speech.components.codec_adapter import (
     CodecAdapterError,
     MossSpeechCodecAdapter,
 )
+from sglang_omni.models.moss_speech.components.codec_async import MossSpeechAsyncCodec
 from sglang_omni.models.moss_speech.components.streaming_codec import (
     CodecStreamSession,
     MossSpeechStreamingCodec,
@@ -1157,3 +1158,96 @@ def test_cfm_graph_fullweights_streaming_pcm_and_cleanup() -> None:
         codec.close()
         eager.close()
     assert codec.cfm_graph is None and "solve_euler" not in vars(codec.flow.decoder)
+
+
+@pytest.mark.accelerator
+def test_async_codec_fullweights_pcm_rng_and_late_cancel() -> None:
+    """Independent Flow streams must preserve full PCM and discard cancelled-slot completions."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required")
+    else:
+        pass
+    codec_path, voice, codes = fullweight_streaming_inputs()
+    with torch.backends.cudnn.flags(benchmark=False, deterministic=True):
+        codec = MossSpeechStreamingCodec(
+            codec_path, chunk_size=25, device="cuda:0", broadcast_attention_bias=True
+        )
+        expected: dict[str, torch.Tensor] = {}
+        expected_rng: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        request_codes = {
+            "first": codes,
+            "second": [(code + 11) % 16384 for code in codes],
+        }
+        graph = MossSpeechCFMGraph(codec.flow.decoder, mel_length=1500)
+        try:
+            for index, (request_id, tokens) in enumerate(request_codes.items()):
+                codec.begin(request_id, voice, seed=42 + index)
+                state = codec.sessions[request_id]
+                expected[request_id] = torch.cat(
+                    codec.push(request_id, tokens, final=True)
+                )
+                expected_rng[request_id] = (
+                    state.cpu_rng.clone(),
+                    state.device_rng.clone(),
+                )
+            assert graph.replays > 0
+        finally:
+            graph.close()
+        pool = MossSpeechAsyncCodec(codec, flow_slots=2)
+        retained: dict[str, list[torch.Tensor]] = {name: [] for name in request_codes}
+        sessions: dict[str, CodecStreamSession] = {}
+        try:
+            cpu_rng = torch.get_rng_state().clone()
+            device_rng = torch.cuda.get_rng_state().clone()
+            for index, (request_id, tokens) in enumerate(request_codes.items()):
+                codec.begin(request_id, voice, seed=42 + index)
+                sessions[request_id] = codec.sessions[request_id]
+                pool.ingest(request_id, tokens, final=True)
+            while codec.sessions or pool.pending:
+                for request_id in list(codec.sessions):
+                    pool.submit(request_id)
+                for request_id, waveform in pool.collect(wait=True).items():
+                    retained[request_id].append(waveform)
+            for request_id, pieces in retained.items():
+                assert torch.equal(torch.cat(pieces), expected[request_id])
+                assert torch.equal(
+                    sessions[request_id].cpu_rng, expected_rng[request_id][0]
+                )
+                assert torch.equal(
+                    sessions[request_id].device_rng, expected_rng[request_id][1]
+                )
+                assert sessions[request_id].cursor == len(codes)
+                assert sessions[request_id].ledger[-1]["final"]
+            assert torch.equal(torch.get_rng_state(), cpu_rng)
+            assert torch.equal(torch.cuda.get_rng_state(), device_rng)
+            assert all(slot.graph.replays > 0 for slot in pool.slots)
+            codec.begin("reused", voice, seed=42)
+            pool.ingest("reused", codes[:64], final=True)
+            assert pool.submit("reused")
+            assert not pool.submit("reused")
+            pool.cancel("reused")
+            codec.begin("reused", voice, seed=43)
+            replacement = codec.sessions["reused"]
+            while pool.pending:
+                assert not pool.collect(wait=True)
+            assert replacement.cursor == 0 and not replacement.ledger
+            pool.ingest("reused", codes[:32], final=True)
+            assert pool.submit("reused")
+            with patch.object(
+                codec.hift,
+                "inference",
+                side_effect=RuntimeError("Injected HiFT failure"),
+            ):
+                with pytest.raises(RuntimeError, match="Injected HiFT failure"):
+                    pool.collect(wait=True)
+            assert not codec.sessions and not pool.pending
+            codec.begin("retry", voice, seed=42)
+            pool.ingest("retry", codes[:32], final=True)
+            assert pool.submit("retry")
+            assert (
+                pool.collect(wait=True)["retry"].numel() == 32 * codec.samples_per_code
+            )
+        finally:
+            pool.close()
+            pool.close()
+            codec.close()

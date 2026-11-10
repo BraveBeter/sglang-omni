@@ -313,11 +313,23 @@ class MossSpeechStreamingCodec:
     def decode(
         self, session: CodecStreamSession, available: int, *, final: bool
     ) -> torch.Tensor:
+        predicted_mel = self.decode_flow(session, available, final=final)
+        return self.decode_mel(session, available, predicted_mel, final=final)
+
+    def decode_flow(
+        self,
+        session: CodecStreamSession,
+        available: int,
+        *,
+        final: bool,
+        flow: CausalMaskedDiffWithXvec | None = None,
+    ) -> torch.Tensor:
+        flow = self.flow if flow is None else flow
         audio_token = torch.tensor(
             [session.codes[:available]], device=self.device, dtype=torch.long
         )
         voice = session.voice
-        predicted_mel, _ = self.flow.inference(
+        predicted_mel, _ = flow.inference(
             token=audio_token,
             token_len=torch.tensor([available], dtype=torch.int32, device=self.device),
             prompt_token=voice["prompt_token"],
@@ -332,6 +344,16 @@ class MossSpeechStreamingCodec:
             streaming=not final,
             finalize=final,
         )
+        return predicted_mel
+
+    def decode_mel(
+        self,
+        session: CodecStreamSession,
+        available: int,
+        predicted_mel: torch.Tensor,
+        *,
+        final: bool,
+    ) -> torch.Tensor:
         predicted_mel = predicted_mel[
             :, :, session.cursor * self.flow.token_mel_ratio :
         ]
