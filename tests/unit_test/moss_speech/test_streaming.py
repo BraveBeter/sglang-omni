@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real terminal scheduler boundaries, protocol validation and tail ownership."""
 
+import asyncio
 import copy
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -11,7 +12,11 @@ import pytest
 import torch
 
 from sglang_omni.client.types import GenerateRequest, Message
+from sglang_omni.models.moss_speech.async_vocoder import MossSpeechAsyncVocoder
 from sglang_omni.models.moss_speech.components.cfm_graph import MossSpeechCFMGraph
+from sglang_omni.models.moss_speech.components.streaming_codec import (
+    MossSpeechStreamingCodec,
+)
 from sglang_omni.models.moss_speech.payload_types import (
     AUDIO_PAD_TOKEN_ID,
     EOSP_TOKEN_ID,
@@ -43,6 +48,8 @@ from tests.unit_test.fixtures.moss_speech_codec import (
     audio_chunk,
     audio_payload,
     drain_messages,
+    fullweight_streaming_inputs,
+    offline_adapter,
     vocoder,
     voice_tensors,
 )
@@ -552,3 +559,90 @@ def test_vocoder_shutdown_releases_prepared_graph_and_request_state(
     assert not scheduler.codec.sessions and not scheduler.stream_states
     scheduler.stop()
     graph.close.assert_called_once_with()
+
+
+@pytest.mark.accelerator
+def test_async_vocoder_fullweights_stream_completion_and_abort(
+    tmp_path, monkeypatch
+) -> None:
+    """Queued codes and done messages remain ordered while Flow completions wake the scheduler."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required")
+    else:
+        pass
+    codec_path, voice, all_codes = fullweight_streaming_inputs()
+    packed = pack_voice_payload(voice)
+    voice_key = voice_payload_digest(packed)
+    codes = all_codes[:128]
+    codec = MossSpeechStreamingCodec(
+        codec_path, chunk_size=25, device="cuda:0", broadcast_attention_bias=True
+    )
+    expected = {}
+    with torch.backends.cudnn.flags(benchmark=False, deterministic=True):
+        graph = MossSpeechCFMGraph(codec.flow.decoder, mel_length=1500)
+        try:
+            for index, request_id in enumerate(["first", "second"]):
+                codec.begin(request_id, voice, seed=42 + index)
+                expected[request_id] = torch.cat(
+                    codec.push(request_id, codes, final=True)
+                )
+        finally:
+            graph.close()
+    scheduler = MossSpeechAsyncVocoder(
+        codec,
+        offline_adapter(tmp_path, monkeypatch),
+        flow_slots=2,
+        cfm_graph_mel_length=1500,
+    )
+    loop = asyncio.new_event_loop()
+    try:
+        scheduler.on_serving_start()
+        for index, request_id in enumerate(["first", "second", "cancelled", "empty"]):
+            tokens = [] if request_id == "empty" else codes
+            payload = audio_payload(request_id, tokens, seed=42 + index)
+            payload.data.update(voice_payload=packed, voice_key=voice_key)
+            scheduler.handle_streaming_new_request(request_id, payload)
+            for cursor, code in enumerate(tokens):
+                chunk = audio_chunk([code], cursor=cursor, seed=42 + index)
+                if cursor == 0:
+                    chunk.metadata.update(voice_payload=packed, voice_key=voice_key)
+                else:
+                    pass
+                scheduler.inbox.put(IncomingMessage(request_id, "stream_chunk", chunk))
+            scheduler.inbox.put(IncomingMessage(request_id, "stream_done"))
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(scheduler.abort, "cancelled").result()
+        steps = 0
+        while scheduler.stream_states or not scheduler.inbox.empty():
+            message = scheduler.next_message()
+            if message is not None and not scheduler.is_aborted(message.request_id):
+                scheduler.handle_message(message, loop)
+            else:
+                scheduler.run_ready_step()
+            steps += 1
+            assert steps < 10000
+        messages = drain_messages(scheduler)
+        assert not [message for message in messages if message.type == "error"]
+        assert not [
+            message for message in messages if message.request_id == "cancelled"
+        ]
+        assert {
+            message.request_id for message in messages if message.type == "result"
+        } == {"first", "second", "empty"}
+        for request_id, reference in expected.items():
+            chunks = [
+                message.data["audio_waveform"]
+                for message in messages
+                if message.request_id == request_id and message.type == "stream"
+            ]
+            actual = torch.cat(
+                [
+                    torch.frombuffer(bytearray(chunk), dtype=torch.float32)
+                    for chunk in chunks
+                ]
+            )
+            assert torch.equal(actual, reference)
+        assert not scheduler.async_codec.pending and not codec.sessions
+    finally:
+        scheduler.stop()
+        loop.close()

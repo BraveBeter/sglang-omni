@@ -27,6 +27,12 @@ class CodecMelResult:
     started: torch.cuda.Event
 
 
+class CodecStepFailure(RuntimeError):
+    def __init__(self, request_id: str, error: Exception) -> None:
+        super().__init__(str(error))
+        self.request_id = request_id
+
+
 class CodecFlowSlot:
     def __init__(
         self,
@@ -105,7 +111,11 @@ class MossSpeechAsyncCodec:
         cfm_graph_mel_length: int | None = 1500,
         record_timing: bool = False,
     ) -> None:
-        if codec.device.type != "cuda" or flow_slots not in (1, 2):
+        if (
+            codec.device.type != "cuda"
+            or type(flow_slots) is not int
+            or flow_slots not in (1, 2)
+        ):
             raise ValueError("Async Codec requires CUDA and one or two Flow slots")
         elif codec.cfm_graph is not None:
             raise ValueError("Flow graphs must be created by their execution slot")
@@ -260,22 +270,22 @@ class MossSpeechAsyncCodec:
                 else:
                     pass
                 waveforms[request_id] = waveform
-            except BaseException:
+            except Exception as error:
                 release_slot = True
                 if self.codec.sessions.get(request_id) is operation.session:
                     self.codec.cleanup(request_id)
+                    raise CodecStepFailure(request_id, error) from error
                 else:
-                    pass
-                raise
+                    continue
             finally:
                 if release_slot:
                     self.pending.pop(request_id)
                 else:
                     pass
+            break
         return waveforms
 
     def cancel(self, request_id: str) -> None:
-        self.check_owner()
         self.codec.cleanup(request_id)
 
     def close(self) -> None:

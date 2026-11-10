@@ -6,6 +6,7 @@ from pathlib import Path
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
+from sglang_omni.models.moss_speech.async_vocoder import MossSpeechAsyncVocoder
 from sglang_omni.models.moss_speech.audio_tasks import RequestValidationError
 from sglang_omni.models.moss_speech.components.codec_adapter import (
     MossSpeechCodecAdapter,
@@ -195,6 +196,7 @@ def create_audio_vocoder_executor(
     device: str | None = None,
     gpu_id: int | None = None,
     cfm_graph_mel_length: int | None = None,
+    codec_flow_slots: int = 0,
 ) -> MossSpeechStreamingVocoder:
     codec_directory = resolve_codec_dir(model_path, codec_path)
     concrete_device = str(resolve_concrete_device(device, gpu_id))
@@ -211,9 +213,17 @@ def create_audio_vocoder_executor(
             chunk_size=chunk_size,
             device=concrete_device,
             broadcast_attention_bias=broadcast_attention_bias,
-            cfm_graph_mel_length=cfm_graph_mel_length,
+            cfm_graph_mel_length=cfm_graph_mel_length if not codec_flow_slots else None,
         )
     except BaseException:
         offline_codec.close()
         raise
-    return MossSpeechStreamingVocoder(streaming_codec, offline_codec)
+    if codec_flow_slots:
+        return MossSpeechAsyncVocoder(
+            streaming_codec,
+            offline_codec,
+            flow_slots=codec_flow_slots,
+            cfm_graph_mel_length=cfm_graph_mel_length,
+        )
+    else:
+        return MossSpeechStreamingVocoder(streaming_codec, offline_codec)
