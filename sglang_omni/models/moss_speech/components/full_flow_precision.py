@@ -29,6 +29,13 @@ class StoredFlowTensor:
     backup: torch.Tensor
 
 
+@dataclass(kw_only=True)
+class StoredPositionTable:
+    module: PositionalEncoding | EspnetRelPositionalEncoding
+    backup: torch.Tensor
+    device: torch.device
+
+
 class FullFlowBF16Scope:
     """Use native BF16 operators and solver state with exact CPU restoration."""
 
@@ -40,9 +47,7 @@ class FullFlowBF16Scope:
         self.flow = flow
         self.parameters: list[StoredFlowTensor] = []
         self.buffers: list[StoredFlowTensor] = []
-        self.position_tables: list[
-            tuple[PositionalEncoding | EspnetRelPositionalEncoding, StoredFlowTensor]
-        ] = []
+        self.position_tables: list[StoredPositionTable] = []
         self.processors: list[LiveBiasBroadcastProcessor] = []
         self.active: bool = False
         self.bf16_parameter_bytes: int = 0
@@ -110,17 +115,13 @@ class FullFlowBF16Scope:
                 ):
                     if module.pe is not None:
                         self.position_tables.append(
-                            (
-                                module,
-                                StoredFlowTensor(
-                                    tensor=module.pe,
-                                    backup=module.pe.detach().to(
-                                        device="cpu", copy=True
-                                    ),
-                                ),
+                            StoredPositionTable(
+                                module=module,
+                                backup=module.pe.detach().to(device="cpu", copy=True),
+                                device=module.pe.device,
                             )
                         )
-                        module.pe.data = module.pe.detach().bfloat16()
+                        module.pe = module.pe.bfloat16()
                     else:
                         pass
                 else:
@@ -161,9 +162,8 @@ class FullFlowBF16Scope:
             processor.use_bf16_sdpa = False
             processor.bf16_inputs = False
         self.processors.clear()
-        for module, original in self.position_tables:
-            original.tensor.data = original.backup.to(original.tensor.device)
-            module.pe = original.tensor
+        for original in self.position_tables:
+            original.module.pe = original.backup.to(original.device)
         self.position_tables.clear()
         for state in reversed(self.buffers + self.parameters):
             state.tensor.data = state.backup.to(state.tensor.device)

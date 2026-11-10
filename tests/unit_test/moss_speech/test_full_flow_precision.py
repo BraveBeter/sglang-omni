@@ -14,6 +14,9 @@ from sglang_omni.models.moss_speech.components.streaming_codec import (
     MossSpeechStreamingCodec,
 )
 from sglang_omni.models.moss_speech.config import MossSpeechVocoderArgs
+from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.transformer.embedding import (
+    EspnetRelPositionalEncoding,
+)
 from sglang_omni.vendor.moss_speech_codec.hf_codec.modeling import scoped_global_rng
 from tests.unit_test.fixtures.moss_speech_codec import cfm_solver_inputs, tiny_full_flow
 
@@ -159,3 +162,20 @@ def test_full_flow_bf16_rejects_training_and_missing_live_bias() -> None:
             broadcast_attention_bias=True,
             cfm_graph_mel_length=1500,
         )
+
+
+def test_full_flow_bf16_warm_inference_position_table_restores_exactly() -> None:
+    flow = tiny_full_flow(torch.device("cpu"))
+    flow.encoder = EspnetRelPositionalEncoding(80, 0.0, max_len=32).eval()
+    with torch.inference_mode():
+        hidden_states = torch.ones(1, 8, 80)
+        flow.encoder.pe = flow.encoder.pe.clone()
+        reference = flow.encoder(hidden_states)[1].clone()
+    assert torch.is_inference(flow.encoder.pe)
+    with FullFlowBF16Scope(flow), torch.inference_mode():
+        actual = flow.encoder(hidden_states.bfloat16())[1]
+        assert actual.dtype is torch.bfloat16
+        assert torch.equal(actual, reference.bfloat16())
+    with torch.inference_mode():
+        assert flow.encoder.pe.dtype is torch.float32
+        assert torch.equal(flow.encoder(hidden_states)[1], reference)
