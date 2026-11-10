@@ -21,7 +21,6 @@ from sglang_omni.models.moss_speech.streaming import (
     AudioStreamState,
     MossSpeechStreamingVocoder,
 )
-from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.message import IncomingMessage
 
 
@@ -51,7 +50,12 @@ class MossSpeechAsyncVocoder(MossSpeechStreamingVocoder):
 
     def on_serving_start(self) -> None:
         self.policy.enter_context(
-            torch.backends.cudnn.flags(benchmark=False, deterministic=True)
+            torch.backends.cudnn.flags(
+                enabled=torch.backends.cudnn.enabled,
+                benchmark=False,
+                deterministic=True,
+                allow_tf32=torch.backends.cudnn.allow_tf32,
+            )
         )
         try:
             self.async_codec = MossSpeechAsyncCodec(

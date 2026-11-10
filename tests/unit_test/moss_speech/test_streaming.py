@@ -578,7 +578,7 @@ def test_async_vocoder_fullweights_stream_completion_and_abort(
         codec_path, chunk_size=25, device="cuda:0", broadcast_attention_bias=True
     )
     expected = {}
-    with torch.backends.cudnn.flags(benchmark=False, deterministic=True):
+    with torch.backends.cudnn.flags(enabled=True, benchmark=False, deterministic=True):
         graph = MossSpeechCFMGraph(codec.flow.decoder, mel_length=1500)
         try:
             for index, request_id in enumerate(["first", "second"]):
@@ -597,6 +597,9 @@ def test_async_vocoder_fullweights_stream_completion_and_abort(
     loop = asyncio.new_event_loop()
     try:
         scheduler.on_serving_start()
+        assert (
+            torch.backends.cudnn.enabled
+        ), "The async owner must preserve the configured cuDNN backend"
         for index, request_id in enumerate(["first", "second", "cancelled", "empty"]):
             tokens = [] if request_id == "empty" else codes
             payload = audio_payload(request_id, tokens, seed=42 + index)
