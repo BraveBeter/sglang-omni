@@ -31,7 +31,7 @@ class AsyncCodecEvidence(TypedDict):
     pcm_exact: bool
 
 
-@torch.inference_mode()
+@torch.no_grad()
 def assert_async_codec(codec_path: str, reference_tensors: str) -> AsyncCodecEvidence:
     """Preserve complete511-code PCM, per-request RNG and cancellation across actual workers."""
     oracle = load_file(reference_tensors, device="cpu")
@@ -55,7 +55,8 @@ def assert_async_codec(codec_path: str, reference_tensors: str) -> AsyncCodecEvi
     executor = create_audio_vocoder_executor(
         "unused",
         codec_path=codec_path,
-        device="cuda:0",
+        device="cuda",
+        gpu_id=0,
         chunk_size=25,
         broadcast_attention_bias=True,
         cfm_graph_mel_length=1500,
@@ -66,6 +67,10 @@ def assert_async_codec(codec_path: str, reference_tensors: str) -> AsyncCodecEvi
     expected: dict[str, torch.Tensor] = {}
     expected_rng: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     try:
+        executor.on_serving_start()
+        assert executor.async_codec is not None and torch.backends.cudnn.enabled
+        pool = executor.async_codec
+        codec = executor.codec
         for index, request_id in enumerate(request_codes):
             independent.begin(request_id, voices[request_id], seed=42 + index)
             state = independent.sessions[request_id]
@@ -77,10 +82,6 @@ def assert_async_codec(codec_path: str, reference_tensors: str) -> AsyncCodecEvi
             artifacts["async." + request_id + ".native_pcm"] = expected[
                 request_id
             ].contiguous()
-        executor.on_serving_start()
-        assert executor.async_codec is not None and torch.backends.cudnn.enabled
-        pool = executor.async_codec
-        codec = executor.codec
         solo: dict[str, torch.Tensor] = {}
 
         def run(request_ids: list[str]) -> dict[str, torch.Tensor]:
