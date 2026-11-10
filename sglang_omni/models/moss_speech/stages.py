@@ -201,6 +201,7 @@ def create_audio_vocoder_executor(
     cfm_graph_mel_length: int | None = None,
     flow_precision: FlowPrecisionProfile | None = None,
     codec_flow_slots: int = 0,
+    reuse_middle_attention_bias: bool = False,
 ) -> MossSpeechStreamingVocoder:
     if codec_flow_slots and (
         flow_precision not in (None, "full_flow_bf16")
@@ -226,6 +227,7 @@ def create_audio_vocoder_executor(
             chunk_size=chunk_size,
             device=concrete_device,
             broadcast_attention_bias=broadcast_attention_bias,
+            reuse_middle_attention_bias=reuse_middle_attention_bias,
             cfm_graph_mel_length=cfm_graph_mel_length if not codec_flow_slots else None,
             flow_precision=flow_precision,
         )

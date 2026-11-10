@@ -38,6 +38,8 @@ class AsyncCodecEvidence(TypedDict):
     bf16_flow_slots: NotRequired[int]
     bf16_parameter_bytes: NotRequired[int]
     fp32_cpu_backup_bytes: NotRequired[int]
+    middle_bias_slots: NotRequired[int]
+    middle_bias_reuses: NotRequired[int]
 
 
 @torch.no_grad()
@@ -45,6 +47,7 @@ def assert_async_codec(
     codec_path: str,
     reference_tensors: str,
     flow_precision: FlowPrecisionProfile | None = None,
+    reuse_middle_attention_bias: bool = False,
 ) -> AsyncCodecEvidence:
     """Preserve complete511-code PCM, per-request RNG and cancellation across actual workers."""
     oracle = load_file(reference_tensors, device="cpu")
@@ -82,6 +85,7 @@ def assert_async_codec(
         cfm_graph_mel_length=None if is_full else 1500,
         codec_flow_slots=2,
         flow_precision=flow_precision,
+        reuse_middle_attention_bias=reuse_middle_attention_bias,
     )
     assert isinstance(executor, MossSpeechAsyncVocoder)
     artifacts: dict[str, torch.Tensor] = {}
@@ -277,6 +281,22 @@ def assert_async_codec(
         evidence = AsyncCodecEvidence(
             artifacts=artifacts, executions=executions, flow_slots=2, pcm_exact=True
         )
+        if reuse_middle_attention_bias:
+            estimators = [slot.flow.decoder.estimator for slot in pool.slots]
+            assert len({id(estimator) for estimator in estimators}) == 2
+            assert all(
+                estimator.reuse_middle_attention_bias
+                and estimator.middle_bias_constructions > 0
+                and estimator.middle_bias_fallbacks == 0
+                and estimator.middle_bias_reuses
+                == (len(estimator.mid_blocks) - 1) * estimator.middle_bias_constructions
+                for estimator in estimators
+            )
+            reuses = sum(estimator.middle_bias_reuses for estimator in estimators)
+            executions["codec-middle-bias-reuse"] = reuses
+            evidence.update(middle_bias_slots=2, middle_bias_reuses=reuses)
+        else:
+            pass
         if is_full:
             evidence.update(
                 bf16_flow_slots=2,

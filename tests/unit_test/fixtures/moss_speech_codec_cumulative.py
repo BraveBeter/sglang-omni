@@ -72,6 +72,12 @@ class CumulativeCodecProof(TypedDict):
     async_bf16_flow_slots: NotRequired[int]
     async_bf16_parameter_bytes: NotRequired[int]
     async_fp32_cpu_backup_bytes: NotRequired[int]
+    middle_bias_exact: NotRequired[bool]
+    middle_bias_constructions: NotRequired[int]
+    middle_bias_reuses: NotRequired[int]
+    middle_bias_fallbacks: NotRequired[int]
+    async_middle_bias_slots: NotRequired[int]
+    async_middle_bias_reuses: NotRequired[int]
 
 
 @torch.no_grad()
@@ -88,6 +94,7 @@ def assert_cumulative_codec(
     is_bf16_sdpa = "codec-sdpa-bf16" in optimizations or is_full
     is_resident = "codec-resident-bf16" in optimizations
     is_storage = "codec-storage-bf16" in optimizations
+    is_middle_reuse = "codec-middle-bias-reuse" in optimizations
 
     if "codec-async" in optimizations:
         assert vocoder_options.get("codec_flow_slots") == 2
@@ -103,7 +110,10 @@ def assert_cumulative_codec(
             },
         )
         asynchronous = assert_async_codec(
-            codec_path, reference_tensors, "full_flow_bf16" if is_full else None
+            codec_path,
+            reference_tensors,
+            "full_flow_bf16" if is_full else None,
+            reuse_middle_attention_bias=is_middle_reuse,
         )
         artifact_path = Path(proof["tensor_artifact"])
         tensors = load_file(str(artifact_path), device="cpu")
@@ -118,6 +128,11 @@ def assert_cumulative_codec(
             proof["executions"][feature] = proof["executions"].get(feature, 0) + count
         proof["async_flow_slots"] = asynchronous["flow_slots"]
         proof["async_pcm_exact"] = asynchronous["pcm_exact"]
+        if is_middle_reuse:
+            proof["async_middle_bias_slots"] = asynchronous["middle_bias_slots"]
+            proof["async_middle_bias_reuses"] = asynchronous["middle_bias_reuses"]
+        else:
+            pass
         if is_full:
             proof["async_bf16_flow_slots"] = asynchronous["bf16_flow_slots"]
             proof["async_bf16_parameter_bytes"] = asynchronous["bf16_parameter_bytes"]
@@ -141,6 +156,7 @@ def assert_cumulative_codec(
         "codec-resident-bf16",
         "codec-storage-bf16",
         "codec-full-flow-bf16",
+        "codec-middle-bias-reuse",
     }
     expected_features = {
         "codec-unready-return",
@@ -164,12 +180,18 @@ def assert_cumulative_codec(
         assert is_resident and is_bf16_sdpa
     else:
         pass
+    if is_middle_reuse:
+        assert is_full
+        expected_features.add("codec-middle-bias-reuse")
+    else:
+        pass
     assert selected == expected_features
     if is_full:
         assert os.environ["MOSS_PRECISION_CONTRACT"] == "e13-bf16-approx-v1"
         assert vocoder_options == {
             "broadcast_attention_bias": True,
             "flow_precision": "full_flow_bf16",
+            **({"reuse_middle_attention_bias": True} if is_middle_reuse else {}),
         }
     elif is_bf16:
         assert os.environ["MOSS_PRECISION_CONTRACT"] == "e13-bf16-approx-v1"
@@ -559,6 +581,17 @@ def assert_cumulative_codec(
             artifacts["voice." + name] = value.clone().contiguous()
         artifact_path = output_dir / "cumulative-codec.safetensors"
         save_file(artifacts, str(artifact_path))
+        middle_estimator = executor.codec.flow.decoder.estimator
+        if is_middle_reuse:
+            assert middle_estimator.middle_bias_constructions > 0
+            assert middle_estimator.middle_bias_fallbacks == 0
+            assert (
+                middle_estimator.middle_bias_reuses
+                == (len(middle_estimator.mid_blocks) - 1)
+                * middle_estimator.middle_bias_constructions
+            )
+        else:
+            pass
         return {
             "optimizations": sorted(selected),
             "reference": {
@@ -583,6 +616,16 @@ def assert_cumulative_codec(
             "request_state_isolation_exact": True,
             "rng_isolation_exact": True,
             "cleanup_exact": True,
+            **(
+                {
+                    "middle_bias_exact": True,
+                    "middle_bias_constructions": middle_estimator.middle_bias_constructions,
+                    "middle_bias_reuses": middle_estimator.middle_bias_reuses,
+                    "middle_bias_fallbacks": middle_estimator.middle_bias_fallbacks,
+                }
+                if is_middle_reuse
+                else {}
+            ),
             **({"bf16_sdpa_mask_broadcast": True} if is_bf16_sdpa else {}),
             **(
                 {
@@ -613,6 +656,11 @@ def assert_cumulative_codec(
                 else {}
             ),
             "executions": {
+                **(
+                    {"codec-middle-bias-reuse": middle_estimator.middle_bias_reuses}
+                    if is_middle_reuse
+                    else {}
+                ),
                 **(
                     {"codec-resident-bf16": precision_execution_count}
                     if is_resident

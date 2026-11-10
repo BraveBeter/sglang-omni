@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # Modified for SGLang-Omni inference; see ../VENDORED_SOURCES.md.
+import logging
 from typing import Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from diffusers.models.attention_processor import Attention, AttnProcessor2_0
 from einops import pack, rearrange, repeat
 
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.utils_common import (
@@ -24,6 +26,9 @@ from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.utils_common import (
 )
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.utils_mask import (
     add_optional_chunk_mask,
+)
+from sglang_omni.vendor.moss_speech_codec.matcha_components.bias_broadcast import (
+    LiveBiasBroadcastProcessor,
 )
 from sglang_omni.vendor.moss_speech_codec.matcha_components.decoder import (
     Block1D,
@@ -36,6 +41,8 @@ from sglang_omni.vendor.moss_speech_codec.matcha_components.decoder import (
 from sglang_omni.vendor.moss_speech_codec.matcha_components.transformer import (
     BasicTransformerBlock,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class Transpose(torch.nn.Module):
@@ -142,6 +149,10 @@ class CausalConditionalDecoder(nn.Module):
         )
         self.static_chunk_size = static_chunk_size
         self.num_decoding_left_chunks = num_decoding_left_chunks
+        self.reuse_middle_attention_bias: bool = False
+        self.middle_bias_constructions: int = 0
+        self.middle_bias_reuses: int = 0
+        self.middle_bias_fallbacks: int = 0
         self.down_blocks = nn.ModuleList([])
         self.mid_blocks = nn.ModuleList([])
         self.up_blocks = nn.ModuleList([])
@@ -244,6 +255,45 @@ class CausalConditionalDecoder(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
+    def can_reuse_middle_bias(self) -> bool:
+        """Restrict shared bias storage to the known read-only inference consumers."""
+        if (
+            not self.reuse_middle_attention_bias
+            or self.training
+            or torch.is_grad_enabled()
+            or self._forward_hooks
+            or self._forward_pre_hooks
+            or nn.modules.module._global_forward_hooks
+            or nn.modules.module._global_forward_pre_hooks
+            or any(
+                layer.training
+                or layer._forward_hooks
+                or layer._forward_pre_hooks
+                or "forward" in vars(layer)
+                for layer in self.mid_blocks.modules()
+            )
+        ):
+            return False
+        else:
+            return all(
+                type(resnet) is CausalResnetBlock1D
+                and all(
+                    type(transformer) is BasicTransformerBlock
+                    and transformer.attn2 is None
+                    and type(transformer.attn1) is Attention
+                    and "prepare_attention_mask" not in vars(transformer.attn1)
+                    and type(transformer.attn1.processor)
+                    in (AttnProcessor2_0, LiveBiasBroadcastProcessor)
+                    and (
+                        type(transformer.attn1.processor) is AttnProcessor2_0
+                        or type(transformer.attn1.processor.fallback)
+                        is AttnProcessor2_0
+                    )
+                    for transformer in transformer_blocks
+                )
+                for resnet, transformer_blocks in self.mid_blocks
+            )
+
     def forward(self, x, mask, mu, t, spks=None, cond=None, streaming=False):
         """Forward pass of the UNet1DConditional model.
 
@@ -299,19 +349,40 @@ class CausalConditionalDecoder(nn.Module):
             masks.append(mask_down[:, :, ::2])
         masks = masks[:-1]
         mask_mid = masks[-1]
+        reuse_middle_bias = self.can_reuse_middle_bias()
+        middle_bias: torch.Tensor | None = None
+        if self.reuse_middle_attention_bias and not reuse_middle_bias:
+            self.middle_bias_fallbacks += 1
+        else:
+            pass
 
         for resnet, transformer_blocks in self.mid_blocks:
             x = resnet(x, mask_mid, t)
             x = rearrange(x, "b c t -> b t c").contiguous()
-            if streaming is True:
-                attn_mask = add_optional_chunk_mask(
-                    x, mask_mid.bool(), False, False, 0, self.static_chunk_size, -1
-                )
+            if middle_bias is not None:
+                attn_mask = middle_bias
+                if self.middle_bias_reuses == 0:
+                    logger.info(
+                        f"MOSS_CODEC_MIDDLE_BIAS_REUSE_ACTIVE middle_blocks={len(self.mid_blocks)} dtype={x.dtype}"
+                    )
+                else:
+                    pass
+                self.middle_bias_reuses += 1
             else:
-                attn_mask = add_optional_chunk_mask(
-                    x, mask_mid.bool(), False, False, 0, 0, -1
-                ).repeat(1, x.size(1), 1)
-            attn_mask = mask_to_bias(attn_mask, x.dtype)
+                if streaming is True:
+                    attn_mask = add_optional_chunk_mask(
+                        x, mask_mid.bool(), False, False, 0, self.static_chunk_size, -1
+                    )
+                else:
+                    attn_mask = add_optional_chunk_mask(
+                        x, mask_mid.bool(), False, False, 0, 0, -1
+                    ).repeat(1, x.size(1), 1)
+                attn_mask = mask_to_bias(attn_mask, x.dtype)
+                if reuse_middle_bias:
+                    middle_bias = attn_mask
+                    self.middle_bias_constructions += 1
+                else:
+                    pass
             for transformer_block in transformer_blocks:
                 x = transformer_block(
                     hidden_states=x,

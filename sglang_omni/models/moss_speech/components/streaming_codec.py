@@ -92,11 +92,14 @@ class MossSpeechStreamingCodec:
         flow: CausalMaskedDiffWithXvec | None = None,
         hift: HiFTGenerator | None = None,
         broadcast_attention_bias: bool = False,
+        reuse_middle_attention_bias: bool = False,
         cfm_graph_mel_length: int | None = None,
         flow_precision: FlowPrecisionProfile | None = None,
     ) -> None:
         if type(broadcast_attention_bias) is not bool:
             raise ValueError("broadcast_attention_bias must be a bool")
+        elif type(reuse_middle_attention_bias) is not bool:
+            raise ValueError("reuse_middle_attention_bias must be a bool")
         else:
             pass
         if chunk_size not in (5, 25):
@@ -166,6 +169,13 @@ class MossSpeechStreamingCodec:
             pass
         self.flow = flow
         self.hift = hift
+        if reuse_middle_attention_bias:
+            if type(flow) is not CausalMaskedDiffWithXvec:
+                raise ValueError("Middle bias reuse requires the native flow model")
+            else:
+                flow.decoder.estimator.reuse_middle_attention_bias = True
+        else:
+            pass
         if broadcast_attention_bias and type(flow) is not CausalMaskedDiffWithXvec:
             raise ValueError("Bias broadcasting requires the native flow model")
         else:
