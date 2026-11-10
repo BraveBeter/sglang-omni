@@ -343,6 +343,9 @@ def test_engine_rejects_unsupported_execution_policy(
         ("ar_engine", "decode_full_graphs", True),
         ("audio_vocoder", "codec_optimizations", True),
         ("audio_vocoder", "chunk_size", 7),
+        ("audio_vocoder", "codec_flow_slots", True),
+        ("audio_vocoder", "codec_flow_slots", -1),
+        ("audio_vocoder", "codec_flow_slots", 3),
         ("preprocessing", "context_limit", 40961),
     ],
 )
@@ -536,3 +539,62 @@ def test_vocoder_factory_consumes_typed_graph_shape_and_cleans_startup_failure(
             offline.return_value.close.assert_called_once_with()
         else:
             pass
+
+
+@pytest.mark.parametrize("flow_slots", [1, 2])
+def test_async_codec_factory_defers_graph_to_execution_slot(flow_slots: int) -> None:
+    """A Flow graph created on the factory thread cannot be replayed by its worker."""
+    with (
+        patch(
+            "sglang_omni.models.moss_speech.stages.resolve_codec_dir",
+            return_value=Path("codec"),
+        ),
+        patch(
+            "sglang_omni.models.moss_speech.stages.resolve_concrete_device",
+            return_value=torch.device("cuda:0"),
+        ),
+        patch(
+            "sglang_omni.models.moss_speech.stages.MossSpeechCodecAdapter"
+        ) as offline,
+        patch(
+            "sglang_omni.models.moss_speech.stages.MossSpeechStreamingCodec"
+        ) as streaming,
+        patch(
+            "sglang_omni.models.moss_speech.stages.MossSpeechAsyncVocoder"
+        ) as asynchronous,
+    ):
+        result = create_audio_vocoder_executor(
+            "model",
+            chunk_size=25,
+            broadcast_attention_bias=True,
+            cfm_graph_mel_length=1500,
+            codec_flow_slots=flow_slots,
+        )
+        assert streaming.call_args.kwargs["cfm_graph_mel_length"] is None
+        asynchronous.assert_called_once_with(
+            streaming.return_value,
+            offline.return_value,
+            flow_slots=flow_slots,
+            cfm_graph_mel_length=1500,
+        )
+        assert result is asynchronous.return_value
+
+
+@pytest.mark.parametrize(
+    "precision,graph_length",
+    [("full_flow_bf16", 1500), ("ffn", None), ("ffn_attention_sdpa_storage", None)],
+)
+def test_async_codec_rejects_incompatible_precision_before_loading(
+    precision: str, graph_length: int | None
+) -> None:
+    with pytest.raises(ValueError, match="Async BF16"):
+        create_audio_vocoder_executor(
+            "unused",
+            chunk_size=25,
+            broadcast_attention_bias=True,
+            device="cuda",
+            gpu_id=0,
+            codec_flow_slots=2,
+            flow_precision=precision,
+            cfm_graph_mel_length=graph_length,
+        )
