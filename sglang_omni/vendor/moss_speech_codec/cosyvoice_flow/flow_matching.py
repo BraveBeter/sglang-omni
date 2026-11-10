@@ -44,6 +44,9 @@ class ConditionalCFM(BASECFM):
         in_channels = in_channels + (spk_emb_dim if n_spks > 0 else 0)
         # Just change the architecture of the estimator here
         self.estimator = estimator
+        self.solver_dtype: torch.dtype | None = None
+        self.solver_precision_steps: int = 0
+        self.solver_state_dtypes: list[torch.dtype] = []
 
     def solve_euler(self, x, t_span, mu, mask, spks, cond, streaming=False):
         """
@@ -62,6 +65,14 @@ class ConditionalCFM(BASECFM):
         """
         t, _, dt = t_span[0], t_span[-1], t_span[1] - t_span[0]
         t = t.unsqueeze(dim=0)
+        self.solver_state_dtypes = []
+        if self.solver_dtype is not None:
+            assert all(
+                tensor.dtype is self.solver_dtype
+                for tensor in (x, t_span, mu, mask, spks, cond)
+            )
+        else:
+            pass
         # I am storing this because I can later plot it by putting a debugger here and saving it to a file
         # Or in future might add like a return_all_steps flag
         sol = []
@@ -90,6 +101,14 @@ class ConditionalCFM(BASECFM):
             ) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt
             x = x + dt * dphi_dt
             t = t + dt
+            if self.solver_dtype is not None:
+                assert all(
+                    tensor.dtype is self.solver_dtype for tensor in (x, dt, t, dphi_dt)
+                )
+                self.solver_precision_steps += 1
+                self.solver_state_dtypes.append(x.dtype)
+            else:
+                pass
             sol.append(x)
             if step < len(t_span) - 1:
                 dt = t_span[step + 1] - t

@@ -10,6 +10,9 @@ from sglang_omni.models.moss_speech.audio_tasks import RequestValidationError
 from sglang_omni.models.moss_speech.components.codec_adapter import (
     MossSpeechCodecAdapter,
 )
+from sglang_omni.models.moss_speech.components.flow_precision import (
+    FlowPrecisionProfile,
+)
 from sglang_omni.models.moss_speech.components.processor import MossSpeechGridProcessor
 from sglang_omni.models.moss_speech.components.streaming_codec import (
     MossSpeechStreamingCodec,
@@ -195,6 +198,7 @@ def create_audio_vocoder_executor(
     device: str | None = None,
     gpu_id: int | None = None,
     cfm_graph_mel_length: int | None = None,
+    flow_precision: FlowPrecisionProfile | None = None,
 ) -> MossSpeechStreamingVocoder:
     codec_directory = resolve_codec_dir(model_path, codec_path)
     concrete_device = str(resolve_concrete_device(device, gpu_id))
@@ -212,6 +216,7 @@ def create_audio_vocoder_executor(
             device=concrete_device,
             broadcast_attention_bias=broadcast_attention_bias,
             cfm_graph_mel_length=cfm_graph_mel_length,
+            flow_precision=flow_precision,
         )
     except BaseException:
         offline_codec.close()

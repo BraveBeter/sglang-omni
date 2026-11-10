@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Live FP32 CFM attention bias broadcasting with a stock-processor fallback."""
+"""Live CFM attention bias broadcasting with optional BF16 SDPA."""
 
 import logging
 
@@ -12,13 +12,17 @@ logger = logging.getLogger(__name__)
 
 
 class LiveBiasBroadcastProcessor:
-    """Preserve live FP32 bias values without allocating one copy per head."""
+    """Broadcast the live bias across heads and preserve FP32 operator boundaries."""
 
     def __init__(self, fallback: AttnProcessor2_0) -> None:
         self.fallback = fallback
         self.broadcast_calls: int = 0
         self.fallback_calls: int = 0
         self.last_head_stride: int | None = None
+        self.use_bf16_sdpa: bool = False
+        self.bf16_inputs: bool = False
+        self.bf16_sdpa_calls: int = 0
+        self.last_sdpa_dtype: torch.dtype | None = None
 
     def __call__(
         self,
@@ -38,7 +42,8 @@ class LiveBiasBroadcastProcessor:
             or torch.is_grad_enabled()
             or torch.is_autocast_enabled("cuda")
             or hidden_states.device.type != "cuda"
-            or hidden_states.dtype is not torch.float32
+            or hidden_states.dtype
+            is not (torch.bfloat16 if self.bf16_inputs else torch.float32)
             or hidden_states.ndim != 3
             or hidden_states.shape[0] != 2
             or not hidden_states.is_contiguous()
@@ -55,7 +60,7 @@ class LiveBiasBroadcastProcessor:
                 for layer in attn.modules()
             )
             or attention_mask is None
-            or attention_mask.dtype is not torch.float32
+            or attention_mask.dtype is not hidden_states.dtype
             or attention_mask.device != hidden_states.device
             or attention_mask.ndim != 3
             or attention_mask.shape[0] != hidden_states.shape[0]
@@ -77,6 +82,10 @@ class LiveBiasBroadcastProcessor:
         else:
             residual = hidden_states
             batch_size = hidden_states.shape[0]
+            if self.use_bf16_sdpa:
+                attention_mask = attention_mask.bfloat16()
+            else:
+                pass
             attention_mask = attention_mask.unsqueeze(1).expand(
                 batch_size, attn.heads, -1, -1
             )
@@ -91,6 +100,12 @@ class LiveBiasBroadcastProcessor:
             value = value.view(batch_size, -1, attn.heads, head_channels).transpose(
                 1, 2
             )
+            if self.use_bf16_sdpa:
+                query = query.bfloat16()
+                key = key.bfloat16()
+                value = value.bfloat16()
+            else:
+                pass
             hidden_states = F.scaled_dot_product_attention(
                 query,
                 key,
@@ -99,10 +114,22 @@ class LiveBiasBroadcastProcessor:
                 dropout_p=0.0,
                 is_causal=False,
             )
+            self.last_sdpa_dtype = hidden_states.dtype
+            if self.use_bf16_sdpa:
+                assert hidden_states.dtype is torch.bfloat16
+                if self.bf16_sdpa_calls == 0:
+                    logger.info(
+                        f"MOSS_CODEC_SDPA_BF16_ACTIVE heads={attn.heads} mask_dtype={attention_mask.dtype}"
+                    )
+                else:
+                    pass
+                self.bf16_sdpa_calls += 1
+            else:
+                pass
             hidden_states = hidden_states.transpose(1, 2).reshape(
                 batch_size, -1, attn.heads * head_channels
             )
-            hidden_states = hidden_states.to(query.dtype)
+            hidden_states = hidden_states.to(residual.dtype)
             hidden_states = attn.to_out[0](hidden_states)
             hidden_states = attn.to_out[1](hidden_states)
             if attn.residual_connection:

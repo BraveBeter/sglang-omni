@@ -8,7 +8,7 @@ import os
 import random
 import threading
 import warnings
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -19,6 +19,7 @@ import pytest
 import soundfile
 import torch
 from diffusers.models.attention_processor import Attention, AttnProcessor2_0
+from diffusers.models.lora import LoRACompatibleLinear, LoRALinearLayer
 from safetensors.torch import load_file, save_file
 
 import sglang_omni.models.moss_speech.components.voice as voice_module
@@ -30,6 +31,10 @@ from sglang_omni.models.moss_speech.components.codec_adapter import (
     CodecAdapterError,
     MossSpeechCodecAdapter,
 )
+from sglang_omni.models.moss_speech.components.flow_precision import (
+    BF16Forward,
+    FlowBF16Scope,
+)
 from sglang_omni.models.moss_speech.components.streaming_codec import (
     CodecStreamSession,
     MossSpeechStreamingCodec,
@@ -40,6 +45,7 @@ from sglang_omni.models.moss_speech.components.voice import (
     VoiceConditioning,
     compute_voice_mel,
 )
+from sglang_omni.models.moss_speech.config import MossSpeechVocoderArgs
 from sglang_omni.models.moss_speech.hf_config import MAX_CONTEXT_TOKENS
 from sglang_omni.models.moss_speech.voice_transport import (
     pack_voice_payload,
@@ -49,8 +55,8 @@ from sglang_omni.models.moss_speech.voice_transport import (
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.decoder import (
     CausalConditionalDecoder,
 )
-from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.flow_matching import (
-    CausalConditionalCFM,
+from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.flow import (
+    CausalMaskedDiffWithXvec,
 )
 from sglang_omni.vendor.moss_speech_codec.cosyvoice_flow.utils_mask import (
     add_optional_chunk_mask,
@@ -68,10 +74,12 @@ from tests.unit_test.fixtures.moss_speech_codec import (
     TinyHiFT,
     TinyOfflineDecoder,
     audio_payload,
+    cfm_solver_inputs,
     encoder_adapter,
     fullweight_streaming_inputs,
     offline_adapter,
     streaming_codec,
+    tiny_cfm_solver,
     tiny_whisper_config,
     vocoder,
     voice_tensors,
@@ -670,62 +678,6 @@ def test_nonstream_audio_accepts_full_torch_seed_range_and_restores_rng(
         scheduler.stop()
 
 
-def tiny_cfm_solver(device: torch.device) -> CausalConditionalCFM:
-    with scoped_global_rng(), torch.device(device):
-        return (
-            CausalConditionalCFM(
-                in_channels=240,
-                n_spks=1,
-                spk_emb_dim=80,
-                cfm_params=SimpleNamespace(
-                    sigma_min=1e-6,
-                    solver="euler",
-                    t_scheduler="cosine",
-                    training_cfg_rate=0.2,
-                    inference_cfg_rate=0.7,
-                ),
-                estimator=CausalConditionalDecoder(
-                    in_channels=320,
-                    out_channels=80,
-                    channels=(16,),
-                    dropout=0.0,
-                    attention_head_dim=8,
-                    n_blocks=1,
-                    num_mid_blocks=1,
-                    num_heads=2,
-                    act_fn="gelu",
-                    static_chunk_size=100,
-                    num_decoding_left_chunks=-1,
-                ),
-            )
-            .to(dtype=torch.float32)
-            .eval()
-        )
-
-
-def cfm_solver_inputs(
-    device: torch.device, *, mel_length: int = 100, shift: float = 0.0
-) -> SolverInputs:
-    x = (
-        torch.linspace(-0.2, 0.2, 80 * mel_length, device=device).reshape(
-            1, 80, mel_length
-        )
-        + shift
-    )
-    time_steps = torch.linspace(0, 1 + shift / 10, 11, device=device)
-    time_steps = 1 - torch.cos(time_steps * 0.5 * torch.pi)
-    mel_conditioning = torch.zeros(1, mel_length, 80, device=device).transpose(1, 2)
-    mel_conditioning.copy_(x * 0.3 + shift / 3)
-    return (
-        x,
-        time_steps,
-        x * 0.2 + shift / 7,
-        torch.full((1, 1, mel_length), 1 - shift / 20, device=device),
-        torch.linspace(-0.1, 0.1, 80, device=device).reshape(1, 80) + shift / 5,
-        mel_conditioning,
-    )
-
-
 class CFMTestStream:
     def __init__(self, events: list[str], name: str) -> None:
         self.events = events
@@ -1157,3 +1109,352 @@ def test_cfm_graph_fullweights_streaming_pcm_and_cleanup() -> None:
         codec.close()
         eager.close()
     assert codec.cfm_graph is None and "solve_euler" not in vars(codec.flow.decoder)
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "ffn_first",
+        "ffn",
+        "attention_first",
+        "attention",
+        "convolutions_first",
+        "convolutions",
+    ],
+)
+@torch.no_grad()
+def test_flow_bf16_scope_preserves_fp32_solver_and_restores_on_error(
+    stage: str,
+) -> None:
+    decoder = tiny_cfm_solver(torch.device("cpu"))
+    inputs = cfm_solver_inputs(torch.device("cpu"), mel_length=8)
+    baseline = decoder.solve_euler(*inputs, streaming=True)
+    original_weights = {
+        name: value.clone() for name, value in decoder.state_dict().items()
+    }
+    caller_rng = torch.get_rng_state().clone()
+    scope = FlowBF16Scope(decoder.estimator, stage)
+    with pytest.raises(RuntimeError, match="cancelled"):
+        with scope:
+            actual = decoder.solve_euler(*inputs, streaming=True)
+            assert actual.dtype == torch.float32 and torch.isfinite(actual).all()
+            assert all(
+                operator.forward.bf16_executions > 0 for operator in scope.operators
+            )
+            assert all(
+                operator.forward.last_compute_dtype == torch.bfloat16
+                for operator in scope.operators
+            )
+            assert all(
+                parameter.dtype == torch.float32 for parameter in decoder.parameters()
+            )
+            raise RuntimeError("cancelled")
+    assert torch.equal(decoder.solve_euler(*inputs, streaming=True), baseline)
+    assert torch.equal(caller_rng, torch.get_rng_state())
+    for name, parameter in decoder.state_dict().items():
+        assert torch.equal(parameter, original_weights[name])
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "ffn_first",
+        "ffn",
+        "attention_first",
+        "attention",
+        "convolutions_first",
+        "convolutions",
+        "m1",
+        "ffn_attention",
+        "ffn_attention_sdpa",
+        "ffn_attention_sdpa_resident",
+        "ffn_attention_sdpa_storage",
+    ],
+)
+def test_bf16_flow_rejects_unqualified_fp32_graph_combination(stage: str) -> None:
+    with pytest.raises(ValueError, match="excludes the FP32 CFM graph"):
+        MossSpeechVocoderArgs(flow_precision=stage, cfm_graph_mel_length=1500)
+    with pytest.raises(ValueError, match="without an FP32 CFM graph"):
+        MossSpeechStreamingCodec(
+            None,
+            chunk_size=25,
+            device="cuda:0",
+            flow_precision=stage,
+            cfm_graph_mel_length=1500,
+        )
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "ffn",
+        "ffn_attention",
+        "ffn_attention_sdpa",
+        "ffn_attention_sdpa_resident",
+        "ffn_attention_sdpa_storage",
+    ],
+)
+@torch.no_grad()
+def test_bf16_owner_close_and_reactivate_keeps_same_precision(stage: str) -> None:
+    flow = CausalMaskedDiffWithXvec.__new__(CausalMaskedDiffWithXvec)
+    torch.nn.Module.__init__(flow)
+    flow.decoder = tiny_cfm_solver(torch.device("cpu"))
+    install_broadcast_bias_attention(flow.decoder.estimator)
+    codec = MossSpeechStreamingCodec.__new__(MossSpeechStreamingCodec)
+    codec.flow = flow
+    codec.flow_precision = stage
+    codec.precision_context = ExitStack()
+    codec.precision_scopes = ()
+    codec.sessions = {}
+    codec.lock = threading.Lock()
+    codec.cfm_graph = None
+    inputs = cfm_solver_inputs(torch.device("cpu"), mel_length=8)
+    original = flow.decoder.solve_euler(*inputs, streaming=True)
+    codec.activate_precision()
+    first = flow.decoder.solve_euler(*inputs, streaming=True)
+    codec.activate_precision()
+    assert torch.equal(first, flow.decoder.solve_euler(*inputs, streaming=True))
+    assert all(
+        operator.forward.bf16_executions > 0
+        for scope in codec.precision_scopes
+        for operator in scope.operators
+    )
+    codec.close()
+    assert not codec.precision_scopes
+    assert torch.equal(original, flow.decoder.solve_euler(*inputs, streaming=True))
+    codec.activate_precision()
+    assert torch.equal(first, flow.decoder.solve_euler(*inputs, streaming=True))
+    codec.close()
+
+
+@pytest.mark.parametrize(
+    "device", ["cpu", pytest.param("cuda", marks=pytest.mark.accelerator)]
+)
+def test_resident_bf16_linear_matches_autocast_and_releases_copies(device: str) -> None:
+    """Resident inference must preserve autocast output, FP32 masters and gradients."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is required")
+    else:
+        pass
+    with scoped_global_rng():
+        layer = torch.nn.Linear(256, 512).to(device).eval()
+        control = BF16Forward(layer, layer.forward)
+        resident = BF16Forward(layer, layer.forward, resident_weights=True)
+        weights = {name: value.clone() for name, value in layer.state_dict().items()}
+        resident.prepare()
+        assert resident.resident_weight is not None
+        pointer = resident.resident_weight.data_ptr()
+        copies = resident.parameter_copies
+        with torch.no_grad():
+            for frames in (17, 65, 1512):
+                hidden_states = torch.randn(2, frames, 256, device=device)
+                assert torch.equal(resident(hidden_states), control(hidden_states))
+                assert resident.resident_weight.data_ptr() == pointer
+                assert resident.parameter_copies == copies
+        assert resident.bf16_executions == 3 and resident.resident_parameter_bytes > 0
+        for name, value in layer.state_dict().items():
+            assert value.dtype is torch.float32 and torch.equal(value, weights[name])
+        resident.release()
+        assert resident.resident_parameter_bytes == 0
+        hidden_states = torch.randn(1, 256, device=device, requires_grad=True)
+        result = resident(hidden_states)
+        assert torch.equal(result, layer(hidden_states))
+        result.sum().backward()
+        assert layer.weight.grad is not None and torch.isfinite(layer.weight.grad).all()
+
+
+def test_resident_bf16_rejects_active_lora() -> None:
+    """A cached plain linear must never silently drop an active adapter."""
+    layer = LoRACompatibleLinear(256, 512).eval()
+    layer.set_lora_layer(LoRALinearLayer(256, 512, rank=4))
+    with pytest.raises(ValueError, match="unadapted FP32 Linear"):
+        BF16Forward(layer, layer.forward, resident_weights=True).prepare()
+
+
+@pytest.mark.parametrize(
+    "device", ["cpu", pytest.param("cuda", marks=pytest.mark.accelerator)]
+)
+def test_bf16_parameter_storage_matches_resident_and_restores_exact_weights(
+    device: str,
+) -> None:
+    """BF16 GPU storage must share compute buffers and recover exact FP32 masters."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is required")
+    else:
+        pass
+    with scoped_global_rng(), torch.no_grad():
+        layer = torch.nn.Linear(256, 512).to(device).eval()
+        weights = {
+            name: parameter.detach().cpu().clone()
+            for name, parameter in layer.named_parameters()
+        }
+        identities = {
+            name: id(parameter) for name, parameter in layer.named_parameters()
+        }
+        inputs = [
+            torch.randn(2, frames, 256, device=device) for frames in (17, 65, 1512)
+        ]
+        resident = BF16Forward(layer, layer.forward, resident_weights=True)
+        resident.prepare()
+        expected = [resident(hidden_states) for hidden_states in inputs]
+        resident.release()
+        stored = BF16Forward(
+            layer, layer.forward, resident_weights=True, store_bf16_parameters=True
+        )
+        stored.prepare()
+        assert layer.weight.dtype == layer.bias.dtype == torch.bfloat16
+        assert layer.weight.data_ptr() == stored.resident_weight.data_ptr()
+        assert layer.bias.data_ptr() == stored.resident_bias.data_ptr()
+        assert stored.cpu_backup_parameter_bytes == 2 * stored.resident_parameter_bytes
+        for name, backup in stored.fp32_cpu_parameters.items():
+            assert backup.device.type == "cpu" and backup.dtype is torch.float32
+            assert torch.equal(backup, weights[name])
+        for hidden_states, reference in zip(inputs, expected, strict=True):
+            assert torch.equal(stored(hidden_states), reference)
+        stored.release()
+        assert stored.cpu_backup_parameter_bytes == stored.resident_parameter_bytes == 0
+        for name, parameter in layer.named_parameters():
+            assert (
+                id(parameter) == identities[name] and parameter.dtype is torch.float32
+            )
+            assert torch.equal(parameter.cpu(), weights[name])
+
+
+def test_bf16_parameter_storage_rejects_training_and_gradient_calls() -> None:
+    """Inference storage must not silently run training on rounded parameters."""
+    layer = torch.nn.Linear(8, 16).eval()
+    stored = BF16Forward(
+        layer, layer.forward, resident_weights=True, store_bf16_parameters=True
+    )
+    stored.prepare()
+    with pytest.raises(RuntimeError, match="no-grad evaluation"):
+        stored(torch.randn(1, 8))
+    with torch.no_grad(), pytest.raises(RuntimeError, match="no-grad evaluation"):
+        layer.train()
+        stored(torch.randn(1, 8))
+    stored.release()
+    with pytest.raises(ValueError, match="idle evaluation"):
+        stored.prepare()
+    layer.eval()
+    with pytest.raises(ValueError, match="resident inference"):
+        BF16Forward(layer, layer.forward, store_bf16_parameters=True)
+
+
+def test_bf16_parameter_storage_partial_entry_restores_fp32(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interrupted activation must recover already offloaded exact weights."""
+    decoder = tiny_cfm_solver(torch.device("cpu"))
+    weights = {
+        name: parameter.clone() for name, parameter in decoder.named_parameters()
+    }
+    scope = FlowBF16Scope(
+        decoder.estimator, "ffn", resident_weights=True, store_bf16_parameters=True
+    )
+
+    def fail() -> None:
+        raise MemoryError("storage preparation failed")
+
+    monkeypatch.setattr(scope.operators[1].forward, "prepare", fail)
+    with pytest.raises(MemoryError, match="storage preparation failed"):
+        scope.__enter__()
+    assert not scope.active
+    for name, parameter in decoder.named_parameters():
+        assert parameter.dtype is torch.float32 and torch.equal(
+            parameter, weights[name]
+        )
+    assert all("forward" not in vars(operator.module) for operator in scope.operators)
+    assert all(
+        operator.forward.cpu_backup_parameter_bytes == 0 for operator in scope.operators
+    )
+
+
+def test_resident_bf16_failed_entry_releases_partial_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed cache allocation must not leave installed forwards or owned tensors."""
+    decoder = tiny_cfm_solver(torch.device("cpu"))
+    scope = FlowBF16Scope(decoder.estimator, "ffn", resident_weights=True)
+
+    def fail() -> None:
+        raise MemoryError("resident preparation failed")
+
+    monkeypatch.setattr(scope.operators[1].forward, "prepare", fail)
+    with pytest.raises(MemoryError, match="resident preparation failed"):
+        scope.__enter__()
+    assert not scope.active
+    assert all("forward" not in vars(operator.module) for operator in scope.operators)
+    assert all(
+        operator.forward.resident_parameter_bytes == 0 for operator in scope.operators
+    )
+    with pytest.raises(ValueError, match="complete FFN or attention"):
+        FlowBF16Scope(decoder.estimator, "convolutions", resident_weights=True)
+
+
+def test_bf16_sdpa_requires_live_bias_and_full_projection_stage() -> None:
+    decoder = tiny_cfm_solver(torch.device("cpu"))
+    with pytest.raises(ValueError, match="complete attention"):
+        FlowBF16Scope(decoder.estimator, "ffn", bf16_sdpa=True)
+    with pytest.raises(ValueError, match="live bias"):
+        FlowBF16Scope(decoder.estimator, "attention", bf16_sdpa=True)
+    with pytest.raises(ValueError, match="live bias"):
+        MossSpeechVocoderArgs(flow_precision="ffn_attention_sdpa")
+    with pytest.raises(ValueError, match="live bias"):
+        MossSpeechStreamingCodec(
+            None, chunk_size=25, device="cuda:0", flow_precision="ffn_attention_sdpa"
+        )
+    processors = install_broadcast_bias_attention(decoder.estimator)
+    scope = FlowBF16Scope(decoder.estimator, "attention", bf16_sdpa=True)
+    with pytest.raises(RuntimeError, match="cancelled"):
+        with scope:
+            assert processors and all(
+                processor.use_bf16_sdpa for processor in processors
+            )
+            raise RuntimeError("cancelled")
+    assert all(not processor.use_bf16_sdpa for processor in processors)
+
+
+@pytest.mark.accelerator
+@pytest.mark.parametrize("frame_count", [17, 65, 1500, 1512])
+@torch.no_grad()
+def test_bf16_sdpa_preserves_live_mask_and_fp32_boundary(frame_count: int) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for BF16 SDPA")
+    else:
+        pass
+    with scoped_global_rng():
+        attention = Attention(query_dim=256, heads=8, dim_head=64).cuda().eval()
+        original = attention.processor
+        processor = install_broadcast_bias_attention(attention)[0]
+        processor.use_bf16_sdpa = True
+        hidden_states = torch.randn(2, frame_count, 256, device="cuda")
+        attention_bias = torch.zeros(2, frame_count, frame_count, device="cuda")
+        visible_frames = frame_count // 2
+        attention_bias[:, :, visible_frames:] = -1.0e10
+        original_bias = attention_bias.clone()
+        rng_before = torch.cuda.get_rng_state().clone()
+        output = attention(hidden_states, attention_mask=attention_bias)
+        assert output.dtype == torch.float32 and torch.isfinite(output).all()
+        assert processor.last_sdpa_dtype == torch.bfloat16
+        assert processor.bf16_sdpa_calls == processor.broadcast_calls == 1
+        assert processor.last_head_stride == 0 and torch.equal(
+            attention_bias, original_bias
+        )
+        held_output = output.clone()
+        hidden_states[:, visible_frames:] += 100
+        masked = attention(hidden_states, attention_mask=attention_bias)
+        assert torch.equal(masked[:, :visible_frames], output[:, :visible_frames])
+        attention_bias[:, :, -1] = 0
+        changed = attention(hidden_states, attention_mask=attention_bias)
+        assert not torch.equal(changed[:, :visible_frames], output[:, :visible_frames])
+        assert torch.equal(output, held_output)
+        assert processor.bf16_sdpa_calls == processor.broadcast_calls == 3
+        assert torch.equal(rng_before, torch.cuda.get_rng_state())
+        processor.use_bf16_sdpa = False
+        expected = original(attention, hidden_states, attention_mask=attention_bias)
+        restored = attention(hidden_states, attention_mask=attention_bias)
+        assert torch.equal(restored, expected)
+        assert (
+            processor.last_sdpa_dtype == torch.float32
+            and processor.bf16_sdpa_calls == 3
+        )

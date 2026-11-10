@@ -12,6 +12,9 @@ from sglang_omni.config import (
     PipelineConfig,
     StageConfig,
 )
+from sglang_omni.models.moss_speech.components.flow_precision import (
+    FlowPrecisionProfile,
+)
 from sglang_omni.models.moss_speech.hf_config import (
     KV_RESERVE_TOKENS,
     MAX_CONTEXT_TOKENS,
@@ -66,6 +69,20 @@ class MossSpeechVocoderArgs(FactoryArgs):
     cfm_graph_mel_length: int | None = Field(
         default=None, ge=100, le=4000, multiple_of=100
     )
+    flow_precision: FlowPrecisionProfile | None = None
+
+    @model_validator(mode="after")
+    def validate_flow_precision(self) -> "MossSpeechVocoderArgs":
+        if self.flow_precision is not None and self.cfm_graph_mel_length is not None:
+            raise ValueError("BF16 Flow precision excludes the FP32 CFM graph")
+        elif (
+            self.flow_precision
+            in ("ffn_attention_sdpa", "ffn_attention_sdpa_resident", "full_flow_bf16")
+            and not self.broadcast_attention_bias
+        ):
+            raise ValueError("BF16 SDPA requires live bias broadcasting")
+        else:
+            return self
 
 
 class MossSpeechVocoderStage(StageConfig):
