@@ -2,6 +2,7 @@
 """Native weight-loading, numerical, and dual-tail attention contracts."""
 
 import os
+import weakref
 from pathlib import Path
 from types import MethodType
 from unittest.mock import patch
@@ -72,7 +73,7 @@ def test_flow_bias_broadcast_preserves_attention_and_live_updates(
     with torch.inference_mode():
         expected = attention(hidden_states, attention_mask=bias)
         attention.prepare_attention_mask = MethodType(
-            prepare_flow_attention_mask, attention
+            prepare_flow_attention_mask, weakref.proxy(attention)
         )
         actual = attention(hidden_states, attention_mask=bias)
         torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)

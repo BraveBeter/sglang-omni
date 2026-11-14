@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import random
+import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -168,7 +169,7 @@ class MossSpeechCodec:
                         and type(attention.processor) is AttnProcessor2_0
                     ):
                         attention.prepare_attention_mask = MethodType(
-                            prepare_flow_attention_mask, attention
+                            prepare_flow_attention_mask, weakref.proxy(attention)
                         )
                     else:
                         pass
