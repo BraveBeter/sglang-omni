@@ -24,7 +24,7 @@ The default is `1`; supported values are `1` and `2`. Two slots require CUDA. Th
 
 Each slot runs a complete B1 Flow inference on a private CUDA stream with its own model and mutable caches. The second Flow copy consumes additional device memory. Requests retain their original FP32 Flow, ten denoising steps, conditioning, and sample count; this option does not combine requests into a model batch or introduce Codec CUDA Graphs.
 
-Reference conditioning and HiFT remain serialized on one owner stream. HiFT uses the request seed, with Python, NumPy, and Torch RNG states restored after each call. CUDA events establish the handoff between the owner stream and the Flow streams. The vocoder freezes deterministic cuDNN execution while its workers are active and restores the preceding policy after draining them at shutdown.
+Reference conditioning and HiFT run on one dedicated owner thread and stream. HiFT uses the request seed, with Python, NumPy, and Torch RNG states restored after each call. CUDA events establish the handoff between the owner stream and the Flow streams. The vocoder freezes deterministic cuDNN execution while its workers are active and restores the preceding policy after draining them at shutdown.
 
 The existing scheduler discards results from aborted requests; an already running Flow finishes before its slot is reused. Compute failures also release the slot. Text output bypasses audio decoding.
 
