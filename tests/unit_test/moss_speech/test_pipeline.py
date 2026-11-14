@@ -2,6 +2,7 @@
 """Minimal TTS request, public HTTP and stage-lifecycle contracts."""
 
 import base64
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -18,6 +19,7 @@ from sglang.srt.mem_cache.allocator.token import TokenToKVPoolAllocator
 from typer.testing import CliRunner
 
 from sglang_omni.cli import app
+from sglang_omni.models.moss_speech.codec import MossSpeechCodec
 from sglang_omni.models.moss_speech.config import MossSpeechPipelineConfig
 from sglang_omni.models.moss_speech.engine_builder import MossSpeechEngineBuilder
 from sglang_omni.models.moss_speech.fsm import AUDIO_PAD, MODALITY_PAD
@@ -244,6 +246,66 @@ def test_codec_preserves_usage_rng_and_releases_models() -> None:
     assert codec.decoder is None and codec.encoder is None
 
 
+@pytest.mark.accelerator
+@pytest.mark.parametrize("flow_dtype", [torch.float32, torch.bfloat16])
+def test_real_codec_keeps_flow_precision_and_request_rng(
+    flow_dtype: torch.dtype,
+) -> None:
+    """The default FP32 time grid must not promote the BF16 Euler state."""
+    codec_path = os.environ.get("MOSS_SPEECH_CODEC_PATH")
+    reference_path = os.environ.get("MOSS_SPEECH_REFERENCE_AUDIO")
+    if not torch.cuda.is_available() or not codec_path or not reference_path:
+        pytest.skip("Requires CUDA and local codec/reference assets")
+    else:
+        pass
+    codec = MossSpeechCodec(codec_path, torch.device("cuda"), flow_dtype=flow_dtype)
+    assert codec.decoder is not None
+    waveform, sample_rate = torchaudio.load(reference_path)
+    codes = codec.encode_tokens(waveform, sample_rate).cpu().tolist()
+    state = MossSpeechState(
+        reference_audio=reference_path,
+        audio_codes=codes,
+        effective_seed=42,
+        output_modality="audio",
+    )
+    payload = StagePayload("precision", OmniRequest(inputs="Hello"), state.to_dict())
+    estimator = (
+        codec.decoder.flow.decoder.decoder.estimator
+        if flow_dtype is torch.bfloat16
+        else codec.decoder.flow.decoder.estimator
+    )
+    observed_dtypes: list[tuple[torch.dtype, ...]] = []
+
+    def record_dtypes(
+        module: torch.nn.Module, inputs: tuple[torch.Tensor, ...]
+    ) -> None:
+        observed_dtypes.append(tuple(tensor.dtype for tensor in inputs[:6]))
+
+    hook = estimator.register_forward_pre_hook(record_dtypes)
+    cpu_rng = torch.get_rng_state().clone()
+    cuda_rng = torch.cuda.get_rng_state().clone()
+    first, second = codec.decode(payload), codec.decode(payload)
+    hook.remove()
+    assert first.data == second.data
+    assert torch.equal(cpu_rng, torch.get_rng_state())
+    assert torch.equal(cuda_rng, torch.cuda.get_rng_state())
+    assert len(observed_dtypes) == 20
+    assert all(dtypes == (flow_dtype,) * 6 for dtypes in observed_dtypes)
+    assert all(
+        parameter.dtype is flow_dtype for parameter in codec.decoder.flow.parameters()
+    )
+    assert all(
+        parameter.dtype is torch.float32
+        for parameter in codec.decoder.hift.parameters()
+    )
+    assert all(
+        parameter.dtype is torch.float32 for parameter in codec.encoder.parameters()
+    )
+    assert torch.isfinite(torch.tensor(first.data["audio_data"])).all()
+    codec.close()
+    assert codec.decoder is None and codec.encoder is None
+
+
 @pytest.mark.parametrize("sample_rate", [16000, 24000, 44100, 48000])
 @pytest.mark.parametrize("transport", ["path", "file-uri", "data-uri", "https"])
 def test_conditioning_uses_independent_token_and_speaker_resampling(
@@ -351,7 +413,7 @@ def test_cli_binds_only_three_stages_and_vocoder_assets(tmp_path: Path) -> None:
         assert config.stage_named("audio_vocoder").factory.codec_path == "codec"
     with pytest.raises(ValueError, match="codec_path"):
         create_audio_vocoder_executor(
-            model_path="unused", codec_path=None, device="cpu"
+            model_path="unused", codec_path=None, flow_dtype="float32", device="cpu"
         )
 
 

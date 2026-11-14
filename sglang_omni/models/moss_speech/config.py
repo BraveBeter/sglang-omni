@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Three-stage, non-streaming MOSS-Speech configuration."""
 
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic import ConfigDict, Field
 
@@ -30,12 +30,20 @@ class MossSpeechVocoderStage(StageConfig):
     factory: MossSpeechVocoderArgs = Field(default_factory=MossSpeechVocoderArgs)
 
 
+class MossSpeechFlowArgs(MossSpeechVocoderArgs):
+    flow_dtype: Literal["float32", "bfloat16"] = "float32"
+
+
+class MossSpeechFlowStage(StageConfig):
+    factory: MossSpeechFlowArgs = Field(default_factory=MossSpeechFlowArgs)
+
+
 class MossSpeechPipelineConfig(PipelineConfig):
     architecture: ClassVar[str] = "MossSpeechForCausalLM"
     stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
         "preprocessing": MossSpeechVocoderStage,
         "ar_engine": EngineStageConfig,
-        "audio_vocoder": MossSpeechVocoderStage,
+        "audio_vocoder": MossSpeechFlowStage,
     }
     entry_stage: str | None = "preprocessing"
     stages: list[StageConfig] = [
@@ -61,7 +69,7 @@ class MossSpeechPipelineConfig(PipelineConfig):
             gpu_memory_fraction=0.72,
             next="audio_vocoder",
         ),
-        MossSpeechVocoderStage(
+        MossSpeechFlowStage(
             name="audio_vocoder",
             process="audio_vocoder",
             factory_path=f"{PACKAGE}.stages.create_audio_vocoder_executor",

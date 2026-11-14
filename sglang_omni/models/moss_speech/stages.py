@@ -3,7 +3,9 @@
 
 from collections.abc import Mapping
 from functools import partial
+from typing import Literal
 
+import torch
 from transformers import AutoTokenizer
 
 from sglang_omni.models.moss_speech.codec import MossSpeechCodec
@@ -70,6 +72,7 @@ def create_audio_vocoder_executor(
     model_path: str,
     *,
     codec_path: str | None,
+    flow_dtype: Literal["float32", "bfloat16"],
     device: str | None = None,
     gpu_id: int | None = None,
 ) -> SimpleScheduler[StagePayload, StagePayload]:
@@ -77,7 +80,11 @@ def create_audio_vocoder_executor(
         raise ValueError("Set audio_vocoder.factory.codec_path")
     else:
         pass
-    codec = MossSpeechCodec(codec_path, resolve_concrete_device(device, gpu_id))
+    codec = MossSpeechCodec(
+        codec_path,
+        resolve_concrete_device(device, gpu_id),
+        flow_dtype={"float32": torch.float32, "bfloat16": torch.bfloat16}[flow_dtype],
+    )
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=False)
     return SimpleScheduler(
         partial(codec.decode, tokenizer=tokenizer), shutdown_callback=codec.close
