@@ -3,16 +3,19 @@
 
 import os
 from pathlib import Path
+from types import MethodType
 from unittest.mock import patch
 
 import pytest
 import torch
+from diffusers.models.attention_processor import Attention
 from sglang.srt.configs.model_config import ModelConfig
 from transformers import Qwen3Config
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm, Qwen3RotaryEmbedding
 
 from sglang_omni.model_runner.model_worker import ModelWorker
+from sglang_omni.models.moss_speech.codec import prepare_flow_attention_mask
 from sglang_omni.models.moss_speech.hf_config import (
     MossSpeechConfig,
     ensure_moss_speech_config_registered,
@@ -38,6 +41,59 @@ NATIVE_CPU = pytest.mark.skipif(
     os.environ.get("SGLANG_USE_CPU_ENGINE") != "1",
     reason="Native CPU construction requires SGLANG_USE_CPU_ENGINE=1 before imports",
 )
+
+
+@pytest.mark.parametrize(
+    "device_name", ["cpu", pytest.param("cuda", marks=pytest.mark.accelerator)]
+)
+@pytest.mark.parametrize("mask_layout", ["key", "query", "heads", "none"])
+def test_flow_bias_broadcast_preserves_attention_and_live_updates(
+    device_name: str, mask_layout: str
+) -> None:
+    """Sharing head bias must preserve per-row masking and observe later bias changes."""
+    if device_name == "cuda":
+        require_cuda()
+    generator = torch.Generator(device=device_name).manual_seed(42)
+    attention = Attention(query_dim=32, heads=4, dim_head=8).to(device_name).eval()
+    hidden_states = torch.randn(2, 9, 32, device=device_name, generator=generator)
+    bias = torch.randn(
+        2,
+        1 if mask_layout == "key" else 9,
+        9,
+        device=device_name,
+        generator=generator,
+    )
+    bias[0, :, -1] = -10000
+    bias[1, :, 0] = -10000
+    if mask_layout == "heads":
+        bias = bias.repeat_interleave(attention.heads, dim=0)
+    elif mask_layout == "none":
+        bias = None
+    with torch.inference_mode():
+        expected = attention(hidden_states, attention_mask=bias)
+        attention.prepare_attention_mask = MethodType(
+            prepare_flow_attention_mask, attention
+        )
+        actual = attention(hidden_states, attention_mask=bias)
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+        if mask_layout in ("key", "query"):
+            shared = attention.prepare_attention_mask(bias, 9, 2)
+            assert (
+                shared.untyped_storage().data_ptr() == bias.untyped_storage().data_ptr()
+            )
+            bias[0, :, 0] = 10000
+            updated = attention(hidden_states, attention_mask=bias)
+            assert not torch.equal(actual[0], updated[0])
+            torch.testing.assert_close(actual[1], updated[1], rtol=0, atol=0)
+            attention.prepare_attention_mask = MethodType(
+                Attention.prepare_attention_mask, attention
+            )
+            torch.testing.assert_close(
+                updated,
+                attention(hidden_states, attention_mask=bias),
+                rtol=1e-5,
+                atol=1e-6,
+            )
 
 
 @NATIVE_CPU

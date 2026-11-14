@@ -7,6 +7,7 @@ import random
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from types import MethodType
 from typing import Protocol, TypedDict
 
 import numpy as np
@@ -14,6 +15,7 @@ import onnxruntime
 import torch
 import torchaudio
 import torchaudio.compliance.kaldi as kaldi
+from diffusers.models.attention_processor import Attention, AttnProcessor2_0
 from safetensors.torch import load_file
 from transformers import (
     DynamicCache,
@@ -84,6 +86,7 @@ class MelExtractor(Protocol):
 
 
 class AudioDecoder(Protocol):
+    flow: torch.nn.Module
     feat_extractor: MelExtractor
     campplus_session: onnxruntime.InferenceSession
 
@@ -97,6 +100,29 @@ class AudioDecoder(Protocol):
         embedding: torch.Tensor,
         finalize: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+
+def prepare_flow_attention_mask(
+    attention: Attention,
+    attention_mask: torch.Tensor | None,
+    target_length: int,
+    batch_size: int,
+    out_dim: int = 3,
+) -> torch.Tensor | None:
+    """Broadcast live Flow bias across heads for the stock SDPA processor."""
+    if (
+        attention_mask is not None
+        and attention_mask.ndim == 3
+        and attention_mask.shape[0] == batch_size
+        and attention_mask.shape[-1] == target_length
+        and out_dim in (3, 4)
+    ):
+        # note (Codex): The stock SDPA processor immediately views this result as four dimensions.
+        return attention_mask.unsqueeze(1).expand(-1, attention.heads, -1, -1)
+    else:
+        return Attention.prepare_attention_mask(
+            attention, attention_mask, target_length, batch_size, out_dim
+        )
 
 
 @contextmanager
@@ -135,6 +161,19 @@ class MossSpeechCodec:
                 if load_decoder
                 else None
             )
+            if self.decoder is not None:
+                for attention in self.decoder.flow.decoder.estimator.modules():
+                    if (
+                        type(attention) is Attention
+                        and type(attention.processor) is AttnProcessor2_0
+                    ):
+                        attention.prepare_attention_mask = MethodType(
+                            prepare_flow_attention_mask, attention
+                        )
+                    else:
+                        pass
+            else:
+                pass
             configuration = encoder_class.config_class.from_pretrained(codec_path)
             encoder = encoder_class(configuration).to(device, torch.float32).eval()
             checkpoint = load_file(str(codec_directory / "model.safetensors"))
