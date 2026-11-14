@@ -337,6 +337,8 @@ def test_cli_binds_only_three_stages_and_vocoder_assets(tmp_path: Path) -> None:
                 str(tmp_path),
                 "--audio_vocoder.factory.codec_path",
                 "codec",
+                "--audio_vocoder.factory.flow_slots",
+                "2",
             ],
         )
         assert result.exit_code == 0, result.output + repr(result.exception)
@@ -349,6 +351,13 @@ def test_cli_binds_only_three_stages_and_vocoder_assets(tmp_path: Path) -> None:
             "audio_vocoder",
         ]
         assert config.stage_named("audio_vocoder").factory.codec_path == "codec"
+        assert config.stage_named("audio_vocoder").factory.flow_slots == 2
+    with pytest.raises(ValueError, match="flow_slots"):
+        MossSpeechPipelineConfig(
+            stages=[
+                {"name": "audio_vocoder", "factory": {"flow_slots": 3}},
+            ]
+        )
     with pytest.raises(ValueError, match="codec_path"):
         create_audio_vocoder_executor(
             model_path="unused", codec_path=None, device="cpu"
