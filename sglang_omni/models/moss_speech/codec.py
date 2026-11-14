@@ -83,9 +83,33 @@ class MelExtractor(Protocol):
     def __call__(self, waveform: torch.Tensor) -> torch.Tensor: ...
 
 
+class FlowDecoder(Protocol):
+    def inference(
+        self,
+        *,
+        token: torch.Tensor,
+        token_len: torch.Tensor,
+        prompt_token: torch.Tensor,
+        prompt_token_len: torch.Tensor,
+        prompt_feat: torch.Tensor,
+        prompt_feat_len: torch.Tensor,
+        embedding: torch.Tensor,
+        streaming: bool,
+        finalize: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+
+class WaveformDecoder(Protocol):
+    def inference(
+        self, *, speech_feat: torch.Tensor, cache_source: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+
 class AudioDecoder(Protocol):
     feat_extractor: MelExtractor
     campplus_session: onnxruntime.InferenceSession
+    flow: FlowDecoder
+    hift: WaveformDecoder
 
     def token2wav(
         self,
@@ -320,6 +344,21 @@ class MossSpeechCodec:
             )
         else:
             pass
+        waveform = self.decode_waveform(state, payload.request_id)
+        assert waveform.numel() and torch.isfinite(waveform).all()
+        return StagePayload(
+            payload.request_id,
+            payload.request,
+            {
+                "audio_data": waveform.tolist(),
+                "sample_rate": SAMPLE_RATE_HZ,
+                "finish_reason": state.finish_reason,
+                "usage": usage,
+            },
+        )
+
+    @torch.inference_mode()
+    def decode_waveform(self, state: MossSpeechState, request_id: str) -> torch.Tensor:
         assert self.decoder is not None
         with (
             codec_rng(),
@@ -336,22 +375,12 @@ class MossSpeechCodec:
             torch.manual_seed(state.effective_seed)
             waveform, _ = self.decoder.token2wav(
                 torch.tensor([state.audio_codes], dtype=torch.long, device=self.device),
-                uuid=payload.request_id,
+                uuid=request_id,
                 **voice,
                 finalize=True,
             )
             waveform = waveform.detach().cpu().reshape(-1)
-        assert waveform.numel() and torch.isfinite(waveform).all()
-        return StagePayload(
-            payload.request_id,
-            payload.request,
-            {
-                "audio_data": waveform.tolist(),
-                "sample_rate": SAMPLE_RATE_HZ,
-                "finish_reason": state.finish_reason,
-                "usage": usage,
-            },
-        )
+        return waveform
 
     def close(self) -> None:
         self.decoder = None
