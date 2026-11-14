@@ -4,13 +4,19 @@
 import copy
 import random
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from queue import Queue
 
 import numpy as np
 import torch
 
-from sglang_omni.models.moss_speech.codec import FlowDecoder, MossSpeechCodec, codec_rng
+from sglang_omni.models.moss_speech.codec import (
+    FlowDecoder,
+    MossSpeechCodec,
+    VoiceConditioning,
+    codec_rng,
+)
 from sglang_omni.models.moss_speech.request_builders import MossSpeechState
 
 
@@ -18,6 +24,13 @@ from sglang_omni.models.moss_speech.request_builders import MossSpeechState
 class FlowSlot:
     flow: FlowDecoder
     stream: torch.cuda.Stream
+
+
+@dataclass(kw_only=True)
+class PreparedAudio:
+    voice: VoiceConditioning
+    token: torch.Tensor
+    ready: torch.cuda.Event
 
 
 class MossSpeechConcurrentCodec(MossSpeechCodec):
@@ -28,7 +41,9 @@ class MossSpeechConcurrentCodec(MossSpeechCodec):
             pass
         super().__init__(codec_path, device)
         assert self.decoder is not None
-        self.owner_lock = threading.Lock()
+        self.owner = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="moss-codec-owner"
+        )
         self.lifecycle = threading.Condition()
         self.active_requests: int = 0
         self.closed: bool = False
@@ -48,6 +63,41 @@ class MossSpeechConcurrentCodec(MossSpeechCodec):
         torch.backends.cudnn.benchmark = False
 
     @torch.inference_mode()
+    def prepare_audio(self, state: MossSpeechState) -> PreparedAudio:
+        with (
+            torch.cuda.device(self.device),
+            torch.cuda.stream(self.owner_stream),
+            codec_rng(),
+        ):
+            voice = self.encode_reference(state.reference_audio)
+            token = torch.tensor(
+                [state.audio_codes], dtype=torch.long, device=self.device
+            )
+            ready = torch.cuda.Event()
+            ready.record()
+            return PreparedAudio(voice=voice, token=token, ready=ready)
+
+    @torch.inference_mode()
+    def synthesize_audio(
+        self, state: MossSpeechState, mel: torch.Tensor, complete: torch.cuda.Event
+    ) -> torch.Tensor:
+        with (
+            torch.cuda.device(self.device),
+            torch.cuda.stream(self.owner_stream),
+            codec_rng(),
+        ):
+            assert self.decoder is not None
+            self.owner_stream.wait_event(complete)
+            mel.record_stream(self.owner_stream)
+            random.seed(state.effective_seed)
+            np.random.seed(state.effective_seed % (1 << 32))
+            torch.manual_seed(state.effective_seed)
+            waveform, _ = self.decoder.hift.inference(
+                speech_feat=mel, cache_source=torch.zeros(1, 1, 0)
+            )
+            return waveform.detach().cpu().reshape(-1)
+
+    @torch.inference_mode()
     def decode_waveform(self, state: MossSpeechState, request_id: str) -> torch.Tensor:
         with self.lifecycle:
             if self.closed:
@@ -57,15 +107,10 @@ class MossSpeechConcurrentCodec(MossSpeechCodec):
         slot = self.available_slots.get()
         try:
             with torch.cuda.device(self.device):
-                with self.owner_lock, torch.cuda.stream(self.owner_stream), codec_rng():
-                    voice = self.encode_reference(state.reference_audio)
-                    token = torch.tensor(
-                        [state.audio_codes], dtype=torch.long, device=self.device
-                    )
-                    prepared = torch.cuda.Event()
-                    prepared.record()
+                prepared = self.owner.submit(self.prepare_audio, state).result()
+                voice, token = prepared.voice, prepared.token
                 with torch.cuda.stream(slot.stream):
-                    slot.stream.wait_event(prepared)
+                    slot.stream.wait_event(prepared.ready)
                     mel, _ = slot.flow.inference(
                         token=token,
                         token_len=torch.tensor(
@@ -89,17 +134,9 @@ class MossSpeechConcurrentCodec(MossSpeechCodec):
                     )
                     complete = torch.cuda.Event()
                     complete.record()
-                with self.owner_lock, torch.cuda.stream(self.owner_stream), codec_rng():
-                    assert self.decoder is not None
-                    self.owner_stream.wait_event(complete)
-                    mel.record_stream(self.owner_stream)
-                    random.seed(state.effective_seed)
-                    np.random.seed(state.effective_seed % (1 << 32))
-                    torch.manual_seed(state.effective_seed)
-                    waveform, _ = self.decoder.hift.inference(
-                        speech_feat=mel, cache_source=torch.zeros(1, 1, 0)
-                    )
-                    return waveform.detach().cpu().reshape(-1)
+                return self.owner.submit(
+                    self.synthesize_audio, state, mel, complete
+                ).result()
         finally:
             try:
                 slot.stream.synchronize()
@@ -116,6 +153,7 @@ class MossSpeechConcurrentCodec(MossSpeechCodec):
             else:
                 self.closed = True
             self.lifecycle.wait_for(lambda: self.active_requests == 0)
+        self.owner.shutdown(wait=True)
         self.owner_stream.synchronize()
         self.slots.clear()
         while not self.available_slots.empty():

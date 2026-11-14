@@ -33,11 +33,16 @@ def test_factory_routes_flow_slots_to_codec_and_scheduler(flow_slots: int) -> No
             "sglang_omni.models.moss_speech.stages.MossSpeechConcurrentCodec"
         ) as dual,
         patch("sglang_omni.models.moss_speech.stages.AutoTokenizer"),
+        patch(
+            "sglang_omni.models.moss_speech.stages.resolve_concrete_device",
+            return_value=torch.device("cuda:0"),
+        ) as resolve,
     ):
         scheduler = create_audio_vocoder_executor(
             "model", codec_path="codec", device="cuda", gpu_id=0, flow_slots=flow_slots
         )
         selected = dual if flow_slots == 2 else serial
+        resolve.assert_called_once_with("cuda", 0)
         selected.assert_called_once_with("codec", torch.device("cuda:0"))
         assert scheduler.max_concurrency == flow_slots
         assert scheduler.fn.func == selected.return_value.decode
@@ -57,11 +62,16 @@ def test_dual_flow_preserves_pcm_rng_and_waits_for_active_requests() -> None:
     concurrent = MossSpeechConcurrentCodec(codec_path, device)
     requests = [
         MossSpeechState(
-            reference_audio=audio_reference(frequency_hz),
+            reference_audio=audio_reference(
+                frequency_hz, sample_count=reference_samples
+            ),
             audio_codes=list(range(3, 3 + code_count)),
             effective_seed=seed,
         )
-        for frequency_hz, code_count, seed in [(220, 24, 7), (880, 65, 19)]
+        for frequency_hz, code_count, seed, reference_samples in [
+            (220, 24, 7, 27 * 24000),
+            (880, 65, 19, 24000),
+        ]
     ]
     cpu_rng = torch.get_rng_state()
     device_rng = torch.cuda.get_rng_state(device)
@@ -74,7 +84,25 @@ def test_dual_flow_preserves_pcm_rng_and_waits_for_active_requests() -> None:
         assert concurrent.decoder is not None and serial.decoder is not None
         assert concurrent.slots[0].flow is not concurrent.slots[1].flow
         assert len({slot.stream.cuda_stream for slot in concurrent.slots}) == 2
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        owner_threads: set[int] = set()
+        reference = concurrent.encode_reference
+        hift = concurrent.decoder.hift.inference
+
+        def owned_reference(reference_audio: str) -> VoiceConditioning:
+            owner_threads.add(threading.get_ident())
+            return reference(reference_audio)
+
+        def owned_hift(
+            *, speech_feat: torch.Tensor, cache_source: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            owner_threads.add(threading.get_ident())
+            return hift(speech_feat=speech_feat, cache_source=cache_source)
+
+        with (
+            ThreadPoolExecutor(max_workers=2) as executor,
+            patch.object(concurrent, "encode_reference", side_effect=owned_reference),
+            patch.object(concurrent.decoder.hift, "inference", side_effect=owned_hift),
+        ):
             for _ in range(2):
                 outputs = list(
                     executor.map(concurrent.decode_waveform, requests, ["0", "1"])
@@ -133,6 +161,7 @@ def test_dual_flow_preserves_pcm_rng_and_waits_for_active_requests() -> None:
                 release.set()
                 assert torch.equal(active.result(timeout=60), expected[1])
                 closing.result(timeout=60)
+        assert len(owner_threads) == 1
         assert concurrent.decoder is None and concurrent.encoder is None
         with pytest.raises(RuntimeError, match="closed"):
             concurrent.decode_waveform(requests[0], "late")
