@@ -29,6 +29,10 @@ from transformers import (
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
 from sglang_omni.models.moss_speech.flow_precision import BF16FlowDecoder
+from sglang_omni.models.moss_speech.flow_attention import (
+    install_middle_bias_reuse,
+    prepare_flow_attention_mask,
+)
 from sglang_omni.models.moss_speech.request_builders import (
     MossSpeechState,
     RequestValidationError,
@@ -107,30 +111,7 @@ class AudioDecoder(Protocol):
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 
-def prepare_flow_attention_mask(
-    attention: Attention,
-    attention_mask: torch.Tensor | None,
-    target_length: int,
-    batch_size: int,
-    out_dim: int = 3,
-) -> torch.Tensor | None:
-    """Broadcast live Flow bias across heads for the stock SDPA processor."""
-    if (
-        attention_mask is not None
-        and attention_mask.ndim == 3
-        and attention_mask.shape[0] == batch_size
-        and attention_mask.shape[-1] == target_length
-        and out_dim in (3, 4)
-    ):
-        # note (Codex): The stock SDPA processor immediately views this result as four dimensions.
-        return attention_mask.unsqueeze(1).expand(-1, attention.heads, -1, -1)
-    else:
-        return Attention.prepare_attention_mask(
-            attention, attention_mask, target_length, batch_size, out_dim
-        )
-
-
-def install_flow_attention_broadcast(decoder: torch.nn.Module) -> None:
+def install_flow_attention_optimizations(decoder: torch.nn.Module) -> None:
     if isinstance(decoder, BF16FlowDecoder):
         decoder = decoder.decoder
     else:
@@ -145,6 +126,7 @@ def install_flow_attention_broadcast(decoder: torch.nn.Module) -> None:
             )
         else:
             pass
+    install_middle_bias_reuse(decoder.estimator)
 
 
 @contextmanager
@@ -200,7 +182,7 @@ class MossSpeechCodec:
             else:
                 pass
             if self.decoder is not None:
-                install_flow_attention_broadcast(self.decoder.flow.decoder)
+                install_flow_attention_optimizations(self.decoder.flow.decoder)
             else:
                 pass
             configuration = encoder_class.config_class.from_pretrained(codec_path)
