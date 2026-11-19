@@ -23,6 +23,7 @@ from transformers import (
 )
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
+from sglang_omni.models.moss_speech.flow_attention import install_middle_bias_reuse
 from sglang_omni.models.moss_speech.request_builders import (
     MossSpeechState,
     RequestValidationError,
@@ -135,6 +136,10 @@ class MossSpeechCodec:
                 if load_decoder
                 else None
             )
+            if self.decoder is not None:
+                install_middle_bias_reuse(self.decoder.flow.decoder.estimator)
+            else:
+                pass
             configuration = encoder_class.config_class.from_pretrained(codec_path)
             encoder = encoder_class(configuration).to(device, torch.float32).eval()
             checkpoint = load_file(str(codec_directory / "model.safetensors"))
