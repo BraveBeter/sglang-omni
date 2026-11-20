@@ -24,6 +24,7 @@ model you are serving.
 | [Fun-CosyVoice3](../cookbook/fun_cosyvoice3.md) | Yes | One reference clip; cloning, cross-lingual and instruction modes |
 | [MOSS-TTS](../cookbook/moss_tts.md) | Yes | Optional reference and model-specific duration control |
 | [MOSS-TTS Local](../cookbook/moss_tts_local.md) | Yes | Optional reference; 48 kHz output |
+| [MOSS-Speech](../cookbook/moss_speech.md) | No | Text/speech QA; optional two-slot B1 Flow concurrency for speech output |
 | [Higgs TTS](../cookbook/higgs_tts.md) | Yes | Optional reference, inline control tokens |
 | [Voxtral TTS](../cookbook/voxtral_tts.md) | Yes | Named preset voices; no reference cloning |
 | [dots.tts](../cookbook/dots_tts.md) | Yes | Reference audio and transcript; MeanFlow and SOAR have different settings |
