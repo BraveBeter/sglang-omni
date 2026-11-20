@@ -59,7 +59,8 @@ class MossSpeechConcurrentCodec(MossSpeechCodec):
         self.lifecycle = threading.Condition()
         self.active_requests: int = 0
         self.closed: bool = False
-        self.owner_stream = torch.cuda.Stream(device=device)
+        # note (Codex): HiFT's cuFFT kernels can fault on a non-default stream while the two Flow slots are active.
+        self.owner_stream = torch.cuda.default_stream(device)
         self.slots = [
             FlowSlot(flow=flow, stream=torch.cuda.Stream(device=device))
             for flow in (self.decoder.flow, copy.deepcopy(self.decoder.flow))

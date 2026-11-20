@@ -66,15 +66,18 @@ def test_factory_routes_flow_slots_to_codec_and_scheduler(
 
 
 @pytest.mark.accelerator
-def test_dual_flow_preserves_pcm_rng_and_waits_for_active_requests() -> None:
+@pytest.mark.parametrize("flow_dtype", [torch.float32, torch.bfloat16])
+def test_dual_flow_preserves_pcm_rng_and_waits_for_active_requests(
+    flow_dtype: torch.dtype,
+) -> None:
     """Concurrent requests must equal serial PCM, recover a failed slot and drain."""
     require_cuda()
     codec_path = os.environ.get("MOSS_SPEECH_CODEC_PATH")
     if codec_path is None:
         pytest.skip("Set MOSS_SPEECH_CODEC_PATH to the frozen Codec checkpoint")
     device = torch.device("cuda:0")
-    serial = MossSpeechCodec(codec_path, device)
-    concurrent = MossSpeechConcurrentCodec(codec_path, device)
+    serial = MossSpeechCodec(codec_path, device, flow_dtype=flow_dtype)
+    concurrent = MossSpeechConcurrentCodec(codec_path, device, flow_dtype=flow_dtype)
     requests = [
         MossSpeechState(
             reference_audio=audio_reference(
@@ -110,6 +113,9 @@ def test_dual_flow_preserves_pcm_rng_and_waits_for_active_requests() -> None:
         def owned_hift(
             *, speech_feat: torch.Tensor, cache_source: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
+            assert torch.cuda.current_stream(device) == torch.cuda.default_stream(
+                device
+            )
             owner_threads.add(threading.get_ident())
             return hift(speech_feat=speech_feat, cache_source=cache_source)
 
