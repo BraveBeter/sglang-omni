@@ -1,7 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Time grids for the native Flow Euler solver."""
 
+from typing import NamedTuple
+
 import torch
+
+
+class FlowCondition(NamedTuple):
+    mu: torch.Tensor
+    mask: torch.Tensor
+    spks: torch.Tensor
+    cond: torch.Tensor
 
 
 class FlowEulerDecoder(torch.nn.Module):
@@ -16,6 +25,7 @@ class FlowEulerDecoder(torch.nn.Module):
     ) -> None:
         super().__init__()
         self.decoder: torch.nn.Module = decoder
+        self.collect_conditions: list[FlowCondition] | None = None
         self.streaming_flow_steps: int | None = streaming_flow_steps
         self.terminal_flow_steps: int | None = terminal_flow_steps
 
@@ -30,6 +40,12 @@ class FlowEulerDecoder(torch.nn.Module):
         cond: torch.Tensor | None = None,
         streaming: bool = False,
     ) -> tuple[torch.Tensor, None]:
+        if self.collect_conditions is not None:
+            assert streaming and spks is not None and cond is not None
+            self.collect_conditions.append(FlowCondition(mu, mask, spks, cond))
+            return mu, None
+        else:
+            pass
         noise = self.decoder.rand_noise[:, :, : mu.size(2)].to(mu) * temperature
         configured_steps = (
             self.streaming_flow_steps if streaming else self.terminal_flow_steps
