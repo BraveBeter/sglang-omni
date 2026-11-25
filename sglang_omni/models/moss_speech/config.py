@@ -41,6 +41,7 @@ class MossSpeechFlowArgs(MossSpeechVocoderArgs):
     cache_streaming_history: bool = False
     page_streaming_history: bool = False
     graph_final_flow: bool = False
+    graph_hift: bool = False
     first_flow_batch_size: Literal[1, 2, 4] = 1
     first_hop_flow_steps: Literal[2] | None = None
 

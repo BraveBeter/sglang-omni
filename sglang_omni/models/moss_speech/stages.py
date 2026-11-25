@@ -2,6 +2,7 @@
 """Factories for preprocessing, native AR generation and audio decoding."""
 
 from collections.abc import Mapping
+from copy import copy
 from functools import partial
 from pathlib import Path
 from typing import Literal
@@ -16,6 +17,7 @@ from sglang_omni.models.moss_speech.engine_builder import MossSpeechEngineBuilde
 from sglang_omni.models.moss_speech.hf_config import (
     ensure_moss_speech_config_registered,
 )
+from sglang_omni.models.moss_speech.hift_graph import HiFTGraphDecoder
 from sglang_omni.models.moss_speech.model_runner import MossSpeechModelRunner
 from sglang_omni.models.moss_speech.request_builders import (
     MossSpeechSGLangRequestData,
@@ -98,6 +100,7 @@ def create_audio_vocoder_executor(
     cache_streaming_history: bool = False,
     page_streaming_history: bool = False,
     graph_final_flow: bool = False,
+    graph_hift: bool = False,
     first_flow_batch_size: Literal[1, 2, 4] = 1,
     first_hop_flow_steps: Literal[2] | None = None,
     device: str | None = None,
@@ -144,6 +147,15 @@ def create_audio_vocoder_executor(
         flow_dtype={"float32": torch.float32, "bfloat16": torch.bfloat16}[flow_dtype],
         **step_options,
     )
+    if graph_hift and codec.device.type == "cuda":
+        assert codec.decoder is not None
+        native = codec.decoder.hift
+        native.stft_window = native.stft_window.to(codec.device)
+        vocoder = copy(native)
+        vocoder.decode = HiFTGraphDecoder(native, codec.device)
+        codec.decoder.hift = vocoder
+    else:
+        pass
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=False)
     if flow_slots is not None:
         return SimpleScheduler(

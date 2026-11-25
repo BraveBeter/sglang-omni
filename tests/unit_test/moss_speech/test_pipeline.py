@@ -27,6 +27,7 @@ from sglang_omni.models.moss_speech.hf_config import (
     MAX_CONTEXT_TOKENS,
     MossSpeechConfig,
 )
+from sglang_omni.models.moss_speech.hift_graph import HiFTGraphDecoder
 from sglang_omni.models.moss_speech.request_builders import (
     MossSpeechState,
     RequestValidationError,
@@ -243,6 +244,35 @@ def test_codec_preserves_usage_rng_and_releases_models() -> None:
     assert torch.equal(torch.get_rng_state(), generator_state)
     codec.close()
     assert codec.decoder is None and codec.encoder is None
+
+
+@pytest.mark.accelerator
+@torch.inference_mode()
+def test_hift_graph_replays_new_inputs_and_preserves_previous_audio() -> None:
+    codec_path = os.environ.get("MOSS_SPEECH_CODEC_PATH")
+    if not torch.cuda.is_available() or not codec_path:
+        pytest.skip("Requires CUDA and the local codec")
+    else:
+        pass
+    device = torch.device("cuda:0")
+    codec = MossSpeechCodec(codec_path, device)
+    try:
+        assert codec.decoder is not None
+        native = codec.decoder.hift
+        replay = HiFTGraphDecoder(native, device)
+        generator = torch.Generator(device=device).manual_seed(17)
+        previous = []
+        with torch.backends.cudnn.flags(benchmark=False, deterministic=True):
+            for frames in (32, 32, 35):
+                mel = torch.randn(1, 80, frames, generator=generator, device=device)
+                source = native.f0_upsamp(mel[:, :1]).contiguous()
+                expected = native.decode(x=mel, s=source)
+                previous.append((replay(x=mel, s=source), expected))
+        assert replay.graphs.get(32) is not None
+        for waveform, expected in previous:
+            torch.testing.assert_close(waveform, expected, rtol=0, atol=0)
+    finally:
+        codec.close()
 
 
 @pytest.mark.accelerator
