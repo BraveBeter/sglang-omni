@@ -25,9 +25,11 @@ from sglang_omni.models.moss_speech.request_builders import (
     build_sglang_moss_request,
 )
 from sglang_omni.models.moss_speech.sglang_model import MossSpeechSGLangModel
+from sglang_omni.models.moss_speech.streaming import build_audio_stream
 from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.engine_factory import (
     GenerationDefaults,
+    SchedulerExtras,
     SGLangGenerationEngineBuilder,
 )
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
@@ -164,3 +166,6 @@ class MossSpeechEngineBuilder(
     ) -> tuple[RequestBuilder, ResultAdapter]:
         assert isinstance(model, MossSpeechSGLangModel)
         return build_sglang_moss_request, build_result
+
+    def extra_scheduler_kwargs(self) -> SchedulerExtras[MossSpeechSGLangRequestData]:
+        return {"stream_output_builder": build_audio_stream}
