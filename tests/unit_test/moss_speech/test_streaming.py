@@ -328,7 +328,9 @@ def test_codec_flushes_each_sample_once_after_stream_done(
     assert torch.equal(torch.get_rng_state(), initial_rng)
 
 
-def first_chunk_vocoder(prompt_codes: int, enabled: bool) -> MossSpeechStreamingVocoder:
+def first_chunk_vocoder(
+    prompt_codes: int, enabled: bool, chunks_per_decode: int = 1
+) -> MossSpeechStreamingVocoder:
     codec = make_codec()
     codec.decoder.hift = TestHiFT()
     codec.encode_reference = Mock(
@@ -339,7 +341,11 @@ def first_chunk_vocoder(prompt_codes: int, enabled: bool) -> MossSpeechStreaming
         }
     )
     scheduler = MossSpeechStreamingVocoder(
-        codec, Path("unused"), TextTokenizer(), emit_first_closed_chunk=enabled
+        codec,
+        Path("unused"),
+        TextTokenizer(),
+        emit_first_closed_chunk=enabled,
+        streaming_chunks_per_decode=chunks_per_decode,
     )
     scheduler.flow = TestFlow()
     return scheduler
@@ -426,3 +432,12 @@ def test_cancel_after_first_closed_chunk_preserves_other_stream() -> None:
         == isolated.outbox.get_nowait().data["audio_waveform"]
     )
     assert "canceled" not in scheduler.stream_states
+
+
+def test_short_first_block_refills_before_grouped_steady_decodes() -> None:
+    scheduler = first_chunk_vocoder(342, True, chunks_per_decode=3)
+    consumed = 0
+    for end, decoded in [(10, 0), (11, 8), (35, 8), (36, 33), (110, 33), (111, 108)]:
+        deliver_codes(scheduler, "ramp", consumed, end)
+        assert scheduler.stream_states["ramp"].decoded_codes == decoded
+        consumed = end

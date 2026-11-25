@@ -115,7 +115,7 @@ def test_remaining_context_and_explicit_budget_boundary() -> None:
     ],
 )
 def test_unsupported_sampling_fails_before_generation(
-    options: dict[str, object]
+    options: dict[str, object],
 ) -> None:
     with pytest.raises(RequestValidationError):
         preprocess_request(
@@ -141,7 +141,7 @@ def test_unsupported_sampling_fails_before_generation(
     ],
 )
 def test_http_rejects_unsupported_or_empty_audio_without_server_error(
-    body: dict[str, object]
+    body: dict[str, object],
 ) -> None:
     with TestClient(
         create_app(SpeechClient(make_codec()), model_name="moss-speech")
@@ -447,6 +447,18 @@ def test_cli_binds_only_three_stages_and_vocoder_assets(tmp_path: Path) -> None:
     default = MossSpeechPipelineConfig(model_path=str(tmp_path))
     assert default.stage_named("ar_engine").stream_to == ["audio_vocoder"]
     assert default.stage_named("audio_vocoder").can_accept_stream_before_payload
+    for streaming_setting in (
+        {"streaming_flow_steps": 4},
+        {"emit_first_closed_chunk": True},
+        {"streaming_chunks_per_decode": 3},
+    ):
+        config_data = default.model_dump()
+        vocoder = next(
+            stage for stage in config_data["stages"] if stage["name"] == "audio_vocoder"
+        )
+        vocoder["factory"].update(flow_slots=2, **streaming_setting)
+        with pytest.raises(ValueError, match="terminal Flow"):
+            MossSpeechPipelineConfig.model_validate(config_data)
     with pytest.raises(ValueError, match="flow_slots"):
         MossSpeechPipelineConfig(
             stages=[
