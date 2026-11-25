@@ -63,3 +63,7 @@ Set `audio_vocoder.factory.flow_slots: 2` to run two complete terminal Flow solv
 ## Configure terminal Flow steps
 
 Set `audio_vocoder.factory.terminal_flow_steps` to a positive integer such as `4` to select the number of Euler evaluations per terminal decode. Omitting the setting preserves the ten-step solver. Changing the step count changes the waveform.
+
+## Use the single-A800 terminal profile
+
+Use [`moss_speech_terminal_a800_mps.yaml`](../../examples/configs/moss_speech_terminal_a800_mps.yaml) with the launch command above to opt into native CUDA MPS. Place both snapshots under `./weights` as shown in the launch section. The profile runs three processes on one A800 80 GB with C16 at the AR stage and tunes the codec for terminal speech output. Its BF16 solver and reduced Euler step count can change the waveform.
