@@ -2,10 +2,10 @@
 """Stream generated codes through the chunk-trained Flow and shared HiFT."""
 
 from collections.abc import Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Protocol
 
 import torch
 from hyperpyyaml import load_hyperpyyaml
@@ -21,6 +21,15 @@ from sglang_omni.models.moss_speech.flow_attention import (
     install_flow_attention_broadcast,
 )
 from sglang_omni.models.moss_speech.flow_precision import FlowEulerDecoder
+from sglang_omni.models.moss_speech.flow_prefix import (
+    StreamingFlow,
+    StreamingReferencePrefill,
+    reference_prefix_key,
+)
+from sglang_omni.models.moss_speech.flow_prefix_graph import (
+    REFERENCE_GRAPH_STEPS,
+    StreamingReferenceGraphs,
+)
 from sglang_omni.models.moss_speech.fsm import EOSP, MODALITY_PAD
 from sglang_omni.models.moss_speech.request_builders import (
     MossSpeechSGLangRequestData,
@@ -29,6 +38,7 @@ from sglang_omni.models.moss_speech.request_builders import (
     extract_output_codes,
 )
 from sglang_omni.models.moss_speech.streaming_flow_graph import (
+    StreamingEstimatorGraphs,
     install_streaming_estimator_graphs,
 )
 from sglang_omni.proto.request import StagePayload
@@ -40,25 +50,6 @@ STREAM_CHUNK_CODES = 25
 HIFT_OVERLAP_MEL_FRAMES = 8
 SAMPLES_PER_MEL_FRAME = 480
 HIFT_OVERLAP_SAMPLES = HIFT_OVERLAP_MEL_FRAMES * SAMPLES_PER_MEL_FRAME
-
-
-class StreamingFlow(Protocol):
-    pre_lookahead_len: int
-    token_mel_ratio: int
-
-    def inference(
-        self,
-        *,
-        token: torch.Tensor,
-        token_len: torch.Tensor,
-        prompt_token: torch.Tensor,
-        prompt_token_len: torch.Tensor,
-        prompt_feat: torch.Tensor,
-        prompt_feat_len: torch.Tensor,
-        embedding: torch.Tensor,
-        streaming: bool,
-        finalize: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 
 def audio_stream_targets(request_id: str, payload: StagePayload) -> list[str]:
@@ -110,6 +101,7 @@ def build_audio_stream(
 @dataclass(kw_only=True)
 class MossSpeechStreamState:
     voice: VoiceConditioning | None = None
+    reference_key: bytes = b""
     codes: list[int] = field(default_factory=list)
     decoded_codes: int = 0
     emitted_samples: int = 0
@@ -129,12 +121,25 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
         *,
         flow_dtype: torch.dtype | None = None,
         streaming_flow_steps: int | None = None,
+        prefill_streaming_reference: bool = False,
     ) -> None:
         self.codec: MossSpeechCodec = codec
         self.codec_path: Path = codec_path
         self.flow_dtype: torch.dtype | None = flow_dtype
         self.streaming_flow_steps: int | None = streaming_flow_steps
+        if prefill_streaming_reference and (
+            flow_dtype is not torch.bfloat16
+            or codec.device.type != "cuda"
+            or streaming_flow_steps != REFERENCE_GRAPH_STEPS
+        ):
+            raise ValueError(
+                "Streaming reference prefill requires four streaming Flow steps in BF16 on CUDA"
+            )
+        else:
+            pass
+        self.prefill_streaming_reference: bool = prefill_streaming_reference
         self.flow: StreamingFlow | None = None
+        self.reference_prefix: StreamingReferencePrefill | None = None
         self.fade_window: torch.Tensor = torch.hamming_window(
             2 * HIFT_OVERLAP_SAMPLES, periodic=False, dtype=torch.float64
         )
@@ -213,6 +218,21 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
                     )
                 else:
                     pass
+                if self.prefill_streaming_reference and isinstance(
+                    flow.decoder.decoder.forward_estimator, StreamingEstimatorGraphs
+                ):
+                    decoder = flow.decoder.decoder
+                    self.reference_prefix = StreamingReferencePrefill(decoder)
+                    decoder.forward_estimator = StreamingReferenceGraphs(
+                        decoder.forward_estimator, self.reference_prefix
+                    )
+                else:
+                    pass
+        else:
+            pass
+
+        if self.reference_prefix is not None:
+            state.reference_key = reference_prefix_key(state.voice)
         else:
             pass
 
@@ -275,21 +295,30 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
                 torch.cuda.set_rng_state(state.cuda_rng, device)
             else:
                 pass
-            mel, _ = flow.inference(
-                token=audio_codes,
-                token_len=torch.tensor(
-                    [available_codes], dtype=torch.int32, device=device
-                ),
-                prompt_token_len=torch.tensor(
-                    [prompt_codes], dtype=torch.int32, device=device
-                ),
-                prompt_feat_len=torch.tensor(
-                    [voice["prompt_feat"].shape[1]], dtype=torch.int32, device=device
-                ),
-                **voice,
-                streaming=True,
-                finalize=is_final,
-            )
+            with (
+                self.reference_prefix.for_voice(
+                    flow, voice, state.reference_key, STREAM_CHUNK_CODES
+                )
+                if self.reference_prefix is not None
+                else nullcontext()
+            ):
+                mel, _ = flow.inference(
+                    token=audio_codes,
+                    token_len=torch.tensor(
+                        [available_codes], dtype=torch.int32, device=device
+                    ),
+                    prompt_token_len=torch.tensor(
+                        [prompt_codes], dtype=torch.int32, device=device
+                    ),
+                    prompt_feat_len=torch.tensor(
+                        [voice["prompt_feat"].shape[1]],
+                        dtype=torch.int32,
+                        device=device,
+                    ),
+                    **voice,
+                    streaming=True,
+                    finalize=is_final,
+                )
             # note (Codex): Flow attends to the prefix again, but HiFT only needs its overlap.
             mel = mel[..., state.decoded_codes * flow.token_mel_ratio :]
             if state.overlap_mel is None:
@@ -341,5 +370,6 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
         return {"finish_reason": result.finish_reason, "usage": result.usage()}
 
     def on_serving_stop(self) -> None:
+        self.reference_prefix = None
         self.flow = None
         self.codec.close()
