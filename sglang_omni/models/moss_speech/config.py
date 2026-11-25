@@ -32,6 +32,7 @@ class MossSpeechVocoderStage(StageConfig):
 
 class MossSpeechFlowArgs(MossSpeechVocoderArgs):
     flow_dtype: Literal["float32", "bfloat16"] = "float32"
+    flow_slots: Literal[1, 2] | None = None
 
 
 class MossSpeechFlowStage(StageConfig):

@@ -55,3 +55,7 @@ for source, content in [("text", "What is the capital of France?"), ("speech", s
         else:
             print(message["content"])
 ```
+
+## Run two terminal Flow slots
+
+Set `audio_vocoder.factory.flow_slots: 2` to run two complete terminal Flow solves on separate CUDA streams. Each slot loads its own Flow weights and keeps its own caches. A single owner runs reference conditioning and HiFT on the default CUDA stream. The default remains one slot, and AR request capacity is configured separately.

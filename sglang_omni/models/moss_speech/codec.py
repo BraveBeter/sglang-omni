@@ -90,10 +90,37 @@ class MelExtractor(Protocol):
     def __call__(self, waveform: torch.Tensor) -> torch.Tensor: ...
 
 
+class FlowDecoder(Protocol):
+    decoder: torch.nn.Module
+
+    def bfloat16(self) -> torch.nn.Module: ...
+
+    def inference(
+        self,
+        *,
+        token: torch.Tensor,
+        token_len: torch.Tensor,
+        prompt_token: torch.Tensor,
+        prompt_token_len: torch.Tensor,
+        prompt_feat: torch.Tensor,
+        prompt_feat_len: torch.Tensor,
+        embedding: torch.Tensor,
+        streaming: bool,
+        finalize: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+
+class WaveformDecoder(Protocol):
+    def inference(
+        self, *, speech_feat: torch.Tensor, cache_source: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+
 class AudioDecoder(Protocol):
-    flow: torch.nn.Module
     feat_extractor: MelExtractor
     campplus_session: onnxruntime.InferenceSession
+    flow: FlowDecoder
+    hift: WaveformDecoder
 
     def token2wav(
         self,
@@ -166,6 +193,7 @@ class MossSpeechCodec:
         device: torch.device,
         *,
         load_decoder: bool = True,
+        install_attention_broadcast: bool = True,
         flow_dtype: torch.dtype | None = None,
     ) -> None:
         self.device: torch.device = device
@@ -199,7 +227,7 @@ class MossSpeechCodec:
                 ).eval()
             else:
                 pass
-            if self.decoder is not None:
+            if self.decoder is not None and install_attention_broadcast:
                 install_flow_attention_broadcast(self.decoder.flow.decoder)
             else:
                 pass
@@ -414,29 +442,7 @@ class MossSpeechCodec:
             )
         else:
             pass
-        assert self.decoder is not None
-        with (
-            codec_rng(),
-            torch.backends.cudnn.flags(
-                enabled=torch.backends.cudnn.enabled,
-                benchmark=False,
-                deterministic=True,
-                allow_tf32=torch.backends.cudnn.allow_tf32,
-            ),
-        ):
-            voice = self.encode_reference(state.reference_audio)
-            voice["prompt_feat"] = voice["prompt_feat"].to(dtype=self.flow_dtype)
-            voice["embedding"] = voice["embedding"].to(dtype=self.flow_dtype)
-            random.seed(state.effective_seed)
-            np.random.seed(state.effective_seed % (1 << 32))
-            torch.manual_seed(state.effective_seed)
-            waveform, _ = self.decoder.token2wav(
-                torch.tensor([state.audio_codes], dtype=torch.long, device=self.device),
-                uuid=payload.request_id,
-                **voice,
-                finalize=True,
-            )
-            waveform = waveform.detach().cpu().reshape(-1)
+        waveform = self.decode_waveform(state, payload.request_id)
         assert waveform.numel() and torch.isfinite(waveform).all()
         return StagePayload(
             payload.request_id,
@@ -448,6 +454,39 @@ class MossSpeechCodec:
                 "usage": usage,
             },
         )
+
+    def prepare_flow_reference(self, reference_audio: str) -> VoiceConditioning:
+        voice = self.encode_reference(reference_audio)
+        return VoiceConditioning(
+            prompt_token=voice["prompt_token"],
+            prompt_feat=voice["prompt_feat"].to(dtype=self.flow_dtype),
+            embedding=voice["embedding"].to(dtype=self.flow_dtype),
+        )
+
+    @torch.inference_mode()
+    def decode_waveform(self, state: MossSpeechState, request_id: str) -> torch.Tensor:
+        assert self.decoder is not None
+        with (
+            codec_rng(),
+            torch.backends.cudnn.flags(
+                enabled=torch.backends.cudnn.enabled,
+                benchmark=False,
+                deterministic=True,
+                allow_tf32=torch.backends.cudnn.allow_tf32,
+            ),
+        ):
+            voice = self.prepare_flow_reference(state.reference_audio)
+            random.seed(state.effective_seed)
+            np.random.seed(state.effective_seed % (1 << 32))
+            torch.manual_seed(state.effective_seed)
+            waveform, _ = self.decoder.token2wav(
+                torch.tensor([state.audio_codes], dtype=torch.long, device=self.device),
+                uuid=request_id,
+                **voice,
+                finalize=True,
+            )
+            waveform = waveform.detach().cpu().reshape(-1)
+        return waveform
 
     def close(self) -> None:
         self.reference_cache.clear()

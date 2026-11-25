@@ -9,6 +9,7 @@ import torch
 from transformers import AutoTokenizer
 
 from sglang_omni.models.moss_speech.codec import MossSpeechCodec
+from sglang_omni.models.moss_speech.concurrent_codec import MossSpeechConcurrentCodec
 from sglang_omni.models.moss_speech.engine_builder import MossSpeechEngineBuilder
 from sglang_omni.models.moss_speech.hf_config import (
     ensure_moss_speech_config_registered,
@@ -73,6 +74,7 @@ def create_audio_vocoder_executor(
     *,
     codec_path: str | None,
     flow_dtype: Literal["float32", "bfloat16"],
+    flow_slots: Literal[1, 2] = 1,
     device: str | None = None,
     gpu_id: int | None = None,
 ) -> SimpleScheduler[StagePayload, StagePayload]:
@@ -80,12 +82,15 @@ def create_audio_vocoder_executor(
         raise ValueError("Set audio_vocoder.factory.codec_path")
     else:
         pass
-    codec = MossSpeechCodec(
+    codec_class = MossSpeechConcurrentCodec if flow_slots == 2 else MossSpeechCodec
+    codec = codec_class(
         codec_path,
         resolve_concrete_device(device, gpu_id),
         flow_dtype={"float32": torch.float32, "bfloat16": torch.bfloat16}[flow_dtype],
     )
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=False)
     return SimpleScheduler(
-        partial(codec.decode, tokenizer=tokenizer), shutdown_callback=codec.close
+        partial(codec.decode, tokenizer=tokenizer),
+        max_concurrency=flow_slots,
+        shutdown_callback=codec.close,
     )
