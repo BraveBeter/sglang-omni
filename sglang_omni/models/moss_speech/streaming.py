@@ -122,6 +122,7 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
         flow_dtype: torch.dtype | None = None,
         streaming_flow_steps: int | None = None,
         prefill_streaming_reference: bool = False,
+        emit_first_closed_chunk: bool = False,
     ) -> None:
         self.codec: MossSpeechCodec = codec
         self.codec_path: Path = codec_path
@@ -138,6 +139,7 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
         else:
             pass
         self.prefill_streaming_reference: bool = prefill_streaming_reference
+        self.emit_first_closed_chunk = emit_first_closed_chunk
         self.flow: StreamingFlow | None = None
         self.reference_prefix: StreamingReferencePrefill | None = None
         self.fade_window: torch.Tensor = torch.hamming_window(
@@ -270,7 +272,17 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
         else:
             if state.decoded_codes == 0:
                 # note (Codex): Flow's chunk grid begins at the first voice prompt code.
-                committed_codes += -prompt_codes % STREAM_CHUNK_CODES
+                first_boundary_codes = -prompt_codes % STREAM_CHUNK_CODES
+                committed_codes += first_boundary_codes
+                if (
+                    self.emit_first_closed_chunk
+                    and first_boundary_codes * flow.token_mel_ratio
+                    > HIFT_OVERLAP_MEL_FRAMES
+                    and len(state.codes) < committed_codes + flow.pre_lookahead_len
+                ):
+                    committed_codes = first_boundary_codes
+                else:
+                    pass
             else:
                 pass
             available_codes = committed_codes + flow.pre_lookahead_len
