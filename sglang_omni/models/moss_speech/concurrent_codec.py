@@ -16,6 +16,8 @@ from sglang_omni.models.moss_speech.codec import (
     MossSpeechCodec,
     VoiceConditioning,
     codec_rng,
+)
+from sglang_omni.models.moss_speech.flow_attention import (
     install_flow_attention_broadcast,
 )
 from sglang_omni.models.moss_speech.request_builders import MossSpeechState

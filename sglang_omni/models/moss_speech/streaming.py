@@ -17,6 +17,9 @@ from sglang_omni.models.moss_speech.codec import (
     VoiceConditioning,
     codec_rng,
 )
+from sglang_omni.models.moss_speech.flow_attention import (
+    install_flow_attention_broadcast,
+)
 from sglang_omni.models.moss_speech.flow_precision import BF16FlowDecoder
 from sglang_omni.models.moss_speech.fsm import EOSP, MODALITY_PAD
 from sglang_omni.models.moss_speech.request_builders import (
@@ -186,6 +189,7 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
                     flow.decoder = BF16FlowDecoder(flow.decoder).eval()
                 else:
                     pass
+                install_flow_attention_broadcast(flow.decoder)
                 self.flow = flow.to(self.codec.device).eval()
         else:
             pass
