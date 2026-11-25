@@ -42,6 +42,7 @@ class MossSpeechConcurrentCodec(MossSpeechCodec):
         *,
         flow_dtype: torch.dtype | None = None,
         terminal_flow_steps: int | None = None,
+        terminal_bias_min_width: int | None = None,
     ) -> None:
         if device.type != "cuda":
             raise ValueError("Two Flow slots require a CUDA device")
@@ -68,7 +69,9 @@ class MossSpeechConcurrentCodec(MossSpeechCodec):
             for flow in (self.decoder.flow, copy.deepcopy(self.decoder.flow))
         ]
         for slot in self.slots:
-            install_flow_attention_broadcast(slot.flow.decoder)
+            install_flow_attention_broadcast(
+                slot.flow.decoder, terminal_bias_min_width=terminal_bias_min_width
+            )
         torch.cuda.current_stream(device).synchronize()
         self.available_slots: Queue[FlowSlot] = Queue(maxsize=len(self.slots))
         for slot in self.slots:

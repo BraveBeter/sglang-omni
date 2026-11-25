@@ -157,18 +157,75 @@ def prepare_flow_attention_mask(
         )
 
 
-def install_flow_attention_broadcast(decoder: torch.nn.Module) -> None:
+class TerminalFlowBiasAlignment:
+    """Share an aligned bias only among blocks reading the same estimator input."""
+
+    def __init__(self, min_width: int) -> None:
+        self.min_width: int = min_width
+        self.cached: tuple[torch.Tensor, torch.Tensor] | None = None
+
+    def finish_estimator(
+        self, module: torch.nn.Module, inputs: tuple, output: object
+    ) -> None:
+        self.cached = None
+
+    def prepare(
+        self,
+        attention: Attention,
+        attention_mask: torch.Tensor | None,
+        target_length: int,
+        batch_size: int,
+        out_dim: int = 3,
+    ) -> torch.Tensor | None:
+        if (
+            attention_mask is not None
+            and attention_mask.dtype is torch.bfloat16
+            and target_length >= self.min_width
+            and target_length % 8
+            and attention_mask.ndim == 3
+            and attention_mask.shape[0] == batch_size
+            and attention_mask.shape[-1] == target_length
+            and attention_mask.is_contiguous()
+            and out_dim in (3, 4)
+        ):
+            if self.cached is None or self.cached[0] is not attention_mask:
+                # note (Codex): Keep the physical SDPA row stride aligned while preserving all logical columns.
+                padded = torch.nn.functional.pad(
+                    attention_mask, (0, -target_length % 8)
+                )
+                self.cached = (attention_mask, padded[..., :target_length])
+            else:
+                pass
+            attention_mask = self.cached[1]
+        else:
+            pass
+        return prepare_flow_attention_mask(
+            attention, attention_mask, target_length, batch_size, out_dim
+        )
+
+
+def install_flow_attention_broadcast(
+    decoder: torch.nn.Module, *, terminal_bias_min_width: int | None = None
+) -> None:
     if isinstance(decoder, FlowEulerDecoder):
         decoder = decoder.decoder
     else:
         pass
+    if terminal_bias_min_width is not None:
+        alignment = TerminalFlowBiasAlignment(terminal_bias_min_width)
+        decoder.estimator.register_forward_hook(
+            alignment.finish_estimator, always_call=True
+        )
+        prepare = alignment.prepare
+    else:
+        prepare = prepare_flow_attention_mask
     for attention in decoder.estimator.modules():
         if (
             type(attention) is Attention
             and type(attention.processor) is AttnProcessor2_0
         ):
             attention.prepare_attention_mask = MethodType(
-                prepare_flow_attention_mask, weakref.proxy(attention)
+                prepare, weakref.proxy(attention)
             )
         else:
             pass
@@ -196,6 +253,7 @@ class MossSpeechCodec:
         install_attention_broadcast: bool = True,
         flow_dtype: torch.dtype | None = None,
         terminal_flow_steps: int | None = None,
+        terminal_bias_min_width: int | None = None,
     ) -> None:
         self.device: torch.device = device
         self.reference_cache: OrderedDict[tuple[int, bytes], VoiceConditioning] = (
@@ -234,7 +292,10 @@ class MossSpeechCodec:
             else:
                 pass
             if self.decoder is not None and install_attention_broadcast:
-                install_flow_attention_broadcast(self.decoder.flow.decoder)
+                install_flow_attention_broadcast(
+                    self.decoder.flow.decoder,
+                    terminal_bias_min_width=terminal_bias_min_width,
+                )
             else:
                 pass
             configuration = encoder_class.config_class.from_pretrained(codec_path)
