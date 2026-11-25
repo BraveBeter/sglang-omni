@@ -17,6 +17,7 @@ from sglang_omni.models.moss_speech.codec import (
     VoiceConditioning,
     codec_rng,
 )
+from sglang_omni.models.moss_speech.flow_precision import BF16FlowDecoder
 from sglang_omni.models.moss_speech.fsm import EOSP, MODALITY_PAD
 from sglang_omni.models.moss_speech.request_builders import (
     MossSpeechSGLangRequestData,
@@ -119,9 +120,12 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
         codec: MossSpeechCodec,
         codec_path: Path,
         tokenizer: PreTrainedTokenizerBase,
+        *,
+        flow_dtype: torch.dtype | None = None,
     ) -> None:
         self.codec: MossSpeechCodec = codec
         self.codec_path: Path = codec_path
+        self.flow_dtype: torch.dtype | None = flow_dtype
         self.flow: StreamingFlow | None = None
         self.fade_window: torch.Tensor = torch.hamming_window(
             2 * HIFT_OVERLAP_SAMPLES, periodic=False, dtype=torch.float64
@@ -150,6 +154,11 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
             effective_seed = source.get("effective_seed")
         assert isinstance(reference_audio, str) and isinstance(effective_seed, int)
         state.voice = self.codec.encode_reference(reference_audio)
+        if self.flow_dtype is torch.bfloat16:
+            state.voice["prompt_feat"] = state.voice["prompt_feat"].bfloat16()
+            state.voice["embedding"] = state.voice["embedding"].bfloat16()
+        else:
+            pass
         state.cpu_rng = torch.Generator().manual_seed(effective_seed).get_state()
         if self.codec.device.type == "cuda":
             state.cuda_rng = (
@@ -172,6 +181,11 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
                 weights.pop("epoch", None)
                 weights.pop("step", None)
                 flow.load_state_dict(weights)
+                if self.flow_dtype is torch.bfloat16:
+                    flow.bfloat16()
+                    flow.decoder = BF16FlowDecoder(flow.decoder).eval()
+                else:
+                    pass
                 self.flow = flow.to(self.codec.device).eval()
         else:
             pass

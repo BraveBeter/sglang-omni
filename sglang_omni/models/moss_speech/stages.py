@@ -121,4 +121,9 @@ def create_audio_vocoder_executor(
             shutdown_callback=codec.close,
         )
     else:
-        return MossSpeechStreamingVocoder(codec, Path(codec_path), tokenizer)
+        return MossSpeechStreamingVocoder(
+            codec,
+            Path(codec_path),
+            tokenizer,
+            flow_dtype=codec.flow_dtype,
+        )

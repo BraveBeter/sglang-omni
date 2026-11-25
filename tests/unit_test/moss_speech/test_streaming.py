@@ -31,6 +31,7 @@ class TestFlow:
     __test__ = False
     pre_lookahead_len: int = 3
     token_mel_ratio: int = 4
+    conditioning_dtype: torch.dtype = torch.float32
 
     def inference(
         self,
@@ -46,6 +47,8 @@ class TestFlow:
         finalize: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert streaming
+        assert prompt_feat.dtype == embedding.dtype == self.conditioning_dtype
+        assert prompt_token.dtype == torch.int32
         if finalize:
             committed_codes = token.shape[-1]
         else:
@@ -111,12 +114,21 @@ def test_ar_stream_routes_only_generated_audio_through_first_eosp(stream: bool) 
         pass
 
 
-@pytest.mark.parametrize("audio_codes", [0, 2, 68])
-def test_codec_flushes_each_sample_once_after_stream_done(audio_codes: int) -> None:
+@pytest.mark.parametrize(
+    ("audio_codes", "flow_dtype"),
+    [(0, None), (2, None), (68, None), (68, torch.bfloat16)],
+)
+def test_codec_flushes_each_sample_once_after_stream_done(
+    audio_codes: int, flow_dtype: torch.dtype | None
+) -> None:
     codec = make_codec()
     codec.decoder.hift = TestHiFT()
-    scheduler = MossSpeechStreamingVocoder(codec, Path("unused"), TextTokenizer())
-    scheduler.flow = TestFlow()
+    scheduler = MossSpeechStreamingVocoder(
+        codec, Path("unused"), TextTokenizer(), flow_dtype=flow_dtype
+    )
+    flow = TestFlow()
+    flow.conditioning_dtype = flow_dtype or torch.float32
+    scheduler.flow = flow
     reference = audio_reference()
     prepared = preprocess_request(
         StagePayload(
