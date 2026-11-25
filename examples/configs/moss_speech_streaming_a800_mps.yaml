@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# Single A800 80 GB, C16, streaming speech output under native CUDA MPS.
+config_cls: MossSpeechPipelineConfig
+model_path: ./weights/MOSS-Speech
+stages:
+  preprocessing:
+    factory:
+      codec_path: ./weights/MOSS-Speech-Codec
+  ar_engine:
+    engine:
+      max_running_requests: 16
+      max_queued_requests: 64
+      max_total_tokens: 40962
+      attention_backend: flashinfer
+      disable_cuda_graph: false
+    factory:
+      cache_repetition_history: true
+  audio_vocoder:
+    factory:
+      codec_path: ./weights/MOSS-Speech-Codec
+      flow_dtype: bfloat16
+      streaming_flow_steps: 3
+      page_streaming_history: true
+      first_flow_batch_size: 4
+      first_hop_flow_steps: 2
+      emit_first_closed_chunk: true
+      prefill_streaming_reference: true
+      graph_hift: true
+      graph_final_flow: true
+      streaming_chunks_per_decode: 3
+    env:
+      CUDA_MPS_ACTIVE_THREAD_PERCENTAGE: '100'
+mps: 'on'
