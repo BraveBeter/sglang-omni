@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """MOSS-Speech increment, lookahead, final flush and cancellation contracts."""
 
+import os
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 import torch
+import torchaudio
 from diffusers.models.attention_processor import Attention
 
+from sglang_omni.models.moss_speech.codec import MossSpeechCodec
 from sglang_omni.models.moss_speech.config import MossSpeechFlowArgs
 from sglang_omni.models.moss_speech.flow_attention import (
     install_flow_attention_broadcast,
@@ -87,6 +90,82 @@ def test_streaming_euler_grid(
 def test_streaming_flow_steps_must_be_positive(steps: int) -> None:
     with pytest.raises(ValueError, match="streaming_flow_steps"):
         MossSpeechFlowArgs(streaming_flow_steps=steps)
+
+
+@pytest.mark.parametrize("steps", [None, 6, 10])
+def test_reference_graphs_require_the_four_step_grid(steps: int | None) -> None:
+    codec = Mock(device=torch.device("cuda:0"))
+    with pytest.raises(ValueError, match="four streaming Flow steps"):
+        MossSpeechStreamingVocoder(
+            codec,
+            Path("codec"),
+            TextTokenizer(),
+            flow_dtype=torch.bfloat16,
+            streaming_flow_steps=steps,
+            prefill_streaming_reference=True,
+        )
+
+
+@pytest.mark.accelerator
+def test_reference_prefix_is_independent_of_cache_hits_and_eviction(
+    tmp_path: Path,
+) -> None:
+    """A returned stream must be reproducible after another reference evicts its prefix."""
+    codec_path = os.environ.get("MOSS_SPEECH_CODEC_PATH")
+    reference_audio = os.environ.get("MOSS_SPEECH_REFERENCE_AUDIO")
+    if not torch.cuda.is_available() or not codec_path or not reference_audio:
+        pytest.skip("Requires CUDA and local codec/reference assets")
+    else:
+        pass
+    samples, sample_rate = torchaudio.load(reference_audio)
+    if samples.size(1) < 6 * sample_rate:
+        pytest.skip("Requires two references with complete Flow chunks")
+    else:
+        pass
+    alternate = tmp_path / "alternate.wav"
+    torchaudio.save(alternate, samples[:, : samples.size(1) // 2], sample_rate)
+    codec = MossSpeechCodec(
+        codec_path, torch.device("cuda:0"), flow_dtype=torch.bfloat16
+    )
+    vocoder = MossSpeechStreamingVocoder(
+        codec,
+        Path(codec_path),
+        TextTokenizer(),
+        flow_dtype=torch.bfloat16,
+        prefill_streaming_reference=True,
+        streaming_flow_steps=4,
+    )
+    chunks = []
+    for index, reference_path in enumerate(
+        [reference_audio, reference_audio, str(alternate), reference_audio]
+    ):
+        request_id = str(index)
+        state = vocoder.create_stream_state(request_id)
+        vocoder.latch_stream_contract(
+            request_id,
+            state,
+            {"reference_audio": reference_path, "effective_seed": 42},
+            origin="stream",
+        )
+        first = (
+            25
+            + (-state.voice["prompt_token"].size(1) % 25)
+            + vocoder.flow.pre_lookahead_len
+        )
+        state.codes = [1] * first
+        increment = vocoder.decode_delta(request_id, state, is_final=False)
+        state.codes.extend([3, 9])
+        waveform = vocoder.decode_delta(request_id, state, is_final=True)
+        assert waveform is not None and increment is not None
+        assert vocoder.flow.decoder.decoder.forward_estimator.graphs
+        assert (
+            vocoder.reference_prefix is not None
+            and vocoder.reference_prefix.cached is not None
+        )
+        chunks.append(torch.cat((increment, waveform)))
+    assert torch.equal(chunks[0], chunks[1]) and torch.equal(chunks[0], chunks[3])
+    assert not torch.equal(chunks[0], chunks[2])
+    vocoder.on_serving_stop()
 
 
 class TestFlow:

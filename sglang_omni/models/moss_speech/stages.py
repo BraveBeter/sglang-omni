@@ -89,6 +89,7 @@ def create_audio_vocoder_executor(
     codec_path: str | None,
     flow_dtype: Literal["float32", "bfloat16"],
     streaming_flow_steps: int | None = None,
+    prefill_streaming_reference: bool = False,
     flow_slots: Literal[1, 2] | None = None,
     terminal_flow_steps: int | None = None,
     device: str | None = None,
@@ -128,4 +129,5 @@ def create_audio_vocoder_executor(
             tokenizer,
             flow_dtype=codec.flow_dtype,
             streaming_flow_steps=streaming_flow_steps,
+            prefill_streaming_reference=prefill_streaming_reference,
         )

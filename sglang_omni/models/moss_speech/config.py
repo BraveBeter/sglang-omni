@@ -33,6 +33,7 @@ class MossSpeechVocoderStage(StageConfig):
 class MossSpeechFlowArgs(MossSpeechVocoderArgs):
     flow_dtype: Literal["float32", "bfloat16"] = "float32"
     streaming_flow_steps: int | None = Field(default=None, gt=0)
+    prefill_streaming_reference: bool = False
     flow_slots: Literal[1, 2] | None = None
     terminal_flow_steps: int | None = Field(default=None, gt=0)
 
@@ -91,7 +92,10 @@ class MossSpeechPipelineConfig(PipelineConfig):
         factory = vocoder.factory
         if not isinstance(factory, MossSpeechFlowArgs) or factory.flow_slots is None:
             return
-        elif factory.streaming_flow_steps is not None:
+        elif (
+            factory.streaming_flow_steps is not None
+            or factory.prefill_streaming_reference
+        ):
             raise ValueError(
                 "flow_slots selects terminal Flow and cannot use streaming Flow settings"
             )
