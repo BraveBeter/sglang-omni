@@ -20,7 +20,7 @@ from sglang_omni.models.moss_speech.codec import (
 from sglang_omni.models.moss_speech.flow_attention import (
     install_flow_attention_broadcast,
 )
-from sglang_omni.models.moss_speech.flow_precision import BF16FlowDecoder
+from sglang_omni.models.moss_speech.flow_precision import FlowEulerDecoder
 from sglang_omni.models.moss_speech.fsm import EOSP, MODALITY_PAD
 from sglang_omni.models.moss_speech.request_builders import (
     MossSpeechSGLangRequestData,
@@ -125,10 +125,12 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
         tokenizer: PreTrainedTokenizerBase,
         *,
         flow_dtype: torch.dtype | None = None,
+        streaming_flow_steps: int | None = None,
     ) -> None:
         self.codec: MossSpeechCodec = codec
         self.codec_path: Path = codec_path
         self.flow_dtype: torch.dtype | None = flow_dtype
+        self.streaming_flow_steps: int | None = streaming_flow_steps
         self.flow: StreamingFlow | None = None
         self.fade_window: torch.Tensor = torch.hamming_window(
             2 * HIFT_OVERLAP_SAMPLES, periodic=False, dtype=torch.float64
@@ -186,7 +188,15 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
                 flow.load_state_dict(weights)
                 if self.flow_dtype is torch.bfloat16:
                     flow.bfloat16()
-                    flow.decoder = BF16FlowDecoder(flow.decoder).eval()
+                else:
+                    pass
+                if (
+                    self.flow_dtype is torch.bfloat16
+                    or self.streaming_flow_steps is not None
+                ):
+                    flow.decoder = FlowEulerDecoder(
+                        flow.decoder, streaming_flow_steps=self.streaming_flow_steps
+                    ).eval()
                 else:
                     pass
                 install_flow_attention_broadcast(flow.decoder)

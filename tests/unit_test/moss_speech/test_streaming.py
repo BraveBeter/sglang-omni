@@ -8,10 +8,14 @@ import pytest
 import torch
 from diffusers.models.attention_processor import Attention
 
+from sglang_omni.models.moss_speech.config import MossSpeechFlowArgs
 from sglang_omni.models.moss_speech.flow_attention import (
     install_flow_attention_broadcast,
 )
-from sglang_omni.models.moss_speech.flow_precision import BF16FlowDecoder
+from sglang_omni.models.moss_speech.flow_precision import (
+    BF16FlowDecoder,
+    FlowEulerDecoder,
+)
 from sglang_omni.models.moss_speech.fsm import AUDIO_PAD, EOSP, MODALITY_PAD, SOSP
 from sglang_omni.models.moss_speech.request_builders import (
     RequestValidationError,
@@ -50,6 +54,39 @@ def test_broadcast_preserves_causal_attention_values(flow_dtype: torch.dtype) ->
     torch.testing.assert_close(
         attention(hidden_states, attention_mask=attention_bias), expected
     )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize(
+    ("configured_steps", "streaming", "expected_steps"),
+    [(None, True, 10), (6, True, 6), (6, False, 10)],
+)
+def test_streaming_euler_grid(
+    dtype: torch.dtype,
+    configured_steps: int | None,
+    streaming: bool,
+    expected_steps: int,
+) -> None:
+    settings = MossSpeechFlowArgs(streaming_flow_steps=configured_steps)
+    native_decoder = torch.nn.Module()
+    native_decoder.rand_noise = torch.ones(1, 80, 12)
+    native_decoder.t_scheduler = "cosine"
+    native_decoder.solve_euler = Mock(return_value=torch.empty(0))
+    decoder = FlowEulerDecoder(
+        native_decoder, streaming_flow_steps=settings.streaming_flow_steps
+    )
+    conditioning = torch.zeros(1, 80, 5, dtype=dtype)
+    decoder(conditioning, torch.ones(1, 1, 5), 10, streaming=streaming)
+    noise, timesteps = native_decoder.solve_euler.call_args.args[:2]
+    torch.testing.assert_close(noise, torch.ones_like(conditioning))
+    expected = torch.linspace(0, 1, expected_steps + 1, dtype=dtype)
+    assert torch.equal(timesteps, 1 - torch.cos(expected * 0.5 * torch.pi))
+
+
+@pytest.mark.parametrize("steps", [0, -1])
+def test_streaming_flow_steps_must_be_positive(steps: int) -> None:
+    with pytest.raises(ValueError, match="streaming_flow_steps"):
+        MossSpeechFlowArgs(streaming_flow_steps=steps)
 
 
 class TestFlow:

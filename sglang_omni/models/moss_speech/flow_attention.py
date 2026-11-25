@@ -7,7 +7,7 @@ from types import MethodType
 import torch
 from diffusers.models.attention_processor import Attention, AttnProcessor2_0
 
-from sglang_omni.models.moss_speech.flow_precision import BF16FlowDecoder
+from sglang_omni.models.moss_speech.flow_precision import FlowEulerDecoder
 
 
 def prepare_flow_attention_mask(
@@ -33,7 +33,7 @@ def prepare_flow_attention_mask(
 
 
 def install_flow_attention_broadcast(decoder: torch.nn.Module) -> None:
-    if isinstance(decoder, BF16FlowDecoder):
+    if isinstance(decoder, FlowEulerDecoder):
         decoder = decoder.decoder
     else:
         pass

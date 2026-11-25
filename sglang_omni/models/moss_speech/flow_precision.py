@@ -1,17 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Precision and step count for the native Flow Euler solver."""
+"""Time grids for the native Flow Euler solver."""
 
 import torch
 
 
 class FlowEulerDecoder(torch.nn.Module):
-    """Keep the native noise source and solver using a time grid in the input precision."""
+    """Keep the native noise source and use the input precision for the time grid."""
 
     def __init__(
-        self, decoder: torch.nn.Module, *, terminal_flow_steps: int | None = None
+        self,
+        decoder: torch.nn.Module,
+        *,
+        streaming_flow_steps: int | None = None,
+        terminal_flow_steps: int | None = None,
     ) -> None:
         super().__init__()
         self.decoder: torch.nn.Module = decoder
+        self.streaming_flow_steps: int | None = streaming_flow_steps
         self.terminal_flow_steps: int | None = terminal_flow_steps
 
     @torch.inference_mode()
@@ -26,11 +31,10 @@ class FlowEulerDecoder(torch.nn.Module):
         streaming: bool = False,
     ) -> tuple[torch.Tensor, None]:
         noise = self.decoder.rand_noise[:, :, : mu.size(2)].to(mu) * temperature
-        steps = (
-            self.terminal_flow_steps
-            if not streaming and self.terminal_flow_steps is not None
-            else n_timesteps
+        configured_steps = (
+            self.streaming_flow_steps if streaming else self.terminal_flow_steps
         )
+        steps = n_timesteps if configured_steps is None else configured_steps
         timesteps = torch.linspace(0, 1, steps + 1, device=mu.device, dtype=mu.dtype)
         if self.decoder.t_scheduler == "cosine":
             timesteps = 1 - torch.cos(timesteps * 0.5 * torch.pi)
@@ -42,3 +46,6 @@ class FlowEulerDecoder(torch.nn.Module):
             ),
             None,
         )
+
+
+BF16FlowDecoder = FlowEulerDecoder
