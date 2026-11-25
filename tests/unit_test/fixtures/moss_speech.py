@@ -81,6 +81,7 @@ def make_codec() -> MossSpeechCodec:
     codec = object.__new__(MossSpeechCodec)
     codec.device = torch.device("cpu")
     codec.reference_cache = OrderedDict()
+    codec.flow_dtype = None
     codec.decoder = OfflineDecoder()
     codec.encoder = ReferenceEncoder()
     codec.feature_extractor = WhisperFeatureExtractor()

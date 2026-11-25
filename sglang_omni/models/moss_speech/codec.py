@@ -25,6 +25,7 @@ from transformers import (
 )
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
+from sglang_omni.models.moss_speech.flow_precision import BF16FlowDecoder
 from sglang_omni.models.moss_speech.request_builders import (
     MossSpeechState,
     RequestValidationError,
@@ -87,6 +88,7 @@ class MelExtractor(Protocol):
 
 
 class AudioDecoder(Protocol):
+    flow: torch.nn.Module
     feat_extractor: MelExtractor
     campplus_session: onnxruntime.InferenceSession
 
@@ -116,12 +118,18 @@ def codec_rng() -> Iterator[None]:
 
 class MossSpeechCodec:
     def __init__(
-        self, codec_path: str, device: torch.device, *, load_decoder: bool = True
+        self,
+        codec_path: str,
+        device: torch.device,
+        *,
+        load_decoder: bool = True,
+        flow_dtype: torch.dtype | None = None,
     ) -> None:
         self.device: torch.device = device
         self.reference_cache: OrderedDict[tuple[int, bytes], VoiceConditioning] = (
             OrderedDict()
         )
+        self.flow_dtype: torch.dtype | None = flow_dtype
         codec_directory = Path(codec_path)
         decoder_class = get_class_from_dynamic_module(
             "modeling_moss_speech_codec.AudioDecoder", codec_path, local_files_only=True
@@ -141,6 +149,13 @@ class MossSpeechCodec:
                 if load_decoder
                 else None
             )
+            if self.decoder is not None and flow_dtype is torch.bfloat16:
+                self.decoder.flow.bfloat16()
+                self.decoder.flow.decoder = BF16FlowDecoder(
+                    self.decoder.flow.decoder
+                ).eval()
+            else:
+                pass
             configuration = encoder_class.config_class.from_pretrained(codec_path)
             encoder = encoder_class(configuration).to(device, torch.float32).eval()
             checkpoint = load_file(str(codec_directory / "model.safetensors"))
@@ -363,6 +378,8 @@ class MossSpeechCodec:
             ),
         ):
             voice = self.encode_reference(state.reference_audio)
+            voice["prompt_feat"] = voice["prompt_feat"].to(dtype=self.flow_dtype)
+            voice["embedding"] = voice["embedding"].to(dtype=self.flow_dtype)
             random.seed(state.effective_seed)
             np.random.seed(state.effective_seed % (1 << 32))
             torch.manual_seed(state.effective_seed)
