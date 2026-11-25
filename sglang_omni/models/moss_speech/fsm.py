@@ -56,14 +56,59 @@ def next_mode(last_row: tuple[int, int] | torch.Tensor, current_mode: Mode) -> M
         return current_mode
 
 
+class RepetitionHistory:
+    """Keep the unique token IDs seen by each channel in the request's own buffers."""
+
+    def __init__(
+        self,
+        prompt_rows: torch.Tensor,
+        output_rows: list[tuple[int, int]],
+        device: torch.device,
+        capacity: int,
+    ) -> None:
+        self.prompt_rows = prompt_rows
+        self.seen: tuple[set[int], set[int]] = (set(), set())
+        for text, audio in prompt_rows.tolist():
+            self.seen[0].add(text)
+            self.seen[1].add(audio)
+        for text, audio in output_rows:
+            self.seen[0].add(text)
+            self.seen[1].add(audio)
+        self.ids = torch.empty((2, capacity), dtype=torch.long, device=device)
+        for channel, seen in enumerate(self.seen):
+            self.ids[channel, : len(seen)].copy_(
+                torch.tensor(list(seen), dtype=torch.long)
+            )
+        self.row_count = len(output_rows)
+        self.last_row = output_rows[-1] if output_rows else None
+
+    def append(self, row: tuple[int, int]) -> None:
+        for channel, token in enumerate(row):
+            seen = self.seen[channel]
+            if token not in seen:
+                self.ids[channel, len(seen)].fill_(token)
+                seen.add(token)
+            else:
+                pass
+        self.row_count += 1
+        self.last_row = row
+
+    def channels(self) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.ids[0, : len(self.seen[0])], self.ids[1, : len(self.seen[1])]
+
+
 def repetition_penalty_scores(
-    logits: torch.Tensor, history: torch.Tensor, penalty: float
+    logits: torch.Tensor,
+    history: torch.Tensor,
+    penalty: float,
+    *,
+    history_is_unique: bool = False,
 ) -> torch.Tensor:
     if penalty == 1.0 or history.numel() == 0:
         return logits
     else:
         scores = logits.clone()
-        seen = torch.unique(history)
+        seen = history if history_is_unique else torch.unique(history)
         seen_scores = scores[seen]
         scores[seen] = torch.where(
             seen_scores < 0, seen_scores * penalty, seen_scores / penalty
@@ -108,16 +153,24 @@ def sample_row(
     text_history: torch.Tensor,
     audio_history: torch.Tensor,
     generator: torch.Generator | None = None,
+    *,
+    history_is_unique: bool = False,
 ) -> tuple[int, int]:
     """Keep float upcasting, audio constraints, penalties, and RNG draw order."""
     text_scores = text_logits.detach().float().clone()
     audio_scores = audio_logits.detach().float().clone()
     audio_scores[AUDIO_FORBIDDEN_FROM:] = float("-inf")
     text_scores = repetition_penalty_scores(
-        text_scores, text_history, params.repetition_penalty
+        text_scores,
+        text_history,
+        params.repetition_penalty,
+        history_is_unique=history_is_unique,
     )
     audio_scores = repetition_penalty_scores(
-        audio_scores, audio_history, params.repetition_penalty
+        audio_scores,
+        audio_history,
+        params.repetition_penalty,
+        history_is_unique=history_is_unique,
     )
     if params.do_sample:
         text_scores = apply_warpers(text_scores, params)

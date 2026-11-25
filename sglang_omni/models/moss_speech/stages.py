@@ -14,6 +14,7 @@ from sglang_omni.models.moss_speech.engine_builder import MossSpeechEngineBuilde
 from sglang_omni.models.moss_speech.hf_config import (
     ensure_moss_speech_config_registered,
 )
+from sglang_omni.models.moss_speech.model_runner import MossSpeechModelRunner
 from sglang_omni.models.moss_speech.request_builders import (
     MossSpeechSGLangRequestData,
     preprocess_request,
@@ -54,8 +55,13 @@ def create_ar_engine_executor(
     total_gpu_memory_fraction: float | None = None,
     process_total_gpu_memory_fraction: float | None = None,
     server_args_overrides: Mapping[str, object] | None = None,
+    cache_repetition_history: bool = False,
 ) -> OmniScheduler[MossSpeechSGLangRequestData]:
-    return MossSpeechEngineBuilder().build(
+    if not isinstance(cache_repetition_history, bool):
+        raise ValueError("cache_repetition_history must be a boolean")
+    else:
+        pass
+    scheduler = MossSpeechEngineBuilder().build(
         model_path,
         device=device,
         gpu_id=gpu_id,
@@ -67,6 +73,12 @@ def create_ar_engine_executor(
             else total_gpu_memory_fraction
         ),
     )
+    if cache_repetition_history:
+        assert isinstance(scheduler.model_runner, MossSpeechModelRunner)
+        scheduler.model_runner.cache_repetition_history = True
+    else:
+        pass
+    return scheduler
 
 
 def create_audio_vocoder_executor(
