@@ -8,6 +8,7 @@ from weakref import ref
 import torch
 from torch.nn import functional as F
 
+from sglang_omni.models.moss_speech.flow_history_graph import HistoryTransaction
 from sglang_omni.models.moss_speech.flow_history_pages import (
     PagedHistoryPrefill,
     PageLayout,
@@ -119,3 +120,34 @@ def test_changed_voice_releases_old_graphs_and_retries_its_bank():
         budget.assert_called_once()
     assert native.step_bank is not None and native.step_views.mel_frames == 200
     assert torch.equal(native.step_bank[0, :400], torch.ones(400))
+
+
+def test_final_bucket_hides_extra_keys_and_returns_only_valid_frames():
+    shared = ReferencePrefix(reference_key=b"v", mel_frames=100)
+    target = PagedHistoryPrefill.__new__(PagedHistoryPrefill)
+    target.current = ContextVar(
+        "final-prefix", default=PrefixSolve(prefix=shared, prefill=False)
+    )
+    target.transaction = ContextVar(
+        "final-request", default=HistoryTransaction(history=None, final=True)
+    )
+    target.layout = Mock()
+    target.chunk_frames = 100
+    target.graph_final_flow = True
+    noise = torch.arange(245, dtype=torch.float32).reshape(1, 1, -1)
+    times = torch.tensor([0.0, 1.0])
+    mask = torch.ones_like(noise)
+    widths = []
+
+    def solve(noise, times, mu, mask, speaker, cond, streaming):
+        widths.append(mask.size(-1))
+        assert torch.equal(mask[..., :145], torch.ones_like(mask[..., :145]))
+        assert torch.count_nonzero(mask[..., 145:]) == 0
+        return mu * mask
+
+    for enabled in (True, False):
+        target.graph_final_flow = enabled
+        result = target.solve_euler(solve, noise, times, noise, mask, None, noise, True)
+        assert torch.equal(result[..., 100:], noise[..., 100:])
+        assert result.shape == noise.shape
+    assert widths == [200, 145]

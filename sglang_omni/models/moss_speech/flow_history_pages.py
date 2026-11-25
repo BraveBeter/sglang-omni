@@ -63,9 +63,12 @@ class PageStep:
 
 
 class PagedHistoryPrefill(PrivateHistoryPrefill):
-    def __init__(self, decoder: torch.nn.Module, steps: int):
+    def __init__(
+        self, decoder: torch.nn.Module, steps: int, *, graph_final_flow: bool = False
+    ):
         super().__init__(decoder)
         self.steps = steps
+        self.graph_final_flow = graph_final_flow
         self.layout: PageLayout | None = None
         self.active_pages: ContextVar[PageStep | None] = ContextVar(
             "moss_flow_pages", default=None
@@ -191,10 +194,33 @@ class PagedHistoryPrefill(PrivateHistoryPrefill):
             )
         else:
             pass
+        frames = mu.size(-1)
+        query_frames = frames - call.prefix.mel_frames
+        padding = -query_frames % self.chunk_frames
         try:
-            return StreamingReferencePrefill.solve_euler(
-                self, full_solver, noise, timesteps, mu, mask, spks, cond, streaming
-            )
+            if (
+                self.graph_final_flow
+                and tx.final
+                and padding
+                and query_frames + padding <= MAX_GRAPH_FRAMES
+            ):
+                # note (Codex): Masked keys allow the last natural chunk to reuse its graph without generating extra noise or audio.
+                result = StreamingReferencePrefill.solve_euler(
+                    self,
+                    full_solver,
+                    F.pad(noise, (0, padding)),
+                    timesteps,
+                    F.pad(mu, (0, padding)),
+                    F.pad(mask, (0, padding)),
+                    spks,
+                    F.pad(cond, (0, padding)),
+                    streaming,
+                )
+                return result[..., :frames]
+            else:
+                return StreamingReferencePrefill.solve_euler(
+                    self, full_solver, noise, timesteps, mu, mask, spks, cond, streaming
+                )
         finally:
             call.prefix = shared
 

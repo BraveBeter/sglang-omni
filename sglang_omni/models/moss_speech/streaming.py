@@ -138,6 +138,7 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
         emit_first_closed_chunk: bool = False,
         cache_streaming_history: bool = False,
         page_streaming_history: bool = False,
+        graph_final_flow: bool = False,
         first_hop_flow_steps: int | None = None,
     ) -> None:
         self.codec: MossSpeechCodec = codec
@@ -167,6 +168,7 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
         else:
             self.cache_streaming_history = cache_streaming_history
             self.page_streaming_history = page_streaming_history
+        self.graph_final_flow = graph_final_flow
         self.prefill_streaming_reference: bool = prefill_streaming_reference
         self.emit_first_closed_chunk = emit_first_closed_chunk
         if first_hop_flow_steps is not None and (
@@ -272,7 +274,9 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
                 decoder = flow.decoder.decoder
                 assert steps is not None
                 if steps == self.streaming_flow_steps and self.page_streaming_history:
-                    prefix = PagedHistoryPrefill(decoder, steps)
+                    prefix = PagedHistoryPrefill(
+                        decoder, steps, graph_final_flow=self.graph_final_flow
+                    )
                 elif (
                     steps == self.streaming_flow_steps and self.cache_streaming_history
                 ):

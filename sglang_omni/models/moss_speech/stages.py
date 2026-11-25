@@ -97,6 +97,7 @@ def create_audio_vocoder_executor(
     emit_first_closed_chunk: bool = False,
     cache_streaming_history: bool = False,
     page_streaming_history: bool = False,
+    graph_final_flow: bool = False,
     first_flow_batch_size: Literal[1, 2, 4] = 1,
     first_hop_flow_steps: Literal[2] | None = None,
     device: str | None = None,
@@ -106,7 +107,9 @@ def create_audio_vocoder_executor(
         raise ValueError("Set audio_vocoder.factory.codec_path")
     else:
         pass
-    if page_streaming_history and flow_slots is not None:
+    if graph_final_flow and not page_streaming_history:
+        raise ValueError("graph_final_flow requires page_streaming_history")
+    elif page_streaming_history and flow_slots is not None:
         raise ValueError("Paged streaming history requires a streaming Flow worker")
     else:
         pass
@@ -165,6 +168,7 @@ def create_audio_vocoder_executor(
             emit_first_closed_chunk=emit_first_closed_chunk,
             cache_streaming_history=cache_streaming_history,
             page_streaming_history=page_streaming_history,
+            graph_final_flow=graph_final_flow,
             first_hop_flow_steps=first_hop_flow_steps,
         )
         if isinstance(worker, FirstBatchStreamingVocoder):

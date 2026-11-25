@@ -40,6 +40,7 @@ class MossSpeechFlowArgs(MossSpeechVocoderArgs):
     emit_first_closed_chunk: bool = False
     cache_streaming_history: bool = False
     page_streaming_history: bool = False
+    graph_final_flow: bool = False
     first_flow_batch_size: Literal[1, 2, 4] = 1
     first_hop_flow_steps: Literal[2] | None = None
 
@@ -100,6 +101,7 @@ class MossSpeechPipelineConfig(PipelineConfig):
             return
         elif (
             factory.streaming_flow_steps is not None
+            or factory.graph_final_flow
             or factory.page_streaming_history
             or factory.prefill_streaming_reference
             or factory.first_flow_batch_size != 1
