@@ -88,11 +88,12 @@ def create_audio_vocoder_executor(
     *,
     codec_path: str | None,
     flow_dtype: Literal["float32", "bfloat16"],
+    streaming_flow_steps: int | None = None,
     flow_slots: Literal[1, 2] | None = None,
     terminal_flow_steps: int | None = None,
     device: str | None = None,
     gpu_id: int | None = None,
-) -> MossSpeechStreamingVocoder:
+) -> MossSpeechStreamingVocoder | SimpleScheduler[StagePayload, StagePayload]:
     if codec_path is None:
         raise ValueError("Set audio_vocoder.factory.codec_path")
     else:
@@ -126,4 +127,5 @@ def create_audio_vocoder_executor(
             Path(codec_path),
             tokenizer,
             flow_dtype=codec.flow_dtype,
+            streaming_flow_steps=streaming_flow_steps,
         )
