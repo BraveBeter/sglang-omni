@@ -28,6 +28,9 @@ from sglang_omni.models.moss_speech.request_builders import (
     RequestValidationError,
     extract_output_codes,
 )
+from sglang_omni.models.moss_speech.streaming_flow_graph import (
+    install_streaming_estimator_graphs,
+)
 from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.message import OutgoingMessage
 from sglang_omni.scheduling.streaming_vocoder import StreamingVocoderBase
@@ -201,6 +204,15 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
                     pass
                 install_flow_attention_broadcast(flow.decoder)
                 self.flow = flow.to(self.codec.device).eval()
+                if (
+                    self.flow_dtype is torch.bfloat16
+                    and self.codec.device.type == "cuda"
+                ):
+                    install_streaming_estimator_graphs(
+                        flow.decoder.decoder, self.codec.device
+                    )
+                else:
+                    pass
         else:
             pass
 
