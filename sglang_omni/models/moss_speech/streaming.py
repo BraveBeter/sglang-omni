@@ -122,6 +122,7 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
         flow_dtype: torch.dtype | None = None,
         streaming_flow_steps: int | None = None,
         prefill_streaming_reference: bool = False,
+        streaming_chunks_per_decode: int = 1,
         emit_first_closed_chunk: bool = False,
     ) -> None:
         self.codec: MossSpeechCodec = codec
@@ -138,6 +139,10 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
             )
         else:
             pass
+        if streaming_chunks_per_decode < 1:
+            raise ValueError("streaming_chunks_per_decode must be positive")
+        else:
+            self.streaming_chunks_per_decode = streaming_chunks_per_decode
         self.prefill_streaming_reference: bool = prefill_streaming_reference
         self.emit_first_closed_chunk = emit_first_closed_chunk
         self.flow: StreamingFlow | None = None
@@ -266,14 +271,13 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
         assert flow is not None and voice is not None and decoder is not None
         device = self.codec.device
         prompt_codes = voice["prompt_token"].shape[1]
-        committed_codes = state.decoded_codes + STREAM_CHUNK_CODES
         if is_final:
             committed_codes = available_codes = len(state.codes)
         else:
             if state.decoded_codes == 0:
                 # note (Codex): Flow's chunk grid begins at the first voice prompt code.
                 first_boundary_codes = -prompt_codes % STREAM_CHUNK_CODES
-                committed_codes += first_boundary_codes
+                committed_codes = STREAM_CHUNK_CODES + first_boundary_codes
                 if (
                     self.emit_first_closed_chunk
                     and first_boundary_codes * flow.token_mel_ratio
@@ -283,8 +287,14 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
                     committed_codes = first_boundary_codes
                 else:
                     pass
+            elif state.decoded_codes < STREAM_CHUNK_CODES:
+                # A short first block has too little PCM to wait a steady-state interval.
+                committed_codes = state.decoded_codes + STREAM_CHUNK_CODES
             else:
-                pass
+                committed_codes = (
+                    state.decoded_codes
+                    + STREAM_CHUNK_CODES * self.streaming_chunks_per_decode
+                )
             available_codes = committed_codes + flow.pre_lookahead_len
             if available_codes > len(state.codes):
                 return None

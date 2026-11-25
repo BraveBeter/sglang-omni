@@ -92,6 +92,7 @@ def create_audio_vocoder_executor(
     prefill_streaming_reference: bool = False,
     flow_slots: Literal[1, 2] | None = None,
     terminal_flow_steps: int | None = None,
+    streaming_chunks_per_decode: int = 1,
     emit_first_closed_chunk: bool = False,
     device: str | None = None,
     gpu_id: int | None = None,
@@ -132,4 +133,5 @@ def create_audio_vocoder_executor(
             streaming_flow_steps=streaming_flow_steps,
             prefill_streaming_reference=prefill_streaming_reference,
             emit_first_closed_chunk=emit_first_closed_chunk,
+            streaming_chunks_per_decode=streaming_chunks_per_decode,
         )
