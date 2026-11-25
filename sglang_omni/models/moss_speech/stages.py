@@ -95,11 +95,16 @@ def create_audio_vocoder_executor(
     streaming_chunks_per_decode: int = 1,
     emit_first_closed_chunk: bool = False,
     cache_streaming_history: bool = False,
+    page_streaming_history: bool = False,
     device: str | None = None,
     gpu_id: int | None = None,
 ) -> MossSpeechStreamingVocoder | SimpleScheduler[StagePayload, StagePayload]:
     if codec_path is None:
         raise ValueError("Set audio_vocoder.factory.codec_path")
+    else:
+        pass
+    if page_streaming_history and flow_slots is not None:
+        raise ValueError("Paged streaming history requires a streaming Flow worker")
     else:
         pass
     codec_class = MossSpeechConcurrentCodec if flow_slots == 2 else MossSpeechCodec
@@ -136,4 +141,5 @@ def create_audio_vocoder_executor(
             streaming_chunks_per_decode=streaming_chunks_per_decode,
             emit_first_closed_chunk=emit_first_closed_chunk,
             cache_streaming_history=cache_streaming_history,
+            page_streaming_history=page_streaming_history,
         )

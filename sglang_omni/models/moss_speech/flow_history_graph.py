@@ -7,6 +7,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from math import prod
 from threading import get_ident
+from typing import Generic, TypeVar
 
 import torch
 import torch.nn.functional as F
@@ -30,13 +31,16 @@ class PrivateHistoryBank:
     steps: tuple[ReferencePrefix, ...]
 
 
+HistoryBank = TypeVar("HistoryBank")
+
+
 @dataclass
-class HistoryTransaction:
-    history: PrivateHistoryBank | None
+class HistoryTransaction(Generic[HistoryBank]):
+    history: HistoryBank | None
     final: bool
     keep_frames: int = 0
     read_history: bool = False
-    candidate: PrivateHistoryBank | None = None
+    candidate: HistoryBank | None = None
     written_steps: int = 0
 
 

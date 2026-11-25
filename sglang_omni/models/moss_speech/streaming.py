@@ -26,6 +26,11 @@ from sglang_omni.models.moss_speech.flow_history_graph import (
     PrivateHistoryPrefill,
     StreamingPrivateHistoryGraphs,
 )
+from sglang_omni.models.moss_speech.flow_history_pages import (
+    PagedHistory,
+    PagedHistoryPrefill,
+    StreamingPagedHistoryGraphs,
+)
 from sglang_omni.models.moss_speech.flow_precision import FlowEulerDecoder
 from sglang_omni.models.moss_speech.flow_prefix import (
     StreamingFlow,
@@ -108,7 +113,7 @@ class MossSpeechStreamState:
     codes: list[int] = field(default_factory=list)
     decoded_codes: int = 0
     emitted_samples: int = 0
-    private_history: PrivateHistoryBank | None = None
+    private_history: PrivateHistoryBank | PagedHistory | None = None
     cpu_rng: torch.Tensor | None = None
     cuda_rng: torch.Tensor | None = None
     overlap_mel: torch.Tensor | None = None
@@ -129,6 +134,7 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
         streaming_chunks_per_decode: int = 1,
         emit_first_closed_chunk: bool = False,
         cache_streaming_history: bool = False,
+        page_streaming_history: bool = False,
     ) -> None:
         self.codec: MossSpeechCodec = codec
         self.codec_path: Path = codec_path
@@ -148,10 +154,15 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
             raise ValueError("streaming_chunks_per_decode must be positive")
         else:
             self.streaming_chunks_per_decode = streaming_chunks_per_decode
-        if cache_streaming_history and not prefill_streaming_reference:
+        if cache_streaming_history and page_streaming_history:
+            raise ValueError("Select one streaming history mode")
+        elif (
+            cache_streaming_history or page_streaming_history
+        ) and not prefill_streaming_reference:
             raise ValueError("Streaming history requires prefill_streaming_reference")
         else:
             self.cache_streaming_history = cache_streaming_history
+            self.page_streaming_history = page_streaming_history
         self.prefill_streaming_reference: bool = prefill_streaming_reference
         self.emit_first_closed_chunk = emit_first_closed_chunk
         self.flow: StreamingFlow | None = None
@@ -238,17 +249,24 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
                     flow.decoder.decoder.forward_estimator, StreamingEstimatorGraphs
                 ):
                     decoder = flow.decoder.decoder
-                    prefill = (
-                        PrivateHistoryPrefill(decoder)
-                        if self.cache_streaming_history
-                        else StreamingReferencePrefill(decoder)
-                    )
-                    self.reference_prefix = prefill
                     assert self.streaming_flow_steps is not None
+                    if self.page_streaming_history:
+                        prefill = PagedHistoryPrefill(
+                            decoder, self.streaming_flow_steps
+                        )
+                    elif self.cache_streaming_history:
+                        prefill = PrivateHistoryPrefill(decoder)
+                    else:
+                        prefill = StreamingReferencePrefill(decoder)
+                    self.reference_prefix = prefill
                     native = StreamingReferenceGraphs(
                         decoder.forward_estimator, prefill, self.streaming_flow_steps
                     )
-                    if isinstance(prefill, PrivateHistoryPrefill):
+                    if isinstance(prefill, PagedHistoryPrefill):
+                        decoder.forward_estimator = StreamingPagedHistoryGraphs(
+                            native, prefill
+                        )
+                    elif isinstance(prefill, PrivateHistoryPrefill):
                         decoder.forward_estimator = StreamingPrivateHistoryGraphs(
                             native, prefill
                         )
