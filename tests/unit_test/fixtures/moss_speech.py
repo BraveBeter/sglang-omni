@@ -3,6 +3,7 @@
 
 import base64
 import io
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -79,6 +80,7 @@ class OfflineDecoder(torch.nn.Module):
 def make_codec() -> MossSpeechCodec:
     codec = object.__new__(MossSpeechCodec)
     codec.device = torch.device("cpu")
+    codec.reference_cache = OrderedDict()
     codec.decoder = OfflineDecoder()
     codec.encoder = ReferenceEncoder()
     codec.feature_extractor = WhisperFeatureExtractor()

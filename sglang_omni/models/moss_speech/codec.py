@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import random
+from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -38,6 +40,7 @@ from sglang_omni.utils.audio import (
 
 SAMPLE_RATE_HZ = 24000
 MAX_REFERENCE_SECONDS = 30
+MAX_REFERENCE_CACHE_ENTRIES = 16
 
 
 class MossSpeechAudioBytes(MediaIO[bytes]):
@@ -116,6 +119,9 @@ class MossSpeechCodec:
         self, codec_path: str, device: torch.device, *, load_decoder: bool = True
     ) -> None:
         self.device: torch.device = device
+        self.reference_cache: OrderedDict[tuple[int, bytes], VoiceConditioning] = (
+            OrderedDict()
+        )
         codec_directory = Path(codec_path)
         decoder_class = get_class_from_dynamic_module(
             "modeling_moss_speech_codec.AudioDecoder", codec_path, local_files_only=True
@@ -231,7 +237,33 @@ class MossSpeechCodec:
         samples, reference_sample_rate = load_audio(
             reference_audio, source_name="reference audio", preserve_sample_rate=True
         )
-        reference_waveform = torch.from_numpy(samples).unsqueeze(0)
+        reference_key = (
+            reference_sample_rate,
+            hashlib.sha256(np.ascontiguousarray(samples)).digest(),
+        )
+        conditioning = self.reference_cache.get(reference_key)
+        if conditioning is None:
+            conditioning = self.prepare_reference(
+                torch.from_numpy(samples).unsqueeze(0), reference_sample_rate
+            )
+            self.reference_cache[reference_key] = conditioning
+            if len(self.reference_cache) > MAX_REFERENCE_CACHE_ENTRIES:
+                self.reference_cache.popitem(last=False)
+            else:
+                pass
+        else:
+            self.reference_cache.move_to_end(reference_key)
+        # Note (BraveBeter): Each decoder call owns its inputs even when the reference is shared.
+        return VoiceConditioning(
+            prompt_token=conditioning["prompt_token"].clone(),
+            prompt_feat=conditioning["prompt_feat"].clone(),
+            embedding=conditioning["embedding"].clone(),
+        )
+
+    def prepare_reference(
+        self, reference_waveform: torch.Tensor, reference_sample_rate: int
+    ) -> VoiceConditioning:
+        assert self.decoder is not None
         waveform = torchaudio.transforms.Resample(
             reference_sample_rate, SAMPLE_RATE_HZ
         )(reference_waveform)
@@ -354,5 +386,6 @@ class MossSpeechCodec:
         )
 
     def close(self) -> None:
+        self.reference_cache.clear()
         self.decoder = None
         self.encoder = None

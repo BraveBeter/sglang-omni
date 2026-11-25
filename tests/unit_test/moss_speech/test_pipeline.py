@@ -309,6 +309,33 @@ def test_stereo_reference_downmix_preserves_native_sample_rate(tmp_path: Path) -
     np.testing.assert_array_equal(waveform, torch.from_numpy(samples.T).mean(dim=0))
 
 
+def test_reference_cache_reuses_content_and_isolates_requests(tmp_path: Path) -> None:
+    codec = make_codec()
+    preparation = Mock(wraps=codec.prepare_reference)
+    path = tmp_path / "reference.wav"
+    original = audio_reference()
+    path.write_bytes(base64.b64decode(original.split(",", 1)[1]))
+    with patch.object(codec, "prepare_reference", preparation):
+        cold = codec.encode_reference(str(path))
+        warm = codec.encode_reference(original)
+        assert preparation.call_count == 1
+        assert all(torch.equal(cold[name], warm[name]) for name in cold)
+        with torch.inference_mode():
+            warm["prompt_feat"].zero_()
+        assert torch.equal(
+            codec.encode_reference(path.as_uri())["prompt_feat"], cold["prompt_feat"]
+        )
+
+        replacement = audio_reference(frequency_hz=440)
+        path.write_bytes(base64.b64decode(replacement.split(",", 1)[1]))
+        changed = codec.encode_reference(str(path))
+        assert preparation.call_count == 2
+        assert not torch.equal(changed["prompt_feat"], cold["prompt_feat"])
+
+    codec.close()
+    assert not codec.reference_cache
+
+
 @pytest.mark.parametrize("sample_count", [1, 31 * 24000])
 def test_reference_duration_is_validated(tmp_path: Path, sample_count: int) -> None:
     path = tmp_path / "invalid-duration.wav"
