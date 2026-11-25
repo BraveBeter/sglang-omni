@@ -23,6 +23,7 @@ from sglang_omni.models.moss_speech.fsm import (
     TEXT_VOCAB,
     Mode,
     MossSamplingParams,
+    RepetitionHistory,
     apply_warpers,
     channel_histories,
     finalize_row,
@@ -302,3 +303,22 @@ def test_sampled_tokens_use_engine_termination_state(
     result = MossSpeechState.from_dict(build_result(native).data)
     assert result.finish_reason == termination
     assert result.completion_token_count == 2
+
+
+def test_cached_repetition_scores_match_complete_dual_channel_history() -> None:
+    prompt = torch.tensor([[1, 3], [1, 2], [5, 3]])
+    generated = [(2, 4), (2, 4)]
+    cache = RepetitionHistory(prompt, generated, torch.device("cpu"), 16)
+    logits = torch.tensor([0.0, -1.25, 0.5, 2.0, -3.0, 4.75])
+    for row in [(2, 5), (0, 3), (2, 4)]:
+        cache.append(row)
+        generated.append(row)
+        for old, current in zip(
+            channel_histories(prompt, generated), cache.channels(), strict=True
+        ):
+            expected = repetition_penalty_scores(logits, old, 1.1)
+            actual = repetition_penalty_scores(
+                logits, current, 1.1, history_is_unique=True
+            )
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+            assert len(current) == len(set(old.tolist()))

@@ -24,6 +24,7 @@ from sglang_omni.models.moss_speech.fsm import (
     TEXT_VOCAB,
     Mode,
     MossSamplingParams,
+    RepetitionHistory,
     initial_mode,
 )
 from sglang_omni.models.moss_speech.hf_config import MAX_CONTEXT_TOKENS
@@ -109,6 +110,7 @@ class MossSpeechSGLangRequestData(SGLangARRequestData):
     params: MossSamplingParams = field(default_factory=MossSamplingParams)
     effective_seed: int = 0
     rng_generator: torch.Generator | None = None
+    repetition_history: RepetitionHistory | None = None
 
 
 def preprocess_request(

@@ -15,12 +15,14 @@ from sglang_omni.model_runner.prefill_inputs import (
     attach_omni_prefill_inputs,
 )
 from sglang_omni.models.moss_speech.fsm import (
+    RepetitionHistory,
     channel_histories,
     finalize_row,
     next_mode,
     row_selected_token,
     sample_row,
 )
+from sglang_omni.models.moss_speech.hf_config import MAX_CONTEXT_TOKENS
 from sglang_omni.models.moss_speech.request_builders import MossSpeechSGLangRequestData
 from sglang_omni.models.moss_speech.sglang_model import (
     MossSpeechModelOutput,
@@ -36,6 +38,8 @@ def moss_request_data(request: SchedulerRequest) -> MossSpeechSGLangRequestData:
 
 
 class MossSpeechModelRunner(ModelRunner[MossSpeechSGLangRequestData]):
+    cache_repetition_history: bool = False
+
     def __init__(
         self, tp_worker: ModelWorker, output_processor: SGLangOutputProcessor
     ) -> None:
@@ -155,9 +159,42 @@ class MossSpeechModelRunner(ModelRunner[MossSpeechSGLangRequestData]):
                 else request_data.prompt_rows[-1]
             )
             request_data.mode = next_mode(last_row, request_data.mode)
-            text_history, audio_history = channel_histories(
-                request_data.prompt_rows, request_data.output_rows
-            )
+            history = None
+            if (
+                self.cache_repetition_history
+                and request_data.params.repetition_penalty != 1.0
+            ):
+                history = request_data.repetition_history
+                if (
+                    history is None
+                    or history.prompt_rows is not request_data.prompt_rows
+                    or history.ids.device != logits_device
+                    or history.row_count != len(request_data.output_rows)
+                    or history.last_row
+                    != (
+                        request_data.output_rows[-1]
+                        if request_data.output_rows
+                        else None
+                    )
+                ):
+                    capacity = len(request_data.prompt_rows) + max(
+                        len(request_data.output_rows) + 1,
+                        request_data.max_new_tokens or MAX_CONTEXT_TOKENS,
+                    )
+                    history = RepetitionHistory(
+                        request_data.prompt_rows,
+                        request_data.output_rows,
+                        logits_device,
+                        capacity,
+                    )
+                    request_data.repetition_history = history
+                else:
+                    pass
+                text_history, audio_history = history.channels()
+            else:
+                text_history, audio_history = channel_histories(
+                    request_data.prompt_rows, request_data.output_rows
+                )
             generator = (
                 self.generator_for(request_data, logits_device)
                 if request_data.params.do_sample
@@ -170,9 +207,14 @@ class MossSpeechModelRunner(ModelRunner[MossSpeechSGLangRequestData]):
                 text_history.to(logits_device),
                 audio_history.to(logits_device),
                 generator,
+                history_is_unique=history is not None,
             )
             row = finalize_row(text_token, audio_token, request_data.mode)
             request_data.output_rows.append(row)
+            if history is not None:
+                history.append(row)
+            else:
+                pass
             selected_tokens.append(row_selected_token(row))
         return torch.tensor(selected_tokens, dtype=torch.long, device=logits_device)
 
