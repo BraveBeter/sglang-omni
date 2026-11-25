@@ -26,10 +26,7 @@ from sglang_omni.models.moss_speech.flow_prefix import (
     StreamingReferencePrefill,
     reference_prefix_key,
 )
-from sglang_omni.models.moss_speech.flow_prefix_graph import (
-    REFERENCE_GRAPH_STEPS,
-    StreamingReferenceGraphs,
-)
+from sglang_omni.models.moss_speech.flow_prefix_graph import StreamingReferenceGraphs
 from sglang_omni.models.moss_speech.fsm import EOSP, MODALITY_PAD
 from sglang_omni.models.moss_speech.request_builders import (
     MossSpeechSGLangRequestData,
@@ -132,10 +129,10 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
         if prefill_streaming_reference and (
             flow_dtype is not torch.bfloat16
             or codec.device.type != "cuda"
-            or streaming_flow_steps != REFERENCE_GRAPH_STEPS
+            or streaming_flow_steps not in (3, 4)
         ):
             raise ValueError(
-                "Streaming reference prefill requires four streaming Flow steps in BF16 on CUDA"
+                "Streaming reference prefill requires three or four streaming Flow steps in BF16 on CUDA"
             )
         else:
             pass
@@ -230,8 +227,11 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
                 ):
                     decoder = flow.decoder.decoder
                     self.reference_prefix = StreamingReferencePrefill(decoder)
+                    assert self.streaming_flow_steps is not None
                     decoder.forward_estimator = StreamingReferenceGraphs(
-                        decoder.forward_estimator, self.reference_prefix
+                        decoder.forward_estimator,
+                        self.reference_prefix,
+                        self.streaming_flow_steps,
                     )
                 else:
                     pass

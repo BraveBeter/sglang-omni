@@ -14,16 +14,18 @@ from sglang_omni.models.moss_speech.streaming_flow_graph import (
     StreamingEstimatorGraphs,
 )
 
-REFERENCE_GRAPH_STEPS = 4
-
 
 class StreamingReferenceGraphs(StreamingEstimatorGraphs):
     def __init__(
-        self, full_graphs: StreamingEstimatorGraphs, prefill: StreamingReferencePrefill
+        self,
+        full_graphs: StreamingEstimatorGraphs,
+        prefill: StreamingReferencePrefill,
+        steps: int,
     ) -> None:
         super().__init__(full_graphs.estimator, full_graphs.owner_stream.device)
         self.full_graphs: StreamingEstimatorGraphs = full_graphs
         self.prefill: StreamingReferencePrefill = prefill
+        self.steps = steps
         self.reference: ReferencePrefix | None = None
         self.step_bank: torch.Tensor | None = None
         self.step_buffer: torch.Tensor | None = None
@@ -45,10 +47,8 @@ class StreamingReferenceGraphs(StreamingEstimatorGraphs):
             self.step_buffer = None
         else:
             pass
-        key_count, extra_keys = divmod(len(prefix.key_values), REFERENCE_GRAPH_STEPS)
-        tail_count, extra_tails = divmod(
-            len(prefix.convolution_tails), REFERENCE_GRAPH_STEPS
-        )
+        key_count, extra_keys = divmod(len(prefix.key_values), self.steps)
+        tail_count, extra_tails = divmod(len(prefix.convolution_tails), self.steps)
         assert key_count and tail_count and not extra_keys and not extra_tails
         tensors = prefix.key_values[:key_count] + prefix.convolution_tails[:tail_count]
         sizes = [tensor.numel() for tensor in tensors]
@@ -57,7 +57,7 @@ class StreamingReferenceGraphs(StreamingEstimatorGraphs):
         allocation_bytes = (
             elements
             * template.element_size()
-            * (REFERENCE_GRAPH_STEPS + int(self.step_buffer is None))
+            * (self.steps + int(self.step_buffer is None))
         )
         free_bytes, _ = torch.cuda.mem_get_info(template.device)
         if free_bytes < allocation_bytes + MIN_CAPTURE_FREE_BYTES:
@@ -79,10 +79,10 @@ class StreamingReferenceGraphs(StreamingEstimatorGraphs):
             self.step_buffer = buffer
         else:
             pass
-        bank = template.new_empty((REFERENCE_GRAPH_STEPS, elements))
+        bank = template.new_empty((self.steps, elements))
         keys: list[torch.Tensor] = []
         tails: list[torch.Tensor] = []
-        for step in range(REFERENCE_GRAPH_STEPS):
+        for step in range(self.steps):
             key_start = step * key_count
             tail_start = step * tail_count
             sources = (

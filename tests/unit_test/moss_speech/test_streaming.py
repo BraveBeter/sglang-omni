@@ -93,10 +93,10 @@ def test_streaming_flow_steps_must_be_positive(steps: int) -> None:
         MossSpeechFlowArgs(streaming_flow_steps=steps)
 
 
-@pytest.mark.parametrize("steps", [None, 6, 10])
-def test_reference_graphs_require_the_four_step_grid(steps: int | None) -> None:
+@pytest.mark.parametrize("steps", [None, 2, 6, 10])
+def test_reference_graphs_require_supported_step_grid(steps: int | None) -> None:
     codec = Mock(device=torch.device("cuda:0"))
-    with pytest.raises(ValueError, match="four streaming Flow steps"):
+    with pytest.raises(ValueError, match="three or four streaming Flow steps"):
         MossSpeechStreamingVocoder(
             codec,
             Path("codec"),
