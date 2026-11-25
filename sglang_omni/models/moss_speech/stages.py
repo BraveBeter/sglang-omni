@@ -98,6 +98,7 @@ def create_audio_vocoder_executor(
     cache_streaming_history: bool = False,
     page_streaming_history: bool = False,
     first_flow_batch_size: Literal[1, 2, 4] = 1,
+    first_hop_flow_steps: Literal[2] | None = None,
     device: str | None = None,
     gpu_id: int | None = None,
 ) -> MossSpeechStreamingVocoder | SimpleScheduler[StagePayload, StagePayload]:
@@ -164,6 +165,7 @@ def create_audio_vocoder_executor(
             emit_first_closed_chunk=emit_first_closed_chunk,
             cache_streaming_history=cache_streaming_history,
             page_streaming_history=page_streaming_history,
+            first_hop_flow_steps=first_hop_flow_steps,
         )
         if isinstance(worker, FirstBatchStreamingVocoder):
             worker.first_batch_size = first_flow_batch_size

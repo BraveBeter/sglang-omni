@@ -2,6 +2,8 @@
 """Admission order for a burst of already queued streaming code packets."""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+from contextvars import ContextVar
 from queue import SimpleQueue
 from threading import Event, RLock
 from types import SimpleNamespace
@@ -9,12 +11,35 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from test_streaming import TestFlow, first_chunk_vocoder
 
 from sglang_omni.models.moss_speech import stages
 from sglang_omni.models.moss_speech.batched_streaming import FirstBatchStreamingVocoder
+from sglang_omni.models.moss_speech.flow_history_pages import (
+    PagedHistory,
+    PagedHistoryPrefill,
+)
 from sglang_omni.models.moss_speech.streaming import MossSpeechStreamState
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.scheduling.message import IncomingMessage
+
+
+@pytest.mark.parametrize("steps", [None, 2])
+def test_serving_thread_loads_only_the_configured_single_grid(
+    steps: int | None,
+) -> None:
+    worker = object.__new__(FirstBatchStreamingVocoder)
+    worker.first_hop_flow_steps = steps
+    worker.first_flow = None
+    single, prefix = Mock(), Mock()
+    worker.load_streaming_flow = Mock(return_value=(single, prefix))
+    worker.warm_up_serving_thread()
+    worker.warm_up_serving_thread()
+    if steps is None:
+        worker.load_streaming_flow.assert_not_called()
+    else:
+        worker.load_streaming_flow.assert_called_once_with(2)
+        assert worker.first_flow is single and worker.first_reference_prefix is prefix
 
 
 def test_already_queued_packets_preserve_first_and_refill_boundaries() -> None:
@@ -300,3 +325,54 @@ def test_first_hop_unavailable_uses_single_row_fallback(first_hop_worker, unavai
     )
     assert worker.failed_reference == (b"shared" if unavailable == "oom" else None)
     worker.abort_callback.assert_not_called()
+
+
+@pytest.mark.parametrize("batched", [True, False])
+def test_first_hop_grids_leave_paged_history_for_the_following_hop(batched):
+    worker = first_chunk_vocoder(342, True, 3)
+    history = PagedHistoryPrefill.__new__(PagedHistoryPrefill)
+    history.transaction = ContextVar("test_flow_history", default=None)
+    history.for_voice = Mock(return_value=nullcontext())
+    worker.reference_prefix = history
+    worker.streaming_flow_steps = 3
+    worker.first_hop_flow_steps = 2
+    worker.first_flow = TestFlow()
+    worker.first_reference_prefix = Mock()
+    worker.first_reference_prefix.for_voice.return_value = nullcontext()
+    first_inference = worker.first_flow.inference
+
+    def first(**kwargs):
+        assert history.transaction.get() is None
+        return first_inference(**kwargs)
+
+    worker.first_flow.inference = Mock(side_effect=first)
+    native = worker.flow.inference
+    pages = PagedHistory((torch.ones(2),))
+
+    def steady(**kwargs):
+        tx = history.transaction.get()
+        assert tx is not None
+        if kwargs["finalize"]:
+            assert tx.history is pages
+        else:
+            assert tx.history is None
+            tx.candidate = pages
+            tx.written_steps = 3
+        return native(**kwargs)
+
+    worker.flow.inference = Mock(side_effect=steady)
+    state = worker.create_stream_state("row")
+    worker.latch_stream_contract(
+        "row", state, {"reference_audio": "test", "effective_seed": 17}, origin="test"
+    )
+    state.codes = list(range(11))
+    prepared = torch.ones(1, 1, 32) if batched else None
+    worker.decode_delta("row", state, is_final=False, prepared_mel=prepared)
+    assert state.private_history is None
+    assert worker.first_flow.inference.call_count == int(not batched)
+    worker.flow.inference.assert_not_called()
+    state.codes.extend(range(11, 36))
+    worker.decode_delta("row", state, is_final=False)
+    assert state.private_history is pages
+    worker.decode_delta("row", state, is_final=True)
+    assert state.private_history is None and state.emitted_samples == 36 * 1920
