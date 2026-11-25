@@ -6,7 +6,12 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from diffusers.models.attention_processor import Attention
 
+from sglang_omni.models.moss_speech.flow_attention import (
+    install_flow_attention_broadcast,
+)
+from sglang_omni.models.moss_speech.flow_precision import BF16FlowDecoder
 from sglang_omni.models.moss_speech.fsm import AUDIO_PAD, EOSP, MODALITY_PAD, SOSP
 from sglang_omni.models.moss_speech.request_builders import (
     RequestValidationError,
@@ -25,6 +30,26 @@ from tests.unit_test.fixtures.moss_speech import (
     audio_reference,
     make_codec,
 )
+
+
+@pytest.mark.parametrize("flow_dtype", [torch.float32, torch.bfloat16])
+def test_broadcast_preserves_causal_attention_values(flow_dtype: torch.dtype) -> None:
+    attention = Attention(query_dim=8, heads=2, dim_head=4).to(dtype=flow_dtype)
+    hidden_states = torch.arange(32, dtype=flow_dtype).reshape(1, 4, 8) / 32
+    attention_bias = torch.full((1, 4, 4), float("-inf"), dtype=flow_dtype).triu(1)
+    expected = attention(hidden_states, attention_mask=attention_bias)
+
+    decoder = torch.nn.Module()
+    decoder.estimator = attention
+    install_flow_attention_broadcast(
+        BF16FlowDecoder(decoder) if flow_dtype is torch.bfloat16 else decoder
+    )
+
+    broadcast_bias = attention.prepare_attention_mask(attention_bias, 4, 1)
+    assert broadcast_bias.stride(1) == 0
+    torch.testing.assert_close(
+        attention(hidden_states, attention_mask=attention_bias), expected
+    )
 
 
 class TestFlow:
