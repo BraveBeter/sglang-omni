@@ -14,6 +14,7 @@ import torch
 
 from sglang_omni.models.moss_speech.codec import MossSpeechCodec, VoiceConditioning
 from sglang_omni.models.moss_speech.concurrent_codec import MossSpeechConcurrentCodec
+from sglang_omni.models.moss_speech.flow_precision import FlowEulerDecoder
 from sglang_omni.models.moss_speech.request_builders import MossSpeechState
 from sglang_omni.models.moss_speech.stages import create_audio_vocoder_executor
 from tests.unit_test.fixtures.accelerator import require_cuda
@@ -63,6 +64,26 @@ def test_factory_routes_flow_slots_to_codec_and_scheduler(
         assert scheduler.fn.func == selected.return_value.decode
         scheduler.stop()
         selected.return_value.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    ("steps", "streaming", "expected"),
+    [(None, False, 10), (4, False, 4), (6, False, 6), (4, True, 10)],
+)
+def test_terminal_euler_grid(steps: int | None, streaming: bool, expected: int) -> None:
+    native = torch.nn.Module()
+    native.rand_noise = torch.ones(1, 2, 5)
+    native.t_scheduler = "cosine"
+    wrapper = FlowEulerDecoder(native, terminal_flow_steps=steps)
+    mu = torch.zeros(1, 2, 3, dtype=torch.bfloat16)
+    with patch.object(native, "solve_euler", create=True, return_value=mu) as solve:
+        output, cache = wrapper(mu, torch.ones(1, 1, 3), 10, streaming=streaming)
+    assert output is mu and cache is None
+    noise, grid, *_ = solve.call_args.args
+    torch.testing.assert_close(noise, torch.ones_like(mu))
+    expected_grid = torch.linspace(0, 1, expected + 1, dtype=mu.dtype)
+    torch.testing.assert_close(grid, 1 - torch.cos(expected_grid * 0.5 * torch.pi))
+    assert solve.call_args.kwargs == {"streaming": streaming}
 
 
 @pytest.mark.accelerator

@@ -75,6 +75,7 @@ def create_audio_vocoder_executor(
     codec_path: str | None,
     flow_dtype: Literal["float32", "bfloat16"],
     flow_slots: Literal[1, 2] = 1,
+    terminal_flow_steps: int | None = None,
     device: str | None = None,
     gpu_id: int | None = None,
 ) -> SimpleScheduler[StagePayload, StagePayload]:
@@ -83,10 +84,20 @@ def create_audio_vocoder_executor(
     else:
         pass
     codec_class = MossSpeechConcurrentCodec if flow_slots == 2 else MossSpeechCodec
+    if terminal_flow_steps is not None and terminal_flow_steps < 1:
+        raise ValueError("terminal_flow_steps must be positive")
+    else:
+        pass
+    step_options = (
+        {"terminal_flow_steps": terminal_flow_steps}
+        if terminal_flow_steps is not None
+        else {}
+    )
     codec = codec_class(
         codec_path,
         resolve_concrete_device(device, gpu_id),
         flow_dtype={"float32": torch.float32, "bfloat16": torch.bfloat16}[flow_dtype],
+        **step_options,
     )
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=False)
     return SimpleScheduler(
