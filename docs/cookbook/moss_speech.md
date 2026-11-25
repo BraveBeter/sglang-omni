@@ -68,3 +68,7 @@ Set `audio_vocoder.factory.terminal_flow_steps` to a positive integer such as `4
 ## Stream speech replies
 
 For text or spoken questions sent to `/v1/chat/completions`, set `"stream": true`, `"modalities": ["audio"]`, and `"audio": {"format": "pcm", "ref_audio": "..."}`. Read the base64 PCM from the SSE audio deltas. The codec must contain `flow/flow-chunk-25.pt`. Keep `flow_slots` unset to enable streaming. Short replies may fit in one final audio chunk.
+
+## Use the single-A800 streaming profile
+
+Use [`moss_speech_streaming_a800_mps.yaml`](../../examples/configs/moss_speech_streaming_a800_mps.yaml) with the launch command above to opt into native CUDA MPS. Place both snapshots under `./weights` as shown in the launch section. The profile runs three processes on one A800 80 GB with C16 at the AR stage and tunes the codec for streaming speech output. Its BF16 solver and reduced Euler step count can change the waveform.
