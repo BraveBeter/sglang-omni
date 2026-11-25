@@ -1,6 +1,6 @@
 # MOSS-Speech
 
-MOSS-Speech answers English and Chinese text or spoken questions through `/v1/chat/completions`. Select one output modality per request. Speech replies require a voice reference and return a complete 24 kHz waveform.
+MOSS-Speech answers English and Chinese text or spoken questions through `/v1/chat/completions`. Select one output modality per request. Speech replies require a voice reference and use 24 kHz audio.
 
 ## Launch
 
@@ -63,3 +63,8 @@ Set `audio_vocoder.factory.flow_slots: 2` to run two complete terminal Flow solv
 ## Configure terminal Flow steps
 
 Set `audio_vocoder.factory.terminal_flow_steps` to a positive integer such as `4` to select the number of Euler evaluations per terminal decode. Omitting the setting preserves the ten-step solver. Changing the step count changes the waveform.
+
+
+## Stream speech replies
+
+For text or spoken questions sent to `/v1/chat/completions`, set `"stream": true`, `"modalities": ["audio"]`, and `"audio": {"format": "pcm", "ref_audio": "..."}`. Read the base64 PCM from the SSE audio deltas. The codec must contain `flow/flow-chunk-25.pt`. Keep `flow_slots` unset to enable streaming. Short replies may fit in one final audio chunk.

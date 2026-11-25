@@ -422,11 +422,6 @@ class MossSpeechCodec:
         self, payload: StagePayload, *, tokenizer: PreTrainedTokenizerBase | None = None
     ) -> StagePayload:
         state = MossSpeechState.from_dict(payload.data)
-        usage = {
-            "prompt_tokens": state.prompt_token_count,
-            "completion_tokens": state.completion_token_count,
-            "total_tokens": state.prompt_token_count + state.completion_token_count,
-        }
         if state.output_modality == "text":
             assert tokenizer is not None
             return StagePayload(
@@ -439,7 +434,7 @@ class MossSpeechCodec:
                     .replace("<|empty|>", ".")
                     .replace("<|end_empty|>", ":"),
                     "finish_reason": state.finish_reason,
-                    "usage": usage,
+                    "usage": state.usage(),
                 },
             )
         elif not state.audio_codes:
@@ -457,7 +452,7 @@ class MossSpeechCodec:
                 "audio_data": waveform.tolist(),
                 "sample_rate": SAMPLE_RATE_HZ,
                 "finish_reason": state.finish_reason,
-                "usage": usage,
+                "usage": state.usage(),
             },
         )
 

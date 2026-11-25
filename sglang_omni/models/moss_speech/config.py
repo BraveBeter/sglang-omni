@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Three-stage, non-streaming MOSS-Speech configuration."""
+"""Three-stage MOSS-Speech configuration."""
 
 from typing import ClassVar, Literal
 
@@ -70,6 +70,8 @@ class MossSpeechPipelineConfig(PipelineConfig):
             gpu=0,
             gpu_memory_fraction=0.72,
             next="audio_vocoder",
+            stream_to=["audio_vocoder"],
+            stream_done_to_fn=f"{PACKAGE}.streaming.audio_stream_targets",
         ),
         MossSpeechFlowStage(
             name="audio_vocoder",
@@ -78,8 +80,21 @@ class MossSpeechPipelineConfig(PipelineConfig):
             gpu=0,
             gpu_memory_fraction=0.20,
             terminal=True,
+            can_accept_stream_before_payload=True,
         ),
     ]
+
+    def model_post_init(self, __context: object = None) -> None:
+        super().model_post_init(__context)
+        vocoder = self.stage_named("audio_vocoder")
+        factory = vocoder.factory
+        if not isinstance(factory, MossSpeechFlowArgs) or factory.flow_slots is None:
+            return
+        else:
+            ar = self.stage_named("ar_engine")
+            ar.stream_to = []
+            ar.stream_done_to_fn = None
+            vocoder.can_accept_stream_before_payload = False
 
 
 EntryClass = MossSpeechPipelineConfig

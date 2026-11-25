@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Factories for text preprocessing, native AR generation and offline audio."""
+"""Factories for preprocessing, native AR generation and audio decoding."""
 
 from collections.abc import Mapping
 from functools import partial
+from pathlib import Path
 from typing import Literal
 
 import torch
@@ -19,6 +20,7 @@ from sglang_omni.models.moss_speech.request_builders import (
     MossSpeechSGLangRequestData,
     preprocess_request,
 )
+from sglang_omni.models.moss_speech.streaming import MossSpeechStreamingVocoder
 from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
@@ -86,11 +88,11 @@ def create_audio_vocoder_executor(
     *,
     codec_path: str | None,
     flow_dtype: Literal["float32", "bfloat16"],
-    flow_slots: Literal[1, 2] = 1,
+    flow_slots: Literal[1, 2] | None = None,
     terminal_flow_steps: int | None = None,
     device: str | None = None,
     gpu_id: int | None = None,
-) -> SimpleScheduler[StagePayload, StagePayload]:
+) -> MossSpeechStreamingVocoder:
     if codec_path is None:
         raise ValueError("Set audio_vocoder.factory.codec_path")
     else:
@@ -112,8 +114,11 @@ def create_audio_vocoder_executor(
         **step_options,
     )
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=False)
-    return SimpleScheduler(
-        partial(codec.decode, tokenizer=tokenizer),
-        max_concurrency=flow_slots,
-        shutdown_callback=codec.close,
-    )
+    if flow_slots is not None:
+        return SimpleScheduler(
+            partial(codec.decode, tokenizer=tokenizer),
+            max_concurrency=flow_slots,
+            shutdown_callback=codec.close,
+        )
+    else:
+        return MossSpeechStreamingVocoder(codec, Path(codec_path), tokenizer)

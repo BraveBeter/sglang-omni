@@ -53,7 +53,7 @@ class SpeechParameters(BaseModel):
     max_new_tokens: int | None = Field(
         default=None, ge=1, lt=MAX_CONTEXT_TOKENS, strict=True
     )
-    stream: Literal[False] = False
+    stream: bool = Field(default=False, strict=True)
     min_p: Literal[0.0] = 0.0
     stop: list[str] = Field(default_factory=list, max_length=0)
     stop_token_ids: list[int] = Field(default_factory=list, max_length=0)
@@ -101,6 +101,13 @@ class MossSpeechState(DeclarativeStateBase):
     audio_codes: list[int] = wire(default_factory=list, codec="list")
     reference_audio: str = wire("", codec="str")
 
+    def usage(self) -> dict[str, int]:
+        return {
+            "prompt_tokens": self.prompt_token_count,
+            "completion_tokens": self.completion_token_count,
+            "total_tokens": self.prompt_token_count + self.completion_token_count,
+        }
+
 
 @dataclass
 class MossSpeechSGLangRequestData(SGLangARRequestData):
@@ -111,6 +118,10 @@ class MossSpeechSGLangRequestData(SGLangARRequestData):
     effective_seed: int = 0
     rng_generator: torch.Generator | None = None
     repetition_history: RepetitionHistory | None = None
+    stream_audio: bool = False
+    streamed_rows: int = 0
+    stream_audio_started: bool = False
+    stream_audio_ended: bool = False
 
 
 def preprocess_request(
@@ -135,6 +146,10 @@ def preprocess_request(
         parameters = SpeechParameters.model_validate(
             {name: value for name, value in request.params.items() if value is not None}
         )
+        if parameters.stream and output_modalities != ["audio"]:
+            raise ValueError("MOSS-Speech streaming requires audio output")
+        else:
+            pass
         voice_config = request.metadata.get(
             "audio_config", request.metadata.get("tts_params", {})
         )
@@ -286,6 +301,7 @@ def build_sglang_moss_request(payload: StagePayload) -> MossSpeechSGLangRequestD
         max_new_tokens=state.max_new_tokens,
         enforce_request_limits=True,
         stage_payload=payload,
+        stream_audio=payload.request.params.get("stream") is True,
     )
 
 

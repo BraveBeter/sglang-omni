@@ -105,7 +105,7 @@ def test_remaining_context_and_explicit_budget_boundary() -> None:
 @pytest.mark.parametrize(
     "options",
     [
-        {"stream": True},
+        {"stream": "true"},
         {"min_p": 0.2},
         {"stop": ["stop"]},
         {"top_k": -2},
@@ -135,7 +135,6 @@ def test_unsupported_sampling_fails_before_generation(
 @pytest.mark.parametrize(
     "body",
     [
-        {"input": "Hello", "stream": True},
         {"input": "Hello", "voice": "other"},
         {"input": "Hello", "instructions": "whisper"},
         {"input": "Hello", "max_new_tokens": 1},
@@ -434,6 +433,7 @@ def test_cli_binds_only_three_stages_and_vocoder_assets(tmp_path: Path) -> None:
         config = launch.call_args.args[0]
         assert isinstance(config, MossSpeechPipelineConfig)
         assert model_capabilities_log_summary(config)["reference_audio"] is True
+        assert model_capabilities_log_summary(config)["streaming_vocoder"] is True
         assert [stage.name for stage in config.stages] == [
             "preprocessing",
             "ar_engine",
@@ -441,6 +441,12 @@ def test_cli_binds_only_three_stages_and_vocoder_assets(tmp_path: Path) -> None:
         ]
         assert config.stage_named("audio_vocoder").factory.codec_path == "codec"
         assert config.stage_named("audio_vocoder").factory.flow_slots == 2
+        assert not config.stage_named("ar_engine").stream_to
+        assert config.stage_named("ar_engine").stream_done_to_fn is None
+        assert not config.stage_named("audio_vocoder").can_accept_stream_before_payload
+    default = MossSpeechPipelineConfig(model_path=str(tmp_path))
+    assert default.stage_named("ar_engine").stream_to == ["audio_vocoder"]
+    assert default.stage_named("audio_vocoder").can_accept_stream_before_payload
     with pytest.raises(ValueError, match="flow_slots"):
         MossSpeechPipelineConfig(
             stages=[
