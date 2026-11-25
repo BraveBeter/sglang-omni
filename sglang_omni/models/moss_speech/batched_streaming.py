@@ -2,6 +2,7 @@
 """Coalesce matching first hops already present in the vocoder inbox."""
 
 import logging
+import time
 from threading import get_ident
 from typing import NamedTuple
 
@@ -49,6 +50,22 @@ class FirstBatchStreamingVocoder(MossSpeechStreamingVocoder):
     first_batch_size: int
     first_graph: FirstFlowBatch | None = None
     failed_reference: bytes | None = None
+
+    @torch.inference_mode()
+    def warm_up_serving_thread(self) -> None:
+        if self.first_hop_flow_steps is not None and self.first_flow is None:
+            # note (Codex): Create the optional grid on the thread that will own its graphs.
+            started = time.perf_counter()
+            self.first_flow, self.first_reference_prefix = self.load_streaming_flow(
+                self.first_hop_flow_steps
+            )
+            logger.info(
+                "Loaded the %d-step single-row Flow in %.3f s",
+                self.first_hop_flow_steps,
+                time.perf_counter() - started,
+            )
+        else:
+            pass
 
     @torch.inference_mode()
     def group_mels(self, hops: list[ReadyHop]) -> tuple[torch.Tensor, ...] | None:

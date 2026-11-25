@@ -138,6 +138,7 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
         emit_first_closed_chunk: bool = False,
         cache_streaming_history: bool = False,
         page_streaming_history: bool = False,
+        first_hop_flow_steps: int | None = None,
     ) -> None:
         self.codec: MossSpeechCodec = codec
         self.codec_path: Path = codec_path
@@ -168,6 +169,18 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
             self.page_streaming_history = page_streaming_history
         self.prefill_streaming_reference: bool = prefill_streaming_reference
         self.emit_first_closed_chunk = emit_first_closed_chunk
+        if first_hop_flow_steps is not None and (
+            first_hop_flow_steps != 2
+            or streaming_flow_steps != 3
+            or not prefill_streaming_reference
+        ):
+            raise ValueError(
+                "The two-step first hop requires three-step streaming reference prefill"
+            )
+        else:
+            self.first_hop_flow_steps = first_hop_flow_steps
+        self.first_flow: StreamingFlow | None = None
+        self.first_reference_prefix: StreamingReferencePrefill | None = None
         self.flow: StreamingFlow | None = None
         self.reference_prefix: StreamingReferencePrefill | None = None
         self.fade_window: torch.Tensor = torch.hamming_window(
@@ -212,71 +225,9 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
         else:
             pass
         if self.flow is None:
-            flow_directory = self.codec_path / "flow"
-            checkpoint_path = flow_directory / f"flow-chunk-{STREAM_CHUNK_CODES}.pt"
-            with codec_rng(), (flow_directory / "config.yaml").open() as config:
-                flow = load_hyperpyyaml(config, {"chunk_size": STREAM_CHUNK_CODES})[
-                    "flow"
-                ]
-                weights = torch.load(
-                    checkpoint_path, map_location="cpu", weights_only=True
-                )
-                weights.pop("epoch", None)
-                weights.pop("step", None)
-                flow.load_state_dict(weights)
-                if self.flow_dtype is torch.bfloat16:
-                    flow.bfloat16()
-                else:
-                    pass
-                if (
-                    self.flow_dtype is torch.bfloat16
-                    or self.streaming_flow_steps is not None
-                ):
-                    flow.decoder = FlowEulerDecoder(
-                        flow.decoder, streaming_flow_steps=self.streaming_flow_steps
-                    ).eval()
-                else:
-                    pass
-                install_flow_attention_broadcast(flow.decoder)
-                self.flow = flow.to(self.codec.device).eval()
-                if (
-                    self.flow_dtype is torch.bfloat16
-                    and self.codec.device.type == "cuda"
-                ):
-                    install_streaming_estimator_graphs(
-                        flow.decoder.decoder, self.codec.device
-                    )
-                else:
-                    pass
-                if self.prefill_streaming_reference and isinstance(
-                    flow.decoder.decoder.forward_estimator, StreamingEstimatorGraphs
-                ):
-                    decoder = flow.decoder.decoder
-                    assert self.streaming_flow_steps is not None
-                    if self.page_streaming_history:
-                        prefill = PagedHistoryPrefill(
-                            decoder, self.streaming_flow_steps
-                        )
-                    elif self.cache_streaming_history:
-                        prefill = PrivateHistoryPrefill(decoder)
-                    else:
-                        prefill = StreamingReferencePrefill(decoder)
-                    self.reference_prefix = prefill
-                    native = StreamingReferenceGraphs(
-                        decoder.forward_estimator, prefill, self.streaming_flow_steps
-                    )
-                    if isinstance(prefill, PagedHistoryPrefill):
-                        decoder.forward_estimator = StreamingPagedHistoryGraphs(
-                            native, prefill
-                        )
-                    elif isinstance(prefill, PrivateHistoryPrefill):
-                        decoder.forward_estimator = StreamingPrivateHistoryGraphs(
-                            native, prefill
-                        )
-                    else:
-                        decoder.forward_estimator = native
-                else:
-                    pass
+            self.flow, self.reference_prefix = self.load_streaming_flow(
+                self.streaming_flow_steps
+            )
         else:
             pass
 
@@ -284,6 +235,66 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
             state.reference_key = reference_prefix_key(state.voice)
         else:
             pass
+
+    def load_streaming_flow(
+        self, steps: int | None
+    ) -> tuple[StreamingFlow, StreamingReferencePrefill | None]:
+        prefix = None
+        flow_directory = self.codec_path / "flow"
+        checkpoint_path = flow_directory / f"flow-chunk-{STREAM_CHUNK_CODES}.pt"
+        with codec_rng(), (flow_directory / "config.yaml").open() as config:
+            flow = load_hyperpyyaml(config, {"chunk_size": STREAM_CHUNK_CODES})["flow"]
+            weights = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+            weights.pop("epoch", None)
+            weights.pop("step", None)
+            flow.load_state_dict(weights)
+            if self.flow_dtype is torch.bfloat16:
+                flow.bfloat16()
+            else:
+                pass
+            if self.flow_dtype is torch.bfloat16 or steps is not None:
+                flow.decoder = FlowEulerDecoder(
+                    flow.decoder, streaming_flow_steps=steps
+                ).eval()
+            else:
+                pass
+            install_flow_attention_broadcast(flow.decoder)
+            flow = flow.to(self.codec.device).eval()
+            if self.flow_dtype is torch.bfloat16 and self.codec.device.type == "cuda":
+                install_streaming_estimator_graphs(
+                    flow.decoder.decoder, self.codec.device
+                )
+            else:
+                pass
+            if self.prefill_streaming_reference and isinstance(
+                flow.decoder.decoder.forward_estimator, StreamingEstimatorGraphs
+            ):
+                decoder = flow.decoder.decoder
+                assert steps is not None
+                if steps == self.streaming_flow_steps and self.page_streaming_history:
+                    prefix = PagedHistoryPrefill(decoder, steps)
+                elif (
+                    steps == self.streaming_flow_steps and self.cache_streaming_history
+                ):
+                    prefix = PrivateHistoryPrefill(decoder)
+                else:
+                    prefix = StreamingReferencePrefill(decoder)
+                native = StreamingReferenceGraphs(
+                    decoder.forward_estimator, prefix, steps
+                )
+                if isinstance(prefix, PagedHistoryPrefill):
+                    decoder.forward_estimator = StreamingPagedHistoryGraphs(
+                        native, prefix
+                    )
+                elif isinstance(prefix, PrivateHistoryPrefill):
+                    decoder.forward_estimator = StreamingPrivateHistoryGraphs(
+                        native, prefix
+                    )
+                else:
+                    decoder.forward_estimator = native
+            else:
+                pass
+        return flow, prefix
 
     def validate_chunk(
         self, request_id: str, state: MossSpeechStreamState, codes: torch.Tensor
@@ -336,12 +347,27 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
         device = self.codec.device
         assert flow is not None and voice is not None
         prompt_codes = voice["prompt_token"].shape[1]
+        prefix = self.reference_prefix
+        # note (Codex): A prepared batch collects conditions for its own three-step graph.
+        if (
+            conditions is None
+            and self.first_hop_flow_steps is not None
+            and state.decoded_codes == 0
+            and not is_final
+        ):
+            if self.first_flow is None:
+                self.first_flow, self.first_reference_prefix = self.load_streaming_flow(
+                    self.first_hop_flow_steps
+                )
+            else:
+                pass
+            flow, prefix = self.first_flow, self.first_reference_prefix
+        else:
+            pass
         audio_codes = torch.tensor([state.codes[:available_codes]], device=device)
         with (
-            self.reference_prefix.for_voice(
-                flow, voice, state.reference_key, STREAM_CHUNK_CODES
-            )
-            if self.reference_prefix is not None
+            prefix.for_voice(flow, voice, state.reference_key, STREAM_CHUNK_CODES)
+            if prefix is not None
             else nullcontext()
         ):
             if conditions is None:
@@ -407,16 +433,16 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
                 return None
             else:
                 pass
-        private_prefill = (
-            self.reference_prefix
-            if isinstance(self.reference_prefix, PrivateHistoryPrefill)
-            else None
-        )
-        transaction = (
-            HistoryTransaction(state.private_history, is_final)
-            if private_prefill is not None
-            else None
-        )
+        history = self.reference_prefix
+        transaction = None
+        if (
+            isinstance(history, PrivateHistoryPrefill)
+            and prepared_mel is None
+            and (state.decoded_codes or is_final or self.first_hop_flow_steps is None)
+        ):
+            transaction = HistoryTransaction(state.private_history, is_final)
+        else:
+            pass
         devices = [device] if state.cuda_rng is not None else []
         with (
             torch.random.fork_rng(devices=devices),
@@ -435,8 +461,9 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
                 pass
             if prepared_mel is None:
                 with (
-                    private_prefill.request_scope(transaction)
-                    if private_prefill is not None and transaction is not None
+                    history.request_scope(transaction)
+                    if isinstance(history, PrivateHistoryPrefill)
+                    and transaction is not None
                     else nullcontext()
                 ):
                     mel = self.stream_mel(state, available_codes, is_final)
@@ -507,6 +534,8 @@ class MossSpeechStreamingVocoder(StreamingVocoderBase[MossSpeechStreamState, Non
         return {"finish_reason": result.finish_reason, "usage": result.usage()}
 
     def on_serving_stop(self) -> None:
+        self.first_flow = None
+        self.first_reference_prefix = None
         self.reference_prefix = None
         self.flow = None
         self.codec.close()

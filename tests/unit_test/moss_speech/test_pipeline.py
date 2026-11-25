@@ -444,12 +444,31 @@ def test_cli_binds_only_three_stages_and_vocoder_assets(tmp_path: Path) -> None:
         assert not config.stage_named("ar_engine").stream_to
         assert config.stage_named("ar_engine").stream_done_to_fn is None
         assert not config.stage_named("audio_vocoder").can_accept_stream_before_payload
+    with patch("sglang_omni.cli.serve.launch_server") as launch:
+        result = CliRunner().invoke(
+            app,
+            [
+                "serve",
+                "--model-path",
+                str(tmp_path),
+                "--audio_vocoder.factory.first_hop_flow_steps",
+                "2",
+            ],
+        )
+        assert result.exit_code == 0, result.output + repr(result.exception)
+        assert (
+            launch.call_args.args[0]
+            .stage_named("audio_vocoder")
+            .factory.first_hop_flow_steps
+            == 2
+        )
     default = MossSpeechPipelineConfig(model_path=str(tmp_path))
     assert default.stage_named("ar_engine").stream_to == ["audio_vocoder"]
     assert default.stage_named("audio_vocoder").can_accept_stream_before_payload
     for streaming_setting in (
         {"streaming_flow_steps": 4},
         {"emit_first_closed_chunk": True},
+        {"first_hop_flow_steps": 2},
         {"streaming_chunks_per_decode": 3},
     ):
         config_data = default.model_dump()
