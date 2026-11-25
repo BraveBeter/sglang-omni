@@ -38,6 +38,7 @@ class MossSpeechFlowArgs(MossSpeechVocoderArgs):
     terminal_flow_steps: int | None = Field(default=None, gt=0)
     streaming_chunks_per_decode: int = Field(default=1, ge=1)
     emit_first_closed_chunk: bool = False
+    cache_streaming_history: bool = False
 
 
 class MossSpeechFlowStage(StageConfig):
