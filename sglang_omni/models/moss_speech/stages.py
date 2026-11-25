@@ -9,6 +9,7 @@ from typing import Literal
 import torch
 from transformers import AutoTokenizer
 
+from sglang_omni.models.moss_speech.batched_streaming import FirstBatchStreamingVocoder
 from sglang_omni.models.moss_speech.codec import MossSpeechCodec
 from sglang_omni.models.moss_speech.concurrent_codec import MossSpeechConcurrentCodec
 from sglang_omni.models.moss_speech.engine_builder import MossSpeechEngineBuilder
@@ -96,6 +97,7 @@ def create_audio_vocoder_executor(
     emit_first_closed_chunk: bool = False,
     cache_streaming_history: bool = False,
     page_streaming_history: bool = False,
+    first_flow_batch_size: Literal[1, 2, 4] = 1,
     device: str | None = None,
     gpu_id: int | None = None,
 ) -> MossSpeechStreamingVocoder | SimpleScheduler[StagePayload, StagePayload]:
@@ -105,6 +107,21 @@ def create_audio_vocoder_executor(
         pass
     if page_streaming_history and flow_slots is not None:
         raise ValueError("Paged streaming history requires a streaming Flow worker")
+    else:
+        pass
+    if (
+        first_flow_batch_size not in (1, 2, 4)
+        or first_flow_batch_size > 1
+        and (
+            not prefill_streaming_reference
+            or streaming_flow_steps != 3
+            or not emit_first_closed_chunk
+            or flow_slots is not None
+        )
+    ):
+        raise ValueError(
+            "First-hop Flow batches require the three-step streaming reference graph"
+        )
     else:
         pass
     codec_class = MossSpeechConcurrentCodec if flow_slots == 2 else MossSpeechCodec
@@ -131,7 +148,12 @@ def create_audio_vocoder_executor(
             shutdown_callback=codec.close,
         )
     else:
-        return MossSpeechStreamingVocoder(
+        cls = (
+            FirstBatchStreamingVocoder
+            if first_flow_batch_size > 1
+            else MossSpeechStreamingVocoder
+        )
+        worker = cls(
             codec,
             Path(codec_path),
             tokenizer,
@@ -143,3 +165,8 @@ def create_audio_vocoder_executor(
             cache_streaming_history=cache_streaming_history,
             page_streaming_history=page_streaming_history,
         )
+        if isinstance(worker, FirstBatchStreamingVocoder):
+            worker.first_batch_size = first_flow_batch_size
+        else:
+            pass
+        return worker
