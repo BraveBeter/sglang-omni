@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+# Single A800 80 GB, C16, terminal speech output under native CUDA MPS.
+config_cls: MossSpeechPipelineConfig
+model_path: ./weights/MOSS-Speech
+stages:
+  preprocessing:
+    factory:
+      codec_path: ./weights/MOSS-Speech-Codec
+  ar_engine:
+    engine:
+      max_running_requests: 16
+      max_queued_requests: 64
+      max_total_tokens: 40962
+      attention_backend: flashinfer
+      disable_cuda_graph: false
+    factory:
+      cache_repetition_history: true
+  audio_vocoder:
+    factory:
+      codec_path: ./weights/MOSS-Speech-Codec
+      flow_slots: 2
+      flow_dtype: bfloat16
+      terminal_flow_steps: 3
+      terminal_bias_min_width: 2048
+    env:
+      CUDA_MPS_ACTIVE_THREAD_PERCENTAGE: '100'
+mps: 'on'
