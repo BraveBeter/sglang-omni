@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Each committed Euler step retains its own exact closed K/V and convolution tails."""
 from contextvars import ContextVar
+from threading import get_ident
+from unittest.mock import Mock, patch
+from weakref import ref
 
 import torch
 from torch.nn import functional as F
@@ -9,8 +12,10 @@ from sglang_omni.models.moss_speech.flow_history_pages import (
     PagedHistoryPrefill,
     PageLayout,
     PageStep,
+    StreamingPagedHistoryGraphs,
 )
-from sglang_omni.models.moss_speech.flow_prefix import ReferencePrefix
+from sglang_omni.models.moss_speech.flow_prefix import PrefixSolve, ReferencePrefix
+from sglang_omni.models.moss_speech.flow_prefix_graph import StreamingReferenceGraphs
 
 
 @torch.inference_mode()
@@ -58,3 +63,59 @@ def test_page_io_reads_prefix_and_writes_only_closed_frames():
         assert torch.equal(
             page.convolution_tails[0], channels[..., start + 98 : start + 100]
         )
+
+
+@torch.inference_mode()
+def test_changed_voice_releases_old_graphs_and_retries_its_bank():
+    native = StreamingReferenceGraphs.__new__(StreamingReferenceGraphs)
+    native.steps = 1
+    native.owner_thread = get_ident()
+    native.owner_stream = Mock()
+    native.reference = native.step_views = native.step_buffer = native.step_bank = None
+    native.graphs = {}
+    native.estimator = Mock(return_value=torch.zeros(1))
+    prior, changed = (
+        ReferencePrefix(
+            reference_key=bytes([frames]),
+            mel_frames=frames,
+            key_values=[torch.ones(2, frames, 1)],
+            convolution_tails=[torch.zeros(2, 1, 2)],
+        )
+        for frames in (100, 200)
+    )
+    prefill = Mock()
+    prefill.layout = PageLayout(prior, 1, 100)
+    prefill.current = ContextVar("voice_transition")
+    prefill.transaction = ContextVar("request", default=None)
+    native.prefill = prefill
+    paged = StreamingPagedHistoryGraphs(native, prefill)
+    with patch.object(torch.cuda, "mem_get_info", return_value=(2**40, 2**41)):
+        native.bind(prior)
+    native.pool = object()
+    paged.reference_buffer = native.step_buffer
+    old_buffer = ref(native.step_buffer)
+    paged.runners[(4, 3)] = Mock()
+    old_runner = ref(paged.runners[(4, 3)])
+    prefill.current.set(PrefixSolve(prefix=changed, prefill=True))
+    with patch.object(torch.cuda, "current_stream", return_value=native.owner_stream):
+        paged(*(torch.zeros(1),) * 6, streaming=True)
+    assert old_runner() is None
+    prefill.current.set(PrefixSolve(prefix=changed, prefill=False))
+    with (
+        patch.object(torch.cuda, "current_stream", return_value=native.owner_stream),
+        patch.object(torch.cuda, "graph_pool_handle", return_value=object()),
+        patch.object(torch.cuda, "mem_get_info", return_value=(0, 2**41)),
+    ):
+        paged(*(torch.zeros(1),) * 6, streaming=True)
+    assert old_buffer() is None and not paged.runners
+    assert native.step_bank is None and native.reference is changed
+    with (
+        patch.object(torch.cuda, "mem_get_info", return_value=(2**40, 2**41)) as budget,
+        patch("sglang_omni.models.moss_speech.flow_history_pages.PagedEstimatorGraphs"),
+    ):
+        assert paged.stage(changed, 0, 0, first_step=False) is None
+        budget.assert_not_called()
+        assert paged.stage(changed, 0, 0, first_step=True) is not None
+        budget.assert_called_once()
+    assert native.step_bank is not None and native.step_views.mel_frames == 200
+    assert torch.equal(native.step_bank[0, :400], torch.ones(400))

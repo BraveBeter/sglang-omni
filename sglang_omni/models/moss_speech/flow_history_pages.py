@@ -224,10 +224,32 @@ class StreamingPagedHistoryGraphs:
         self.views: list[ReferencePrefix] = []
         self.runners: dict[tuple[int, int], PagedEstimatorGraphs] = {}
 
+    def prepare_reference(self, shared: ReferencePrefix) -> None:
+        native = self.native
+        if self.reference_buffer is not None and (
+            native.step_buffer is not self.reference_buffer
+            or native.step_views is None
+            or native.step_views.mel_frames != shared.mel_frames
+        ):
+            native.owner_stream.synchronize()
+            self.runners.clear()
+            self.reference_buffer = None
+        else:
+            pass
+        if native.reference is shared and native.step_bank is None:
+            # note (Codex): A previous hop could not reserve this voice's bank.
+            native.reference = None
+        else:
+            pass
+
     def stage(
-        self, shared: ReferencePrefix, previous: int, adding: int
+        self, shared: ReferencePrefix, previous: int, adding: int, *, first_step: bool
     ) -> PagedEstimatorGraphs | None:
         native = self.native
+        if first_step:
+            self.prepare_reference(shared)
+        else:
+            pass
         if native.reference is not shared:
             native.bind(shared)
         else:
@@ -239,11 +261,6 @@ class StreamingPagedHistoryGraphs:
         ):
             return None
         elif native.step_buffer is not self.reference_buffer:
-            if self.runners:
-                native.owner_stream.synchronize()
-            else:
-                pass
-            self.runners.clear()
             self.reference_buffer = native.step_buffer
         else:
             pass
@@ -294,6 +311,16 @@ class StreamingPagedHistoryGraphs:
             or tx is None
             or not (tx.read_history or tx.keep_frames)
         ):
+            if (
+                call is not None
+                and call.projection_index == 0
+                and (native.reference is not call.prefix or native.step_bank is None)
+                and get_ident() == native.owner_thread
+                and torch.cuda.current_stream(x.device) == native.owner_stream
+            ):
+                self.prepare_reference(call.prefix)
+            else:
+                pass
             return native(*inputs, streaming=streaming)
         else:
             shared = self.prefill.cached
@@ -311,7 +338,9 @@ class StreamingPagedHistoryGraphs:
             and torch.cuda.current_stream(x.device) == native.owner_stream
         ):
             try:
-                runner = self.stage(shared, len(previous), len(append))
+                runner = self.stage(
+                    shared, len(previous), len(append), first_step=step == 0
+                )
             except torch.OutOfMemoryError:
                 pass
         else:
