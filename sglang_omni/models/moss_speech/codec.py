@@ -28,7 +28,7 @@ from transformers import (
 )
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
-from sglang_omni.models.moss_speech.flow_precision import BF16FlowDecoder
+from sglang_omni.models.moss_speech.flow_precision import FlowEulerDecoder
 from sglang_omni.models.moss_speech.request_builders import (
     MossSpeechState,
     RequestValidationError,
@@ -158,7 +158,7 @@ def prepare_flow_attention_mask(
 
 
 def install_flow_attention_broadcast(decoder: torch.nn.Module) -> None:
-    if isinstance(decoder, BF16FlowDecoder):
+    if isinstance(decoder, FlowEulerDecoder):
         decoder = decoder.decoder
     else:
         pass
@@ -195,6 +195,7 @@ class MossSpeechCodec:
         load_decoder: bool = True,
         install_attention_broadcast: bool = True,
         flow_dtype: torch.dtype | None = None,
+        terminal_flow_steps: int | None = None,
     ) -> None:
         self.device: torch.device = device
         self.reference_cache: OrderedDict[tuple[int, bytes], VoiceConditioning] = (
@@ -222,8 +223,13 @@ class MossSpeechCodec:
             )
             if self.decoder is not None and flow_dtype is torch.bfloat16:
                 self.decoder.flow.bfloat16()
-                self.decoder.flow.decoder = BF16FlowDecoder(
-                    self.decoder.flow.decoder
+            else:
+                pass
+            if self.decoder is not None and (
+                flow_dtype is torch.bfloat16 or terminal_flow_steps is not None
+            ):
+                self.decoder.flow.decoder = FlowEulerDecoder(
+                    self.decoder.flow.decoder, terminal_flow_steps=terminal_flow_steps
                 ).eval()
             else:
                 pass

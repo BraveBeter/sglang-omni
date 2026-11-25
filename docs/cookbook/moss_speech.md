@@ -59,3 +59,7 @@ for source, content in [("text", "What is the capital of France?"), ("speech", s
 ## Run two terminal Flow slots
 
 Set `audio_vocoder.factory.flow_slots: 2` to run two complete terminal Flow solves on separate CUDA streams. Each slot loads its own Flow weights and keeps its own caches. A single owner runs reference conditioning and HiFT on the default CUDA stream. The default remains one slot, and AR request capacity is configured separately.
+
+## Configure terminal Flow steps
+
+Set `audio_vocoder.factory.terminal_flow_steps` to a positive integer such as `4` to select the number of Euler evaluations per terminal decode. Omitting the setting preserves the ten-step solver. Changing the step count changes the waveform.

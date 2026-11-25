@@ -41,6 +41,7 @@ class MossSpeechConcurrentCodec(MossSpeechCodec):
         device: torch.device,
         *,
         flow_dtype: torch.dtype | None = None,
+        terminal_flow_steps: int | None = None,
     ) -> None:
         if device.type != "cuda":
             raise ValueError("Two Flow slots require a CUDA device")
@@ -50,6 +51,7 @@ class MossSpeechConcurrentCodec(MossSpeechCodec):
             codec_path,
             device,
             flow_dtype=flow_dtype,
+            terminal_flow_steps=terminal_flow_steps,
             install_attention_broadcast=False,
         )
         assert self.decoder is not None
