@@ -36,6 +36,7 @@ class MossSpeechFlowArgs(MossSpeechVocoderArgs):
     prefill_streaming_reference: bool = False
     flow_slots: Literal[1, 2] | None = None
     terminal_flow_steps: int | None = Field(default=None, gt=0)
+    emit_first_closed_chunk: bool = False
 
 
 class MossSpeechFlowStage(StageConfig):
@@ -95,6 +96,7 @@ class MossSpeechPipelineConfig(PipelineConfig):
         elif (
             factory.streaming_flow_steps is not None
             or factory.prefill_streaming_reference
+            or factory.emit_first_closed_chunk
         ):
             raise ValueError(
                 "flow_slots selects terminal Flow and cannot use streaming Flow settings"

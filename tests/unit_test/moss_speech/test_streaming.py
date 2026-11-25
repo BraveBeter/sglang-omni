@@ -21,6 +21,7 @@ from sglang_omni.models.moss_speech.flow_precision import (
 )
 from sglang_omni.models.moss_speech.fsm import AUDIO_PAD, EOSP, MODALITY_PAD, SOSP
 from sglang_omni.models.moss_speech.request_builders import (
+    MossSpeechState,
     RequestValidationError,
     build_result,
     build_sglang_moss_request,
@@ -325,3 +326,103 @@ def test_codec_flushes_each_sample_once_after_stream_done(
         assert scheduler.outbox.empty()
         assert not scheduler.stream_states
     assert torch.equal(torch.get_rng_state(), initial_rng)
+
+
+def first_chunk_vocoder(prompt_codes: int, enabled: bool) -> MossSpeechStreamingVocoder:
+    codec = make_codec()
+    codec.decoder.hift = TestHiFT()
+    codec.encode_reference = Mock(
+        return_value={
+            "prompt_token": torch.zeros((1, prompt_codes), dtype=torch.int32),
+            "prompt_feat": torch.zeros(1, prompt_codes * 4, 80),
+            "embedding": torch.zeros(1, 192),
+        }
+    )
+    scheduler = MossSpeechStreamingVocoder(
+        codec, Path("unused"), TextTokenizer(), emit_first_closed_chunk=enabled
+    )
+    scheduler.flow = TestFlow()
+    return scheduler
+
+
+def deliver_codes(
+    scheduler: MossSpeechStreamingVocoder, request_id: str, start: int, end: int
+) -> None:
+    scheduler.handle_stream_chunk(
+        request_id,
+        StreamItem(
+            start,
+            torch.arange(start, end),
+            "ar_engine",
+            {"stream": True, "reference_audio": "test", "effective_seed": 17},
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("enabled", "prompt_codes", "deliveries", "expected"),
+    [
+        (False, 342, [10, 11, 35, 36, 48], [(36, 59520)]),
+        (True, 342, [10, 11, 35, 36, 48], [(11, 11520), (36, 48000)]),
+        (True, 350, [3, 27, 28], [(28, 44160)]),
+        (True, 23, [5, 29, 30], [(30, 48000)]),
+        (True, 22, [5, 6], [(6, 1920)]),
+        (True, 342, [10], []),
+        (True, 342, [36], [(36, 59520)]),
+    ],
+)
+def test_first_closed_chunk_through_final(
+    enabled: bool,
+    prompt_codes: int,
+    deliveries: list[int],
+    expected: list[tuple[int, int]],
+) -> None:
+    scheduler = first_chunk_vocoder(prompt_codes, enabled)
+    emitted = []
+    start = 0
+    for end in deliveries:
+        deliver_codes(scheduler, "test", start, end)
+        while not scheduler.outbox.empty():
+            message = scheduler.outbox.get_nowait()
+            emitted.append((end, message.data["audio_waveform_shape"][0]))
+        start = end
+    assert emitted == expected
+    total = deliveries[-1]
+    terminal = MossSpeechState(audio_codes=list(range(total)), finish_reason="stop")
+    scheduler.handle_stream_done("test")
+    scheduler.handle_streaming_new_request(
+        "test",
+        StagePayload(
+            "test", OmniRequest(inputs="", params={"stream": True}), terminal.to_dict()
+        ),
+    )
+    final, result = scheduler.outbox.get_nowait(), scheduler.outbox.get_nowait()
+    assert (final.type, result.type) == ("stream", "result")
+    assert result.data.data["finish_reason"] == "stop"
+    assert (
+        sum(samples for _, samples in emitted) + final.data["audio_waveform_shape"][0]
+        == total * 1920
+    )
+    assert scheduler.outbox.empty() and not scheduler.stream_states
+
+
+def test_cancel_after_first_closed_chunk_preserves_other_stream() -> None:
+    scheduler = first_chunk_vocoder(342, True)
+    for request in ("canceled", "kept"):
+        deliver_codes(scheduler, request, 0, 11)
+    canceled, kept = scheduler.outbox.get_nowait(), scheduler.outbox.get_nowait()
+    assert canceled.data["audio_waveform"] == kept.data["audio_waveform"]
+    scheduler.abort("canceled")
+    deliver_codes(scheduler, "canceled", 11, 36)
+    deliver_codes(scheduler, "kept", 11, 36)
+    kept = scheduler.outbox.get_nowait()
+    assert kept.request_id == "kept" and scheduler.outbox.empty()
+    isolated = first_chunk_vocoder(342, True)
+    deliver_codes(isolated, "alone", 0, 11)
+    isolated.outbox.get_nowait()
+    deliver_codes(isolated, "alone", 11, 36)
+    assert (
+        kept.data["audio_waveform"]
+        == isolated.outbox.get_nowait().data["audio_waveform"]
+    )
+    assert "canceled" not in scheduler.stream_states
